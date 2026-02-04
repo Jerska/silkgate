@@ -1,13 +1,18 @@
 #!/bin/bash
 # Session management for silkgate
 
-# Resolve real user's home when running under sudo
+# Resolve real user when running under sudo
 if [[ -n "${SUDO_USER:-}" ]]; then
-    USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    REAL_USER="$SUDO_USER"
+    REAL_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    REAL_USER_GID=$(id -g "$SUDO_USER")
 else
-    USER_HOME="$HOME"
+    REAL_USER=$(id -un)
+    REAL_USER_HOME="$HOME"
+    REAL_USER_GID=$(id -g)
 fi
-SESSIONS_DIR="$USER_HOME/.silkgate/sessions"
+SILKGATE_DIR="$REAL_USER_HOME/.silkgate"
+SESSIONS_DIR="$SILKGATE_DIR/sessions"
 
 usage() {
     echo "Usage: $0 <command> [args]"
@@ -43,6 +48,9 @@ cmd_create() {
   "created_at": "$now"
 }
 EOF
+
+    # Ensure directories are owned by the original user, not root
+    chown -R "$REAL_USER:$REAL_USER_GID" "$SILKGATE_DIR"
 
     echo "$id"
 }

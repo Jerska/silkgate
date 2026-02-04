@@ -62,6 +62,9 @@ cleanup() {
     # Remove namespace DNS config
     rm -rf "/etc/netns/$NAMESPACE" 2>/dev/null || true
 
+    # Fix ownership of any files created during the session
+    chown -R "$REAL_USER:$REAL_USER_GID" "$SESSION_DIR" 2>/dev/null || true
+
     log_info "Cleanup complete (session $SESSION_ID kept for logs)"
 }
 
@@ -128,14 +131,23 @@ setup_dns() {
 install_ca_cert() {
     log_info "Setting up mitmproxy CA certificate"
 
+    # Store mitmproxy certs in user's .silkgate directory
+    local mitmproxy_home="$SILKGATE_DIR/mitmproxy"
+
     # Generate certs if they don't exist
-    if [[ ! -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]]; then
+    if [[ ! -f "$mitmproxy_home/mitmproxy-ca-cert.pem" ]]; then
         log_info "Generating mitmproxy CA certificate..."
-        # Run mitmproxy briefly to generate certs
-        timeout 2 mitmdump || true
+        mkdir -p "$mitmproxy_home"
+        timeout 5 mitmdump --set confdir="$mitmproxy_home" 2>/dev/null || true
+
+        if [[ ! -f "$mitmproxy_home/mitmproxy-ca-cert.pem" ]]; then
+            log_error "Failed to generate mitmproxy CA certificate"
+            exit 1
+        fi
+        chown -R "$REAL_USER:$REAL_USER_GID" "$mitmproxy_home"
     fi
 
-    MITMPROXY_CA="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
+    MITMPROXY_CA="$mitmproxy_home/mitmproxy-ca-cert.pem"
     SANDBOX_CA_DIR="$SESSION_DIR/ca-certs"
     SANDBOX_CA_BUNDLE="$SANDBOX_CA_DIR/ca-certificates.crt"
 
@@ -260,6 +272,20 @@ main() {
         exec sudo --preserve-env=PATH "$0" "$@"
         exit 1  # Only reached if exec fails
     fi
+
+    # Determine user data directory (owned by original user, not root)
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        REAL_USER="$SUDO_USER"
+        REAL_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        REAL_USER_GID=$(id -g "$SUDO_USER")
+    else
+        REAL_USER=$(id -un)
+        REAL_USER_HOME="$HOME"
+        REAL_USER_GID=$(id -g)
+    fi
+    SILKGATE_DIR="$REAL_USER_HOME/.silkgate"
+    mkdir -p "$SILKGATE_DIR"
+    chown "$REAL_USER:$REAL_USER_GID" "$SILKGATE_DIR"
 
     # Validate policy file
     if [[ ! -f "$POLICY_FILE" ]]; then
