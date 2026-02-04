@@ -138,7 +138,7 @@ install_ca_cert() {
     if [[ ! -f "$mitmproxy_home/mitmproxy-ca-cert.pem" ]]; then
         log_info "Generating mitmproxy CA certificate..."
         mkdir -p "$mitmproxy_home"
-        timeout 5 mitmdump --set confdir="$mitmproxy_home" 2>/dev/null || true
+        timeout 5 mitmdump --set confdir="$mitmproxy_home" || true
 
         if [[ ! -f "$mitmproxy_home/mitmproxy-ca-cert.pem" ]]; then
             log_error "Failed to generate mitmproxy CA certificate"
