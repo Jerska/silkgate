@@ -26,7 +26,6 @@ cmd_create() {
     id=$(generate_id)
     local session_dir="$SESSIONS_DIR/$id"
 
-    mkdir -p "$session_dir/logs"
     mkdir -p "$session_dir/ca-certs"
 
     local now

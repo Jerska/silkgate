@@ -11,87 +11,19 @@ from dataclasses import dataclass, field
 from mitmproxy import http, tls, ctx
 
 
-# Blocked request logging with rotation
+# Request logging
 import os
-SESSION_DIR = Path(os.environ.get("SANDBOX_SESSION_DIR", "/tmp/sandbox-logs"))
-LOG_DIR = SESSION_DIR / "logs"
-LOG_MAX_LINES = 10000
+SESSION_DIR = Path(os.environ.get("SANDBOX_SESSION_DIR", "/tmp/sandbox-sessions"))
+LOG_FILE = SESSION_DIR / "requests.log"
 
 
-class BlockedLogger:
-    """Simple rotating logger for blocked requests."""
-
-    def __init__(self):
-        self.current_file = 1
-        self.line_count = 0
-        LOG_DIR.mkdir(exist_ok=True)
-        self._init_state()
-
-    def _init_state(self):
-        """Determine current file and line count on startup."""
-        file1 = LOG_DIR / "blocked-1.log"
-        file2 = LOG_DIR / "blocked-2.log"
-
-        # Start fresh or continue from existing state
-        if file2.exists() and file1.exists():
-            # Use the more recently modified file
-            if file2.stat().st_mtime > file1.stat().st_mtime:
-                self.current_file = 2
-                self.line_count = self._count_lines(file2)
-            else:
-                self.current_file = 1
-                self.line_count = self._count_lines(file1)
-        elif file2.exists():
-            self.current_file = 2
-            self.line_count = self._count_lines(file2)
-        elif file1.exists():
-            self.current_file = 1
-            self.line_count = self._count_lines(file1)
-        else:
-            self.current_file = 1
-            self.line_count = 0
-
-    def _count_lines(self, path: Path) -> int:
-        """Count lines in a file."""
-        try:
-            return sum(1 for _ in path.open())
-        except:
-            return 0
-
-    def _rotate_if_needed(self):
-        """Switch to other file if current is full."""
-        if self.line_count >= LOG_MAX_LINES:
-            # Switch to other file
-            self.current_file = 2 if self.current_file == 1 else 1
-            self.line_count = 0
-            # Wipe the file we're switching to
-            log_path = LOG_DIR / f"blocked-{self.current_file}.log"
-            log_path.write_text("")
-
-    def log(self, method: str, host: str, path: str, reason: str):
-        """Log a blocked request."""
-        self._rotate_if_needed()
-
-        log_path = LOG_DIR / f"blocked-{self.current_file}.log"
-        timestamp = datetime.now().isoformat(timespec="seconds")
-        line = f"{timestamp} {method} {host}{path} | {reason}\n"
-
-        with log_path.open("a") as f:
-            f.write(line)
-
-        self.line_count += 1
-
-
-# Global logger instance
-_blocked_logger: BlockedLogger | None = None
-
-
-def get_blocked_logger() -> BlockedLogger:
-    """Get or create the blocked request logger."""
-    global _blocked_logger
-    if _blocked_logger is None:
-        _blocked_logger = BlockedLogger()
-    return _blocked_logger
+def log_request(allowed: bool, method: str, host: str, path: str, reason: str):
+    """Log a request."""
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    status = "ALLOW" if allowed else "BLOCK"
+    line = f"{timestamp} {status} {method} {host}{path} | {reason}\n"
+    with LOG_FILE.open("a") as f:
+        f.write(line)
 
 
 @dataclass
@@ -328,7 +260,6 @@ def touch_activity():
 def request(flow: http.HTTPFlow) -> None:
     """Intercept and check each request."""
     policy = get_policy()
-    logger = get_blocked_logger()
 
     host = flow.request.pretty_host
     method = flow.request.method
@@ -338,12 +269,12 @@ def request(flow: http.HTTPFlow) -> None:
     touch_activity()
 
     allowed, reason = policy.check(host, method, path)
+    log_request(allowed, method, host, path, reason)
 
     if allowed:
         ctx.log.info(f"✓ {method} {host}{path}")
     else:
         ctx.log.warn(f"✗ {method} {host}{path} - {reason}")
-        logger.log(method, host, path, reason)
         flow.response = http.Response.make(
             403,
             json.dumps({
