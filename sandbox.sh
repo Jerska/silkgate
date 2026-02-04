@@ -256,8 +256,9 @@ main() {
     done
 
     if [[ $EUID -ne 0 ]]; then
-        log_error "This script must be run as root"
-        exit 1
+        log_info "Elevating to root (preserving PATH for tool access)..."
+        exec sudo --preserve-env=PATH "$0" "$@"
+        exit 1  # Only reached if exec fails
     fi
 
     # Validate policy file
