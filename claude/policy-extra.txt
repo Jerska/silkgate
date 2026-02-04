@@ -1,0 +1,16 @@
+# Claude Code specific policy rules
+# Append this to the main policy.txt when using with Claude Code
+
+# =============================================================================
+# Anthropic API (required for Claude Code)
+# =============================================================================
+
+api.anthropic.com:
+  allow POST /v1/messages
+  allow GET /v1/**
+
+statsig.anthropic.com:
+  allow POST
+
+sentry.io:
+  allow POST

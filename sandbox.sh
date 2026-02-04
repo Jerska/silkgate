@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# Claude Code Network Sandbox
-# Runs Claude Code in an isolated network namespace with HTTP method/path filtering
+# Network Sandbox
+# Runs processes in an isolated network namespace with HTTP method/path filtering
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROXY_PORT="8080"
@@ -23,7 +23,6 @@ check_dependencies() {
     command -v ip &>/dev/null || missing+=("iproute2")
     command -v iptables &>/dev/null || missing+=("iptables")
     command -v mitmdump &>/dev/null || missing+=("mitmproxy")
-    command -v claude &>/dev/null || missing+=("claude-code")
     command -v jq &>/dev/null || missing+=("jq")
 
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -236,7 +235,7 @@ main() {
     log_info "Created session: $SESSION_ID"
 
     # Derive unique names from session ID
-    NAMESPACE="claude-$SESSION_ID"
+    NAMESPACE="sandbox-$SESSION_ID"
     VETH_HOST="veth-$SESSION_ID-h"
     VETH_SANDBOX="veth-$SESSION_ID-s"
 
@@ -259,8 +258,8 @@ main() {
     echo ""
     echo "Session ID: $SESSION_ID"
     echo ""
-    echo "To run Claude Code in the sandbox:"
-    echo "  sudo ip netns exec $NAMESPACE claude"
+    echo "To run a command in the sandbox:"
+    echo "  sudo ip netns exec $NAMESPACE <command>"
     echo ""
     echo "Blocked requests: SANDBOX_SESSION=$SESSION_ID ./logs.sh"
     echo "Press Ctrl+C to stop and cleanup"

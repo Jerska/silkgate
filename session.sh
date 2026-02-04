@@ -1,7 +1,7 @@
 #!/bin/bash
-# Session management for Claude sandbox
+# Session management for network sandbox
 
-SESSIONS_DIR="/tmp/claude-sandbox-sessions"
+SESSIONS_DIR="/tmp/sandbox-sessions"
 
 usage() {
     echo "Usage: $0 <command> [args]"

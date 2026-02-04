@@ -1,4 +1,4 @@
-# Claude Code Sandbox Network Policy
+# Network Sandbox Policy
 #
 # Syntax:
 #   default allow|deny           - Behavior for domains without a rule
@@ -78,16 +78,3 @@ cdn.jsdelivr.net
 unpkg.com
 cdnjs.cloudflare.com
 
-# =============================================================================
-# Claude/Anthropic
-# =============================================================================
-
-api.anthropic.com:
-  allow POST /v1/messages
-  allow GET /v1/**
-
-statsig.anthropic.com:
-  allow POST
-
-sentry.io:
-  allow POST
