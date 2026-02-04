@@ -1,0 +1,93 @@
+# Claude Code Sandbox Network Policy
+#
+# Syntax:
+#   default allow|deny           - Behavior for domains without a rule
+#   domain.com                   - Allow GET on all paths (shorthand)
+#   domain.com passthrough       - Allow all traffic, no TLS inspection (for cert pinning)
+#   domain.com:                  - Start a custom rule block
+#     allow METHOD /path/**      - Allow specific method + path
+#     allow METHOD               - Allow method for all paths
+#     deny METHOD /path/**       - Explicit deny (useful after a broad allow)
+#
+# Semantics:
+#   - Rules within a block are evaluated top-to-bottom, first match wins
+#   - If no rule matches within a block, request is DENIED
+#   - Passthrough domains skip TLS inspection entirely (no HTTP filtering possible)
+#
+# Path patterns:
+#   *   - Matches any segment (not including /)
+#   **  - Matches anything (including /)
+#
+# Methods: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, or * for any
+
+default deny
+
+# =============================================================================
+# GitHub
+# =============================================================================
+
+github.com
+*.github.com
+raw.githubusercontent.com
+objects.githubusercontent.com
+
+api.github.com:
+  allow GET /repos/**
+  allow GET /users/**
+  allow GET /orgs/**
+  allow GET /search/**
+  allow GET /gists/**
+  allow GET /rate_limit
+  allow GET /licenses/**
+  allow GET /gitignore/templates/**
+  allow GET /emojis
+  allow GET /meta
+
+# =============================================================================
+# Package Registries
+# =============================================================================
+
+registry.npmjs.org
+registry.yarnpkg.com
+pypi.org
+files.pythonhosted.org
+crates.io
+static.crates.io
+rubygems.org
+packagist.org
+repo.packagist.org
+hex.pm
+repo.hex.pm
+
+# =============================================================================
+# Documentation
+# =============================================================================
+
+docs.rs
+docs.python.org
+nodejs.org
+developer.mozilla.org
+stackoverflow.com
+*.stackexchange.com
+
+# =============================================================================
+# CDNs
+# =============================================================================
+
+cdn.jsdelivr.net
+unpkg.com
+cdnjs.cloudflare.com
+
+# =============================================================================
+# Claude/Anthropic
+# =============================================================================
+
+api.anthropic.com:
+  allow POST /v1/messages
+  allow GET /v1/**
+
+statsig.anthropic.com:
+  allow POST
+
+sentry.io:
+  allow POST

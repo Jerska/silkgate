@@ -1,0 +1,14 @@
+{
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false
+  },
+  "permissions": {
+    "deny": [
+      "Bash",
+      "WebFetch",
+      "WebSearch"
+    ]
+  }
+}
