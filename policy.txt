@@ -1,4 +1,4 @@
-# Network Sandbox Policy
+# Silkgate Policy
 #
 # Syntax:
 #   default allow|deny           - Behavior for domains without a rule

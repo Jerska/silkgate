@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test cases for network sandbox
+# Test cases for silkgate
 
 run_tests() {
     echo ""
