@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROXY_PORT="8080"
+POLICY_FILE="$SCRIPT_DIR/policy.txt"
 
 # Colors for output
 RED='\033[0;31m'
@@ -168,7 +169,6 @@ start_proxy() {
     log_info "Starting mitmproxy with policy enforcement"
 
     # Start mitmproxy in transparent mode
-    SILKGATE_SESSION_ID="$SESSION_ID" \
     SILKGATE_SESSION_DIR="$SESSION_DIR" \
     mitmdump \
         --mode transparent \
@@ -220,11 +220,52 @@ run_in_sandbox() {
         ' -- "$@"
 }
 
+usage() {
+    echo "Usage: $0 [--policy <file>] [-- <command>]"
+    echo ""
+    echo "Options:"
+    echo "  --policy <file>  Policy file to use (default: $SCRIPT_DIR/policy.txt)"
+    echo ""
+    echo "If a command is provided after --, it runs in the sandbox."
+    echo "Otherwise, the sandbox stays running until Ctrl+C."
+    exit 1
+}
+
 main() {
+    # Parse arguments
+    local cmd_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --policy)
+                POLICY_FILE="$2"
+                shift 2
+                ;;
+            --)
+                shift
+                cmd_args=("$@")
+                break
+                ;;
+            -h|--help)
+                usage
+                ;;
+            *)
+                cmd_args=("$@")
+                break
+                ;;
+        esac
+    done
+
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root"
         exit 1
     fi
+
+    # Validate policy file
+    if [[ ! -f "$POLICY_FILE" ]]; then
+        log_error "Policy file not found: $POLICY_FILE"
+        exit 1
+    fi
+    POLICY_FILE="$(realpath "$POLICY_FILE")"
 
     check_dependencies
 
@@ -232,7 +273,11 @@ main() {
     SESSION_ID=$("$SCRIPT_DIR/session.sh" create)
     SESSION_DIR=$("$SCRIPT_DIR/session.sh" path "$SESSION_ID")
 
+    # Symlink policy file into session dir
+    ln -s "$POLICY_FILE" "$SESSION_DIR/policy.txt"
+
     log_info "Created session: $SESSION_ID"
+    log_info "Using policy: $POLICY_FILE"
 
     # Derive unique names from session ID
     NAMESPACE="silkgate-$SESSION_ID"
@@ -266,8 +311,8 @@ main() {
     echo ""
 
     # If arguments provided, run them in sandbox
-    if [[ $# -gt 0 ]]; then
-        run_in_sandbox "$@"
+    if [[ ${#cmd_args[@]} -gt 0 ]]; then
+        run_in_sandbox "${cmd_args[@]}"
     else
         # Keep running until interrupted
         wait

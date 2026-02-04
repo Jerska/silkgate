@@ -217,7 +217,7 @@ def load_policy() -> Policy:
     """Load policy from file."""
     global _policy
 
-    policy_file = Path(__file__).parent / "policy.txt"
+    policy_file = SESSION_DIR / "policy.txt"
 
     if not policy_file.exists():
         ctx.log.error(f"Policy file not found: {policy_file}")
@@ -280,7 +280,7 @@ def request(flow: http.HTTPFlow) -> None:
         flow.response = http.Response.make(
             403,
             json.dumps({
-                "error": "Blocked by sandbox policy",
+                "error": "Blocked by silkgate policy",
                 "reason": reason,
                 "request": f"{method} {host}{path}"
             }, indent=2),
