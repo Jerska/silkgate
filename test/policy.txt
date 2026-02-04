@@ -1,0 +1,14 @@
+# Test policy for silkgate test suite
+
+default deny
+
+# GitHub - GET only on web, specific paths on API
+github.com
+
+api.github.com:
+  allow GET /users/**
+  allow GET /repos/**
+
+# Package registries - GET only
+registry.npmjs.org
+pypi.org

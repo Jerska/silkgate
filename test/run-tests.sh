@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Test runner for network sandbox
+# Test runner for silkgate
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SANDBOX_DIR="$(dirname "$SCRIPT_DIR")"
@@ -23,10 +23,10 @@ log_info() { echo -e "  $1"; }
 
 # Start sandbox and capture session ID
 start_sandbox() {
-    echo "Starting sandbox..."
+    echo "Starting silkgate..."
 
-    # Start sandbox in background, capture output
-    "$SANDBOX_DIR/sandbox.sh" &
+    # Start silkgate in background, capture output
+    "$SANDBOX_DIR/sandbox.sh" --policy "$SCRIPT_DIR/policy.txt" &
     SANDBOX_PID=$!
 
     # Wait for sandbox to be ready
@@ -37,16 +37,16 @@ start_sandbox() {
     SESSION_DIR=$("$SANDBOX_DIR/session.sh" path "$SESSION_ID")
 
     # Get namespace name
-    NAMESPACE="sandbox-$SESSION_ID"
+    NAMESPACE="silkgate-$SESSION_ID"
 
     # Get CA cert path
     CA_CERT="$SESSION_DIR/ca-certs/ca-certificates.crt"
 
-    echo "Sandbox ready: session=$SESSION_ID namespace=$NAMESPACE"
+    echo "Silkgate ready: session=$SESSION_ID namespace=$NAMESPACE"
 }
 
 stop_sandbox() {
-    echo "Stopping sandbox..."
+    echo "Stopping silkgate..."
     kill $SANDBOX_PID 2>/dev/null || true
     wait $SANDBOX_PID 2>/dev/null || true
 }
@@ -136,7 +136,7 @@ source "$SCRIPT_DIR/test-cases.sh"
 
 main() {
     echo "========================================"
-    echo "Network Sandbox Test Suite"
+    echo "Silkgate Test Suite"
     echo "========================================"
 
     trap stop_sandbox EXIT

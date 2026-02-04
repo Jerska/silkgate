@@ -24,7 +24,7 @@ WORKDIR /sandbox
 COPY sandbox.sh policy.py policy.txt session.sh logs.sh ./
 
 # Copy test files
-COPY test/run-tests.sh test/test-cases.sh ./test/
+COPY test/run-tests.sh test/test-cases.sh test/policy.txt ./test/
 
 # Need privileged mode for network namespaces
 CMD ["/sandbox/test/run-tests.sh"]
