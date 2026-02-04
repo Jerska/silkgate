@@ -13,7 +13,9 @@ from mitmproxy import http, tls, ctx
 
 # Request logging
 import os
-SESSION_DIR = Path(os.environ.get("SANDBOX_SESSION_DIR", "/tmp/sandbox-sessions"))
+if "SILKGATE_SESSION_DIR" not in os.environ:
+    raise RuntimeError("SILKGATE_SESSION_DIR environment variable must be set")
+SESSION_DIR = Path(os.environ["SILKGATE_SESSION_DIR"])
 LOG_FILE = SESSION_DIR / "requests.log"
 
 

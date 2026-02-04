@@ -1,7 +1,13 @@
 #!/bin/bash
-# Session management for network sandbox
+# Session management for silkgate
 
-SESSIONS_DIR="/tmp/sandbox-sessions"
+# Resolve real user's home when running under sudo
+if [[ -n "${SUDO_USER:-}" ]]; then
+    USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    USER_HOME="$HOME"
+fi
+SESSIONS_DIR="$USER_HOME/.silkgate/sessions"
 
 usage() {
     echo "Usage: $0 <command> [args]"

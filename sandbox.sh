@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Network Sandbox
+# Silkgate
 # Runs processes in an isolated network namespace with HTTP method/path filtering
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,18 +71,18 @@ setup_namespace() {
     ip netns add "$NAMESPACE"
 
     # Create veth pair
-    ip link add "$VETH_HOST" type veth peer name "$VETH_SANDBOX"
+    ip link add "$VETH_HOST" type veth peer name "$VETH_NS"
 
     # Move one end into namespace
-    ip link set "$VETH_SANDBOX" netns "$NAMESPACE"
+    ip link set "$VETH_NS" netns "$NAMESPACE"
 
     # Configure host side
     ip addr add "$HOST_IP/24" dev "$VETH_HOST"
     ip link set "$VETH_HOST" up
 
     # Configure sandbox side
-    ip netns exec "$NAMESPACE" ip addr add "$SANDBOX_IP/24" dev "$VETH_SANDBOX"
-    ip netns exec "$NAMESPACE" ip link set "$VETH_SANDBOX" up
+    ip netns exec "$NAMESPACE" ip addr add "$SANDBOX_IP/24" dev "$VETH_NS"
+    ip netns exec "$NAMESPACE" ip link set "$VETH_NS" up
     ip netns exec "$NAMESPACE" ip link set lo up
 
     # Set default route in sandbox to go through host
@@ -168,8 +168,8 @@ start_proxy() {
     log_info "Starting mitmproxy with policy enforcement"
 
     # Start mitmproxy in transparent mode
-    SANDBOX_SESSION_ID="$SESSION_ID" \
-    SANDBOX_SESSION_DIR="$SESSION_DIR" \
+    SILKGATE_SESSION_ID="$SESSION_ID" \
+    SILKGATE_SESSION_DIR="$SESSION_DIR" \
     mitmdump \
         --mode transparent \
         --listen-host "$HOST_IP" \
@@ -235,9 +235,9 @@ main() {
     log_info "Created session: $SESSION_ID"
 
     # Derive unique names from session ID
-    NAMESPACE="sandbox-$SESSION_ID"
+    NAMESPACE="silkgate-$SESSION_ID"
     VETH_HOST="veth-$SESSION_ID-h"
-    VETH_SANDBOX="veth-$SESSION_ID-s"
+    VETH_NS="veth-$SESSION_ID-s"
 
     # Use session-specific IP range (last octet from session ID)
     IP_OCTET=$(( 16#${SESSION_ID:0:2} % 200 + 10 ))  # Range 10-209 to avoid conflicts
@@ -254,14 +254,14 @@ main() {
     start_proxy
 
     echo ""
-    log_info "Sandbox ready!"
+    log_info "Silkgate ready!"
     echo ""
     echo "Session ID: $SESSION_ID"
     echo ""
-    echo "To run a command in the sandbox:"
+    echo "To run a command in the namespace:"
     echo "  sudo ip netns exec $NAMESPACE <command>"
     echo ""
-    echo "Blocked requests: SANDBOX_SESSION=$SESSION_ID ./logs.sh"
+    echo "View requests: SILKGATE_SESSION=$SESSION_ID ./logs.sh"
     echo "Press Ctrl+C to stop and cleanup"
     echo ""
 

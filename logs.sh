@@ -1,14 +1,21 @@
 #!/bin/bash
-# Read sandbox blocked request logs
+# Read silkgate request logs
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SESSIONS_DIR="/tmp/sandbox-sessions"
+
+# Resolve real user's home when running under sudo
+if [[ -n "${SUDO_USER:-}" ]]; then
+    USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    USER_HOME="$HOME"
+fi
+SESSIONS_DIR="$USER_HOME/.silkgate/sessions"
 
 # Get session ID from env or argument
-SESSION_ID="${SANDBOX_SESSION:-}"
+SESSION_ID="${SILKGATE_SESSION:-}"
 
 usage() {
-    echo "Usage: SANDBOX_SESSION=<id> $0 [-f]"
+    echo "Usage: SILKGATE_SESSION=<id> $0 [-f]"
     echo "   or: $0 <session_id> [-f]"
     echo ""
     echo "Options:"
