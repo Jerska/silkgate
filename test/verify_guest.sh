@@ -74,4 +74,5 @@ if [ "$fail" -eq 0 ]; then
   echo "Containment holds: no direct egress; the proxy is the only path out."
 else
   echo "LEAK — use a fallback (doc/ARCHITECTURE.md: VZFileHandle gateway / no-NIC+vsock)."
+  exit 1
 fi
