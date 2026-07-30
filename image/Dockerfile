@@ -1,7 +1,8 @@
 # Claude Code in a microsandbox guest, behind the TLS-terminating egress proxy.
-# Build for Apple Silicon, then load into msb (msb has no Docker-store integration):
-#   cp ~/.mitmproxy/mitmproxy-ca-cert.pem egress-ca.pem
-#   docker build --platform linux/arm64 -t claude-sandbox:poc .
+# Build for Apple Silicon, then load into msb (msb has no Docker-store integration).
+# From the repo root:
+#   cp ~/.mitmproxy/mitmproxy-ca-cert.pem image/egress-ca.pem
+#   docker build --platform linux/arm64 -t claude-sandbox:poc image/
 #   docker save claude-sandbox:poc | msb load
 FROM node:20-bookworm-slim
 

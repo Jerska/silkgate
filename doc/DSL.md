@@ -1,8 +1,9 @@
 # Egress allowlist DSL — specification
 
 > The rule language enforced by the proxy. Reference implementation:
-> `egress-proxy-poc/rule_engine.py` (dependency-free; `python3 rule_engine.py` self-tests,
-> 54/54). Design rationale: [THREAT-MODEL.md](./THREAT-MODEL.md).
+> [`mitmaddon/rule_engine.py`](../mitmaddon/rule_engine.py) (dependency-free;
+> `python3 mitmaddon/rule_engine.py` self-tests, 54/54). Design rationale:
+> [THREAT-MODEL.md](./THREAT-MODEL.md).
 
 ## Grammar
 
@@ -133,4 +134,5 @@ but only when the request already carries it — so the real credential is never
 
 The engine **matches** and carries config. Enforcement — TLS termination, SNI==Host, stripping
 disallowed headers, body-size rejection, query-param stripping, secret injection, audit logging,
-fail-closed on undecryptable — lives in the mitmproxy addon (`proxy_addon.py`, next to build).
+fail-closed on undecryptable — lives in the mitmproxy addon
+([`mitmaddon/proxy_addon.py`](../mitmaddon/proxy_addon.py)).

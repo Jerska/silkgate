@@ -134,7 +134,7 @@ additionally probes `platform.claude.com/v1/oauth/hello` at startup and fails on
 
 - **Proxy:** mitmproxy with a small addon (allowlist rule engine, SNI==Host, header/body/
   query enforcement, secret injection, audit log). See [DSL.md](./DSL.md) and the
-  `egress-proxy-poc/` code. (Hand-rolling TLS MITM is the wrong place to be minimal — reuse
+  [`mitmaddon/`](../mitmaddon/) code. (Hand-rolling TLS MITM is the wrong place to be minimal — reuse
   mitmproxy; keep the rule engine dependency-free and portable.)
 - **microVM:** microsandbox for "one tool, both OSes" (Apache 2.0, libkrun); or Lima +
   Firecracker for maturity.
