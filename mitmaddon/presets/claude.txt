@@ -1,0 +1,2 @@
+api.anthropic.com/**               GET POST  q:*  h:*  inject_auth=anthropic
+platform.claude.com/v1/oauth/**    GET POST  q:*  h:*  inject_auth=anthropic
