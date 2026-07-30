@@ -15,6 +15,7 @@ host feeds inject_auth=<name> rules; the guest never sees them.
 """
 import argparse
 import os
+import platform
 import re
 import shutil
 import signal
@@ -179,11 +180,18 @@ def ensure_ca():
 
 # --- commands ------------------------------------------------------------------
 
+_DOCKER_PLATFORMS = {"arm64": "linux/arm64", "aarch64": "linux/arm64",
+                     "x86_64": "linux/amd64", "amd64": "linux/amd64"}
+
+
 def cmd_build(args):
     docker = which("docker", "the guest image is built with docker, then loaded into msb")
     msb = which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
+    plat = args.platform or _DOCKER_PLATFORMS.get(platform.machine().lower())
+    if plat is None:
+        die(f"unknown host arch {platform.machine()!r} — pass --platform (e.g. linux/amd64)")
     ensure_ca()
-    if subprocess.run([docker, "build", "--platform", "linux/arm64",
+    if subprocess.run([docker, "build", "--platform", plat,
                        "-t", args.tag, str(IMAGE_DIR)]).returncode:
         die("docker build failed")
     save = subprocess.Popen([docker, "save", args.tag], stdout=subprocess.PIPE)
@@ -288,6 +296,7 @@ def main():
 
     p = sub.add_parser("build", help="build the guest image and load it into msb")
     p.add_argument("--tag", default=DEFAULT_IMAGE, help=f"image tag (default: {DEFAULT_IMAGE})")
+    p.add_argument("--platform", metavar="P", help="docker platform (default: matches the host arch)")
     p.set_defaults(fn=cmd_build)
 
     p = sub.add_parser("proxy", help="run only the proxy in the foreground")
