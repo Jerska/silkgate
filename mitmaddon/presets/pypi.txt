@@ -1,0 +1,2 @@
+pypi.org/**                  GET
+files.pythonhosted.org/**    GET

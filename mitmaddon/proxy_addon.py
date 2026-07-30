@@ -1,14 +1,14 @@
 """mitmproxy addon — Tier 2 egress enforcement over rule_engine.
 
-Run on the HOST:
+Run on the HOST (from the repo root):
     pip install mitmproxy
-    export EGRESS_RULES=rules.txt
+    export EGRESS_RULES=mitmaddon/presets/claude.txt         # colon-separate to combine presets
     export EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-..."   # injected; never in the guest
-    mitmdump -s proxy_addon.py --listen-port 8090
+    mitmdump -s mitmaddon/proxy_addon.py --listen-port 8090
 
 Tier 1 (forcing all guest traffic here, enforced outside the guest) is microsandbox's own
-host-side network policy — see ../THREAT-MODEL.md and README.md. This addon assumes the guest
-can only reach this proxy.
+host-side network policy — see ../doc/THREAT-MODEL.md and ../README.md. This addon assumes the
+guest can only reach this proxy.
 """
 import json
 import logging
@@ -20,9 +20,16 @@ from rule_engine import RuleSet, normalize_host
 
 logger = logging.getLogger("egress")
 
-_RULES_PATH = os.environ.get("EGRESS_RULES", "rules.txt")
-with open(_RULES_PATH) as _fh:
-    RULES = RuleSet.parse(_fh.read())
+# Colon-separated rule files, concatenated into one ruleset (the DSL is line-based).
+_RULES_PATH = os.environ.get("EGRESS_RULES")
+if not _RULES_PATH:
+    raise RuntimeError("EGRESS_RULES not set — colon-separated rule files, "
+                       "e.g. EGRESS_RULES=mitmaddon/presets/claude.txt:mitmaddon/presets/npm.txt")
+_texts = []
+for _p in _RULES_PATH.split(":"):
+    with open(_p) as _fh:
+        _texts.append(_fh.read())
+RULES = RuleSet.parse("\n".join(_texts))
 
 
 def _secret(name):
