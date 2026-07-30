@@ -9,6 +9,19 @@ TLS-terminating egress proxy for a sandboxed, adversarial coding agent, **macOS-
 
 Design docs: [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) · [doc/THREAT-MODEL.md](doc/THREAT-MODEL.md) · [doc/DSL.md](doc/DSL.md)
 
+## Quickstart (CLI)
+
+The CLI automates Steps 1–5 below (prereqs: `pip install mitmproxy`, docker, msb — Step 3):
+```sh
+./cli/silkgate build                     # guest image + mitmproxy CA, loaded into msb
+./cli/silkgate verify                    # Tier-1 containment check (add --full for the proxy path)
+export EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"
+./cli/silkgate run                       # interactive Claude Code, egress-locked
+./cli/silkgate run --workspace ~/projects/foo -- claude --bare -p "task…"
+```
+The proxy audit log path is printed at startup (`tail -f` it to watch allow/deny decisions).
+`--preset`/`--rules` compose allowlists; `silkgate proxy` runs just the proxy for manual setups.
+
 ## Layout
 - `mitmaddon/rule_engine.py` — dependency-free DSL parser + host/path normalizer + matcher (`python3 mitmaddon/rule_engine.py` self-tests)
 - `mitmaddon/proxy_addon.py` — mitmproxy addon: SNI==Host, allowlist, header/body/query enforcement, secret injection, fail-closed, audit log
@@ -17,7 +30,7 @@ Design docs: [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) · [doc/THREAT-MODEL.md]
   `platform.claude.com` startup probe); `debian.txt` is for the "full check" only
 - `test/verify_guest.sh` — Tier-1 verification, run as root inside the guest
 - `image/Dockerfile` — Step 5: a Claude Code guest image
-- `cli/` — host control CLI (in progress)
+- `cli/silkgate` — host control CLI (`build` / `verify` / `proxy` / `run`), stdlib-only Python
 
 All commands below run from the repo root.
 

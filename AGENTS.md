@@ -1,5 +1,10 @@
 # Agent instructions
 
+## Code
+
+`mitmaddon/` and `cli/` are dependency-free Python 3 (stdlib only) — keep them that way;
+mitmproxy is the single third-party runtime dependency, and only for running the addon.
+
 ## Commits
 
 Use [Conventional Commits](https://www.conventionalcommits.org): `<type>(<scope>): <description>`

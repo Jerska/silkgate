@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""silkgate — host control CLI for the egress-proxied agent sandbox.
+
+One-shot commands over the two host processes (mitmdump + msb); the msb process is
+the session, so everything is torn down when it exits. See ../README.md for the
+manual steps these automate.
+
+    silkgate build                 build the guest image and load it into msb
+    silkgate verify [--full]       Tier-1 containment check (test/verify_guest.sh)
+    silkgate proxy [--preset X]    run only the proxy, audit log on stdout
+    silkgate run [-- CMD ...]      proxy + egress-locked guest, foreground
+
+Secrets stay in the environment: EGRESS_SECRET_<NAME>="<header>: <value>" on the
+host feeds inject_auth=<name> rules; the guest never sees them.
+"""
+import argparse
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+ADDON = REPO / "mitmaddon" / "proxy_addon.py"
+PRESET_DIR = REPO / "mitmaddon" / "presets"
+IMAGE_DIR = REPO / "image"
+MITM_CA = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
+LOG_DIR = Path.home() / ".silkgate" / "logs"
+PROXY_ALIAS = "host.microsandbox.internal"   # resolves via the guest's /etc/hosts
+DEFAULT_IMAGE = "claude-sandbox:poc"
+
+sys.path.insert(0, str(REPO / "mitmaddon"))
+from rule_engine import RuleSet
+
+
+def die(msg, code=1):
+    print(f"silkgate: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def say(msg):
+    print(f"silkgate: {msg}", file=sys.stderr)
+
+
+def which(binary, hint):
+    path = shutil.which(binary)
+    if path is None:
+        die(f"{binary} not found — {hint}")
+    return path
+
+
+def tail(path, lines=10):
+    return "\n".join(path.read_text(errors="replace").splitlines()[-lines:])
+
+
+# --- rules -------------------------------------------------------------------
+
+def resolve_rules(presets, files):
+    paths = []
+    for name in presets:
+        p = PRESET_DIR / f"{name}.txt"
+        if not p.is_file():
+            avail = ", ".join(sorted(q.stem for q in PRESET_DIR.glob("*.txt")))
+            die(f"unknown preset {name!r} (available: {avail})")
+        paths.append(p)
+    for f in files:
+        p = Path(f)
+        if not p.is_file():
+            die(f"rules file not found: {f}")
+        paths.append(p.resolve())
+    return paths
+
+
+def load_ruleset(paths):
+    """Parse up front so bad rules fail here, not inside mitmdump at startup."""
+    rules = []
+    for p in paths:
+        try:
+            rules.extend(RuleSet.parse(p.read_text()).rules)
+        except ValueError as e:
+            die(f"{p}: {e}")
+    return RuleSet(rules)
+
+
+def check_secrets(ruleset, fatal):
+    names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
+    missing = [n for n in names if not os.environ.get(f"EGRESS_SECRET_{n.upper()}")]
+    if not missing:
+        return
+    msg = ("missing secret(s): "
+           + ", ".join(f'EGRESS_SECRET_{n.upper()}="<header>: <value>"' for n in missing))
+    if fatal:
+        die(msg)
+    say(f"warning: {msg} — inject_auth requests will 500")
+
+
+# --- host processes ----------------------------------------------------------
+
+def start_proxy(rule_paths, port):
+    """Start mitmdump in the background; return (proc, audit log path)."""
+    mitmdump = which("mitmdump", "pip install mitmproxy")
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"proxy-{datetime.now():%Y%m%d-%H%M%S}.log"
+    env = dict(os.environ, EGRESS_RULES=":".join(str(p) for p in rule_paths))
+    with open(log_path, "wb") as log:
+        proc = subprocess.Popen([mitmdump, "-s", str(ADDON), "--listen-port", str(port)],
+                                env=env, stdout=log, stderr=subprocess.STDOUT)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            die(f"proxy exited at startup — {log_path}:\n{tail(log_path)}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return proc, log_path
+        except OSError:
+            time.sleep(0.2)
+    stop(proc)
+    die(f"proxy did not open port {port} within 15s — see {log_path}")
+
+
+def stop(proc):
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def wait_foreground(proc):
+    """The child owns the terminal: Ctrl-C reaches it directly (same process group), so
+    the parent must survive SIGINT to clean up afterwards. A Python-level handler is not
+    inherited across exec, so the child's own SIGINT behavior is untouched."""
+    previous = signal.signal(signal.SIGINT, lambda *a: None)
+    try:
+        return proc.wait()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def msb_argv(image, cmd, port, *, tty=False, pull_never=True, mounts=()):
+    argv = [which("msb", "curl -fsSL https://install.microsandbox.dev | sh"), "run", image]
+    if pull_never:
+        argv += ["--pull", "never"]
+    if tty:
+        argv.append("-t")
+    for m in mounts:
+        argv += ["-v", m]
+    url = f"http://{PROXY_ALIAS}:{port}"
+    for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        argv += ["-e", f"{var}={url}"]
+    argv += ["--net-default-egress", "deny", "--net-rule", f"allow@host:tcp:{port}"]
+    return argv + ["--"] + list(cmd)
+
+
+def ensure_ca():
+    """Put the mitmproxy CA cert at image/egress-ca.pem, generating it on first use."""
+    if not MITM_CA.is_file():
+        mitmdump = which("mitmdump", "pip install mitmproxy")
+        say("generating the mitmproxy CA (first run)…")
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        proc = subprocess.Popen([mitmdump, "-q", "--listen-port", str(port)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not MITM_CA.is_file():
+            time.sleep(0.2)
+        stop(proc)
+        if not MITM_CA.is_file():
+            die(f"mitmproxy did not create {MITM_CA} — run mitmdump once manually")
+    shutil.copyfile(MITM_CA, IMAGE_DIR / "egress-ca.pem")
+
+
+# --- commands ------------------------------------------------------------------
+
+def cmd_build(args):
+    docker = which("docker", "the guest image is built with docker, then loaded into msb")
+    msb = which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
+    ensure_ca()
+    if subprocess.run([docker, "build", "--platform", "linux/arm64",
+                       "-t", args.tag, str(IMAGE_DIR)]).returncode:
+        die("docker build failed")
+    save = subprocess.Popen([docker, "save", args.tag], stdout=subprocess.PIPE)
+    load = subprocess.run([msb, "load"], stdin=save.stdout)
+    save.stdout.close()
+    if save.wait() or load.returncode:
+        die("docker save | msb load failed")
+    say(f"loaded {args.tag} into msb")
+
+
+def cmd_proxy(args):
+    rule_paths = resolve_rules(args.preset or ["claude"], args.rules or [])
+    check_secrets(load_ruleset(rule_paths), fatal=False)
+    mitmdump = which("mitmdump", "pip install mitmproxy")
+    env = dict(os.environ, EGRESS_RULES=":".join(str(p) for p in rule_paths))
+    proc = subprocess.Popen([mitmdump, "-s", str(ADDON), "--listen-port", str(args.port)], env=env)
+    try:
+        sys.exit(wait_foreground(proc))
+    finally:
+        stop(proc)
+
+
+def cmd_run(args):
+    rule_paths = resolve_rules(args.preset or ["claude"], args.rules or [])
+    check_secrets(load_ruleset(rule_paths), fatal=True)
+    cmd = args.cmd
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    cmd = cmd or ["claude"]
+    tty = args.tty if args.tty is not None else sys.stdin.isatty()
+    mounts = []
+    if args.workspace:
+        ws = Path(args.workspace).resolve()
+        if not ws.is_dir():
+            die(f"workspace is not a directory: {ws}")
+        mounts.append(f"{ws}:/workspace:rw")
+    proxy, log_path = start_proxy(rule_paths, args.port)
+    say(f"proxy :{args.port} ({', '.join(p.name for p in rule_paths)}) · audit: tail -f {log_path}")
+    guest = None
+    try:
+        guest = subprocess.Popen(msb_argv(args.image, cmd, args.port, tty=tty, mounts=mounts))
+        rc = wait_foreground(guest)
+    finally:
+        if guest is not None:
+            stop(guest)
+        stop(proxy)
+    sys.exit(rc)
+
+
+FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
+              "apt-get update && "
+              "apt-get install -y --no-install-recommends"
+              " curl ca-certificates dnsutils iputils-ping iproute2 && "
+              "cp /mnt/poc/image/egress-ca.pem /usr/local/share/ca-certificates/egress.crt && "
+              "update-ca-certificates && ")
+
+
+def cmd_verify(args):
+    rule_paths = resolve_rules(["npm", "debian"] if args.full else ["npm"], [])
+    load_ruleset(rule_paths)
+    script = "bash /mnt/poc/test/verify_guest.sh"
+    if args.full:
+        ensure_ca()
+        script = FULL_SETUP + script
+    proxy, log_path = start_proxy(rule_paths, args.port)
+    say(f"proxy :{args.port} · audit: tail -f {log_path}")
+    argv = msb_argv("debian", ["bash", "-c", script], args.port,
+                    pull_never=False, mounts=[f"{REPO}:/mnt/poc:ro"])
+    result = guest = None
+    try:
+        guest = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in guest.stdout:
+            print(line, end="")
+            m = re.search(r"RESULT: (\d+) passed, (\d+) failed", line)
+            if m:
+                result = (int(m[1]), int(m[2]))
+        wait_foreground(guest)
+    finally:
+        if guest is not None:
+            stop(guest)
+        stop(proxy)
+    if result is None:
+        die("no RESULT line — the guest never ran verify_guest.sh (msb server started?)")
+    passed, failed = result
+    if failed or not passed:
+        die(f"containment check FAILED ({passed} passed, {failed} failed)")
+    say(f"containment holds ({passed} passed, 0 failed)")
+
+
+# --- entry point ---------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(prog="silkgate", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    def rules_opts(p):
+        p.add_argument("--preset", action="append", metavar="NAME",
+                       help="preset from mitmaddon/presets/ (repeatable; default: claude)")
+        p.add_argument("--rules", action="append", metavar="FILE",
+                       help="extra rules file (repeatable)")
+
+    p = sub.add_parser("build", help="build the guest image and load it into msb")
+    p.add_argument("--tag", default=DEFAULT_IMAGE, help=f"image tag (default: {DEFAULT_IMAGE})")
+    p.set_defaults(fn=cmd_build)
+
+    p = sub.add_parser("proxy", help="run only the proxy in the foreground")
+    rules_opts(p)
+    p.add_argument("--port", type=int, default=8090, help="proxy listen port (default: 8090)")
+    p.set_defaults(fn=cmd_proxy)
+
+    p = sub.add_parser("verify", help="Tier-1 containment check in a bare debian guest")
+    p.add_argument("--full", action="store_true",
+                   help="also exercise the proxy path (apt through the proxy + CA trust)")
+    p.add_argument("--port", type=int, default=8090, help="proxy listen port (default: 8090)")
+    p.set_defaults(fn=cmd_verify)
+
+    p = sub.add_parser("run", help="run an egress-locked guest behind the proxy")
+    rules_opts(p)
+    p.add_argument("--port", type=int, default=8090, help="proxy listen port (default: 8090)")
+    p.add_argument("--image", default=DEFAULT_IMAGE, help=f"guest image (default: {DEFAULT_IMAGE})")
+    p.add_argument("--workspace", metavar="DIR", help="mount DIR at /workspace (rw)")
+    p.add_argument("--tty", action=argparse.BooleanOptionalAction,
+                   help="allocate a PTY (default: yes if stdin is a TTY)")
+    p.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD ...",
+                   help="guest command (default: claude)")
+    p.set_defaults(fn=cmd_run)
+
+    # SIGTERM must run the finally-blocks that stop mitmdump/msb, not kill us outright.
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))
+    args = ap.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()
