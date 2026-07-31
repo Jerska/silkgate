@@ -57,7 +57,7 @@ port when it's the command that starts the proxy).
   `platform.claude.com` startup probe); `debian.txt` is for the "full check" only
 - `test/verify_guest.sh` — Tier-1 verification, run as root inside the guest
 - `image/Dockerfile` — Step 5: a Claude Code guest image
-- `cli/silkgate` — host control CLI (`build` / `verify` / `proxy` / `run` / `up` / `exec` / `attach` / `down` / `ls` / `secret`), stdlib-only Python
+- `cli/silkgate` — host control CLI (`build` / `verify` / `proxy` / `run` / `up` / `exec` / `attach` / `logs` / `down` / `ls` / `secret`), stdlib-only Python
 
 Host state lives under `~/.silkgate/` (created on first `run`/`up`):
 - `~/.silkgate/proxy.json` — shared-proxy metadata: pid, base port, the port pool, log path, socket path, start time

@@ -13,6 +13,7 @@ dedicated proxy port each. Host state lives under ~/.silkgate. See ../README.md.
     silkgate up [--name N ...]     start a persistent session (bg guest + shared proxy)
     silkgate exec N [-t] -- CMD    run a command in a session's guest
     silkgate attach N              attach a TTY to a session (default cmd: claude)
+    silkgate logs N [-f|--audit]   tail a session's guest output (or its proxy decisions)
     silkgate down N                stop + remove a session (+ the proxy if it was the last)
     silkgate ls                    list sessions + shared-proxy health
     silkgate secret set NAME       push EGRESS_SECRET_<NAME> to the shared proxy (never argv)
@@ -701,6 +702,175 @@ def cmd_ls(args):
         print("proxy: not running")
 
 
+# --- logs: per-session observability ----------------------------------------
+# msb's exec is RPC-shaped — a parent sees nothing until the guest exits — but the
+# sandbox's captured log IS live, and there is no `msb logs --follow`, so -f polls it.
+
+def _emit(lines):
+    """Print lines and flush now, so follow is live and a closed pipe surfaces promptly."""
+    for ln in lines:
+        print(ln)
+    sys.stdout.flush()
+
+
+def _run_msb_logs(sandbox, tail_n=None, since=None):
+    """`msb logs` for one sandbox -> (lines, None) or (None, error). Non-zero/OSError => gone."""
+    argv = [_msb(), "logs", sandbox]
+    if tail_n is not None:
+        argv += ["--tail", str(tail_n)]
+    if since is not None:
+        argv += ["--since", since]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True)
+    except OSError as e:
+        return None, str(e)
+    if proc.returncode:
+        return None, (proc.stderr.strip() or f"msb logs exited {proc.returncode}")
+    return proc.stdout.splitlines(), None
+
+
+def _logs_guest(args, meta):
+    sandbox = meta["sandbox"]
+    if not args.follow:                              # one-shot: pass shaping straight to msb
+        lines, err = _run_msb_logs(sandbox, args.tail, args.since)
+        if err is not None:
+            die(f"cannot read guest logs for {args.name!r}: {err}")
+        _emit(lines)
+        return
+    # Follow: seed `printed` to the whole current log's length so history never reprints,
+    # then each poll re-fetches from a FIXED start (the whole log, an append-only string)
+    # and emits only the suffix past `printed`. --tail/--since shape the first view only:
+    # --tail is a pure offset into `full`; --since needs msb's clock, so we ask msb how
+    # many recent lines it counts and offset by that (fetching `full` first keeps it from
+    # dropping/duplicating anything appended between the two calls).
+    full, err = _run_msb_logs(sandbox)
+    if err is not None:
+        die(f"cannot read guest logs for {args.name!r}: {err}")
+    start = 0
+    if args.tail is not None:
+        start = max(0, len(full) - args.tail)
+    elif args.since is not None:
+        win, werr = _run_msb_logs(sandbox, since=args.since)
+        if werr is None:
+            start = max(0, len(full) - len(win))
+    _emit(full[start:])
+    printed = len(full)
+    while True:
+        time.sleep(args.interval)
+        if not session_dir(args.name).exists():      # someone ran `silkgate down`
+            die(f"session {args.name!r} is gone — stopped following")
+        lines, err = _run_msb_logs(sandbox)
+        if err is not None:                          # sandbox removed / msb unhappy
+            die(f"session {args.name!r}: {err} — stopped following")
+        n = len(lines)
+        if n < printed:                              # rotation/truncation: resync, don't replay
+            say(f"guest log for {args.name!r} rotated — resyncing")
+            printed = n
+        elif n > printed:
+            _emit(lines[printed:])
+            printed = n
+
+
+def _audit_match(line, name):
+    """True iff `line` is a JSON audit record for session `name`.
+
+    mitmdump stamps every log line with a "[HH:MM:SS.mmm] " prefix and emits its own
+    connection chatter, so drop everything before the first brace and require a parse.
+    """
+    brace = line.find("{")
+    if brace < 0:
+        return False
+    try:
+        rec = json.loads(line[brace:])
+    except ValueError:
+        return False
+    return isinstance(rec, dict) and rec.get("session") == name
+
+
+def _read_from(path, offset):
+    """Complete (newline-terminated) lines from byte `offset` -> (lines, new_offset), or
+    (None, offset) if the file is unreadable. Advances only past whole lines, so a
+    half-written trailing line is re-read on the next poll rather than split."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read()
+    except OSError:
+        return None, offset
+    cut = data.rfind(b"\n")
+    if cut == -1:
+        return [], offset
+    chunk = data[:cut + 1]
+    return chunk.decode("utf-8", "replace").splitlines(), offset + len(chunk)
+
+
+def _logs_audit(args):
+    proxy = read_proxy()
+    if not proxy or not proxy.get("log"):
+        die("shared proxy not running — no audit log (silkgate ls)")
+    if args.since is not None:
+        say("--since has no effect on --audit (audit records carry no timestamp)")
+    name = args.name
+    path = Path(proxy["log"])
+    lines, offset = _read_from(path, 0)              # first view = the whole file's history
+    if lines is None:
+        die(f"cannot read audit log {path}")
+    matched = [ln for ln in lines if _audit_match(ln, name)]
+    if args.tail is not None:
+        matched = matched[-args.tail:] if args.tail > 0 else []
+    _emit(matched)
+    if not args.follow:
+        return
+    while True:
+        time.sleep(args.interval)
+        if not session_dir(name).exists():
+            die(f"session {name!r} is gone — stopped following")
+        p = read_proxy()
+        if not (p and proxy_alive(p.get("pid"))):    # last `down` stopped the shared proxy
+            die("shared proxy is gone — stopped following")
+        new_path = Path(p.get("log") or path)
+        if new_path != path:                         # proxy restarted onto a fresh log file
+            say("audit log replaced — resyncing")
+            path, offset = new_path, 0
+        try:
+            size = path.stat().st_size
+        except OSError:
+            die(f"audit log {path} vanished — stopped following")
+        if size < offset:                            # truncated/rotated in place
+            say("audit log rotated — resyncing")
+            offset = 0
+        new_lines, offset = _read_from(path, offset) # byte offset: only the new tail is read
+        if new_lines is None:
+            die(f"audit log {path} vanished — stopped following")
+        _emit([ln for ln in new_lines if _audit_match(ln, name)])
+
+
+def cmd_logs(args):
+    """Stream one session's guest output, or (--audit) its proxy allow/deny decisions.
+
+    A supervising parent sees nothing until an exec exits (msb's exec is RPC-shaped),
+    so -f polls the live captured log (there is no `msb logs --follow`). --audit reads
+    the shared audit log and keeps only lines whose "session" field is this session."""
+    _validate_name(args.name)
+    meta = read_meta(args.name)
+    if not meta:
+        die(f"no such session: {args.name!r} (silkgate ls)")
+    if args.tail is not None and args.tail < 0:
+        die("--tail must be >= 0")
+    if args.interval <= 0:
+        die("--interval must be > 0")
+    try:
+        if args.audit:
+            _logs_audit(args)
+        else:
+            _logs_guest(args, meta)
+    except KeyboardInterrupt:                        # Ctrl-C out of follow: quiet, status 130
+        sys.exit(130)
+    except BrokenPipeError:                          # `silkgate logs -f x | head`: quiet exit
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(0)
+
+
 def cmd_secret_set(args):
     name = args.name
     value = os.environ.get(f"EGRESS_SECRET_{name.upper()}")
@@ -830,6 +1000,19 @@ def main():
     p = sub.add_parser("attach", help="attach a TTY to a session (runs claude)")
     p.add_argument("name", metavar="NAME", help="session name")
     p.set_defaults(fn=cmd_attach)
+
+    p = sub.add_parser("logs", help="tail a session's guest output (or --audit its proxy decisions)")
+    p.add_argument("name", metavar="NAME", help="session name")
+    p.add_argument("-f", "--follow", action="store_true",
+                   help="keep printing new lines by polling (default: print once and exit)")
+    p.add_argument("--tail", type=int, metavar="N", help="start from the last N lines")
+    p.add_argument("--since", metavar="DUR",
+                   help="start from lines newer than DUR (e.g. 30s, 5m); guest log only")
+    p.add_argument("--audit", action="store_true",
+                   help="this session's proxy allow/deny decisions instead of guest output")
+    p.add_argument("--interval", type=float, default=1.0, metavar="SECS",
+                   help="follow poll interval in seconds (default: 1.0)")
+    p.set_defaults(fn=cmd_logs)
 
     p = sub.add_parser("down", help="stop + remove a session (and the proxy if it was the last)")
     p.add_argument("name", metavar="NAME", help="session name")
