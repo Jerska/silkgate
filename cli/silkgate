@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """silkgate — host control CLI for the egress-proxied agent sandbox.
 
-One-shot commands over the two host processes (mitmdump + msb); the msb process is
-the session, so everything is torn down when it exits. See ../README.md for the
-manual steps these automate.
+`run` is one-shot: proxy + guest born and torn down per command. Persistent
+sessions instead share ONE background mitmdump (a pool of listener ports) across
+many background guests — `up`/`exec`/`attach`/`down`, one guest per session, one
+dedicated proxy port each. Host state lives under ~/.silkgate. See ../README.md.
 
     silkgate build                 build the guest image and load it into msb
     silkgate verify [--full]       Tier-1 containment check (test/verify_guest.sh)
-    silkgate proxy [--preset X]    run only the proxy, audit log on stdout
-    silkgate run [-- CMD ...]      proxy + egress-locked guest, foreground
+    silkgate proxy [--preset X]    run only the proxy (single-tenant), audit on stdout
+    silkgate run [-- CMD ...]      ephemeral session (up + exec + down), foreground
+    silkgate up [--name N ...]     start a persistent session (bg guest + shared proxy)
+    silkgate exec N [-t] -- CMD    run a command in a session's guest
+    silkgate attach N              attach a TTY to a session (default cmd: claude)
+    silkgate down N                stop + remove a session (+ the proxy if it was the last)
+    silkgate ls                    list sessions + shared-proxy health
+    silkgate secret set NAME       push EGRESS_SECRET_<NAME> to the shared proxy (never argv)
+    silkgate secret ls             list secret names held by the proxy (names only)
 
 Secrets stay in the environment: EGRESS_SECRET_<NAME>="<header>: <value>" on the
 host feeds inject_auth=<name> rules; the guest never sees them.
 """
 import argparse
+import json
 import os
 import platform
 import re
@@ -25,13 +34,20 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 REPO = Path(__file__).resolve().parent.parent
 ADDON = REPO / "mitmaddon" / "proxy_addon.py"
 PRESET_DIR = REPO / "mitmaddon" / "presets"
 IMAGE_DIR = REPO / "image"
 MITM_CA = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
-LOG_DIR = Path.home() / ".silkgate" / "logs"
+SILK_DIR = Path.home() / ".silkgate"
+LOG_DIR = SILK_DIR / "logs"
+SESSIONS_DIR = SILK_DIR / "sessions"
+PROXY_JSON = SILK_DIR / "proxy.json"          # shared-proxy meta (pid/ports/log/sock)
+PROXY_SOCK = SILK_DIR / "proxy.sock"          # control socket (line-delimited JSON)
+POOL_SIZE = 16                                 # base_port .. base_port+15
+DEFAULT_BASE_PORT = 8090
 PROXY_ALIAS = "host.microsandbox.internal"   # resolves via the guest's /etc/hosts
 PROXY_ENV_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
 DEFAULT_IMAGE = "claude-sandbox:poc"
@@ -191,6 +207,318 @@ def ensure_ca():
     shutil.copyfile(MITM_CA, IMAGE_DIR / "egress-ca.pem")
 
 
+# --- persistent sessions: host state ----------------------------------------
+
+def now_iso():
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _write_json(path, obj):
+    """Atomic-ish write: temp file then rename, so a reader never sees half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj))
+    tmp.replace(path)
+
+
+def _read_json(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def session_dir(name):
+    return SESSIONS_DIR / name
+
+
+def sandbox_name(name):
+    return f"sg-{name}"
+
+
+def _validate_name(name):
+    # Used as a dir name, an msb sandbox name (sg-<name>), and a net-rule component.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name or ""):
+        die(f"invalid session name {name!r} (letters, digits, '-', '_'; ≤32 chars)")
+
+
+def read_meta(name):
+    return _read_json(session_dir(name) / "meta.json")
+
+
+def write_meta(name, meta):
+    _write_json(session_dir(name) / "meta.json", meta)
+
+
+def list_metas():
+    if not SESSIONS_DIR.is_dir():
+        return []
+    metas = []
+    for d in sorted(SESSIONS_DIR.iterdir()):
+        m = read_meta(d.name)
+        if m:
+            metas.append(m)
+    return metas
+
+
+def _compose_rules(paths):
+    """Snapshot the composed ruleset into one text blob for the session's rules.txt."""
+    out = []
+    for p in paths:
+        out.append(f"# --- {p} ---")
+        out.append(p.read_text().rstrip("\n"))
+    return "\n".join(out) + "\n"
+
+
+# --- shared proxy -----------------------------------------------------------
+
+def read_proxy():
+    return _read_json(PROXY_JSON)
+
+
+def proxy_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists but not ours — count it alive
+    return True
+
+
+def _proxy_running():
+    m = read_proxy()
+    return bool(m and proxy_alive(m.get("pid")))
+
+
+def _clear_proxy_files():
+    for p in (PROXY_JSON, PROXY_SOCK):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def start_shared_proxy(base_port):
+    """Start the detached multi-session mitmdump; write proxy.json; return its meta."""
+    mitmdump = which("mitmdump", "pip install mitmproxy")
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"proxy-{datetime.now():%Y%m%d-%H%M%S}.log"
+    ports = list(range(base_port, base_port + POOL_SIZE))
+    argv = [mitmdump, "-s", str(ADDON)]
+    for p in ports:
+        argv += ["--mode", f"regular@{p}"]
+    # Multi-session mode: EGRESS_SESSIONS_DIR on, EGRESS_RULES off (addon needs exactly one).
+    env = dict(os.environ, EGRESS_SESSIONS_DIR=str(SESSIONS_DIR),
+               EGRESS_CONTROL_SOCK=str(PROXY_SOCK))
+    env.pop("EGRESS_RULES", None)
+    with open(log_path, "wb") as log:
+        proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            die(f"proxy exited at startup — {log_path}:\n{tail(log_path)}")
+        try:
+            with socket.create_connection(("127.0.0.1", base_port), timeout=0.5):
+                break
+        except OSError:
+            time.sleep(0.2)
+    else:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        die(f"proxy did not open port {base_port} within 15s — see {log_path}")
+    meta = {"pid": proc.pid, "base_port": base_port, "ports": ports,
+            "log": str(log_path), "sock": str(PROXY_SOCK), "started": now_iso()}
+    _write_json(PROXY_JSON, meta)
+    return meta
+
+
+def ensure_proxy(base_port):
+    """Return the running shared-proxy meta, starting it (on base_port) if need be."""
+    meta = read_proxy()
+    if meta and proxy_alive(meta.get("pid")):
+        return meta
+    if meta:                                  # stale meta from a dead proxy
+        _clear_proxy_files()
+    meta = start_shared_proxy(base_port)
+    _wait_control_sock(10)                     # base-port readiness ≠ socket readiness
+    return meta
+
+
+def stop_proxy(meta):
+    pid = meta.get("pid") if meta else None
+    if pid and proxy_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and proxy_alive(pid):
+            time.sleep(0.1)
+        if proxy_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    _clear_proxy_files()
+
+
+def pick_port(proxy, name):
+    """Lowest pool port not already claimed by another session's meta."""
+    claimed = {m.get("port") for m in list_metas() if m.get("name") != name}
+    for p in proxy["ports"]:
+        if p not in claimed:
+            return p
+    die(f"no free proxy ports (pool {proxy['ports'][0]}..{proxy['ports'][-1]} is full)")
+
+
+# --- control socket ---------------------------------------------------------
+
+def _sock_call(req):
+    """One line-delimited JSON request/response against the proxy control socket."""
+    if not PROXY_SOCK.exists():
+        die("shared proxy control socket missing — is a session up?")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(5)
+            s.connect(str(PROXY_SOCK))
+            f = s.makefile("rw")
+            f.write(json.dumps(req) + "\n")
+            f.flush()
+            line = f.readline()
+    except OSError as e:
+        die(f"control socket error: {e}")
+    if not line:
+        die("control socket closed without a response")
+    try:
+        resp = json.loads(line)
+    except ValueError:
+        die("control socket sent a non-JSON response")
+    if not resp.get("ok"):
+        die(f"control op {req.get('op')!r} failed: {resp.get('error', 'unknown error')}")
+    return resp
+
+
+def _wait_control_sock(timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                s.connect(str(PROXY_SOCK))
+                f = s.makefile("rw")
+                f.write('{"op": "ping"}\n')
+                f.flush()
+                if f.readline():
+                    return
+        except OSError:
+            pass
+        time.sleep(0.2)
+    die("shared proxy control socket did not become ready")
+
+
+def _push_secrets(ruleset):
+    """Push every inject_auth secret we hold in the env, then fail on any still missing."""
+    names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
+    for n in names:
+        value = os.environ.get(f"EGRESS_SECRET_{n.upper()}")
+        if value:                                       # value goes over the socket only
+            _sock_call({"op": "set_secret", "name": n.lower(), "value": value})
+    have = {x.lower() for x in _sock_call({"op": "list_secrets"}).get("names", [])}
+    missing = [n for n in names if n.lower() not in have]
+    if missing:
+        die("missing secret(s): "
+            + ", ".join(f'EGRESS_SECRET_{n.upper()}="<header>: <value>"' for n in missing))
+
+
+# --- msb session guests -----------------------------------------------------
+
+def _msb():
+    return which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
+
+
+def msb_create_argv(sandbox, image, port, *, mounts=(), env=()):
+    """A backgrounded, idling guest whose only egress is its own proxy port."""
+    argv = [_msb(), "create", image, "--name", sandbox, "--pull", "never"]
+    for m in mounts:
+        argv += ["-v", m]
+    url = f"http://{PROXY_ALIAS}:{port}"
+    for var in PROXY_ENV_VARS:                          # inherited by every later exec
+        argv += ["-e", f"{var}={url}"]
+    for pair in env:
+        argv += ["-e", pair]
+    argv += ["--net-default-egress", "deny", "--net-rule", f"allow@host:tcp:{port}"]
+    return argv
+
+
+def msb_exec_argv(sandbox, cmd, *, tty=False, env=()):
+    argv = [_msb(), "exec", "-q"]                       # -q silences msb progress noise
+    if tty:
+        argv.append("-t")
+    for pair in env:
+        argv += ["-e", pair]
+    return argv + [sandbox, "--"] + list(cmd)
+
+
+def _workspace_mount(workspace):
+    if not workspace:
+        return None, []
+    w = Path(workspace).resolve()
+    if not w.is_dir():
+        die(f"workspace is not a directory: {w}")
+    return str(w), [f"{w}:/workspace:rw"]
+
+
+def _provision_session(name, image, port, rule_paths, ruleset, mounts, ws, env):
+    """Claim the port (meta.json) and boot the guest; remove the session dir on any failure."""
+    sdir = session_dir(name)
+    try:
+        sdir.mkdir(parents=True)                        # exist_ok=False: race-safe claim
+    except FileExistsError:
+        die(f"session already exists: {sdir}")
+    try:
+        (sdir / "rules.txt").write_text(_compose_rules(rule_paths))
+        write_meta(name, {"name": name, "sandbox": sandbox_name(name), "port": port,
+                          "image": image, "workspace": ws, "created": now_iso()})
+        _push_secrets(ruleset)
+        if subprocess.run(msb_create_argv(sandbox_name(name), image, port,
+                                          mounts=mounts, env=env)).returncode:
+            die(f"msb create failed for session {name!r}")
+    except BaseException:                                # incl. SystemExit from die()
+        shutil.rmtree(sdir, ignore_errors=True)
+        raise
+
+
+def _teardown_session(meta):
+    """Stop (required) then rm the guest, then drop the session dir. Best-effort, fail-clean."""
+    name = meta.get("name")
+    sandbox = meta.get("sandbox") or (sandbox_name(name) if name else None)
+    msb = shutil.which("msb")
+    if msb and sandbox:
+        subprocess.run([msb, "stop", sandbox],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if subprocess.run([msb, "rm", sandbox],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            say(f"warning: msb rm {sandbox} failed — remove it manually")
+    if name:
+        shutil.rmtree(session_dir(name), ignore_errors=True)
+
+
+def _maybe_stop_proxy():
+    """Terminate the shared proxy once the last session is gone."""
+    if list_metas():
+        return
+    meta = read_proxy()
+    if meta:
+        stop_proxy(meta)
+
+
 # --- commands ------------------------------------------------------------------
 
 _DOCKER_PLATFORMS = {"arm64": "linux/arm64", "aarch64": "linux/arm64",
@@ -227,33 +555,157 @@ def cmd_proxy(args):
         stop(proc)
 
 
+def _strip_cmd_sep(cmd):
+    return cmd[1:] if cmd and cmd[0] == "--" else cmd
+
+
 def cmd_run(args):
+    """One-shot over a persistent session: up (ephemeral) -> exec -> down, all foreground."""
     check_env(args.env)
     rule_paths = resolve_rules(args.preset or ["claude"], args.rules or [])
-    check_secrets(load_ruleset(rule_paths), fatal=True)
-    cmd = args.cmd
-    if cmd and cmd[0] == "--":
-        cmd = cmd[1:]
-    cmd = cmd or ["claude"]
+    ruleset = load_ruleset(rule_paths)
+    check_secrets(ruleset, fatal=True)          # fail early before touching host state
+    cmd = _strip_cmd_sep(args.cmd) or ["claude"]
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
-    mounts = []
-    if args.workspace:
-        ws = Path(args.workspace).resolve()
-        if not ws.is_dir():
-            die(f"workspace is not a directory: {ws}")
-        mounts.append(f"{ws}:/workspace:rw")
-    proxy, log_path = start_proxy(rule_paths, args.port)
-    say(f"proxy :{args.port} ({', '.join(p.name for p in rule_paths)}) · audit: tail -f {log_path}")
-    guest = None
+    ws, mounts = _workspace_mount(args.workspace)
+    name = uuid4().hex[:6]
+    proxy_was_running = _proxy_running()        # --port is the base port iff WE start it
+    proxy = ensure_proxy(args.port)
+    port = pick_port(proxy, name)
+    rc, provisioned = 1, False
     try:
-        guest = subprocess.Popen(msb_argv(args.image, cmd, args.port, tty=tty, mounts=mounts,
-                                          env=args.env))
+        _provision_session(name, args.image, port, rule_paths, ruleset, mounts, ws, args.env)
+        provisioned = True
+        say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
+        guest = subprocess.Popen(msb_exec_argv(sandbox_name(name), cmd, tty=tty, env=args.env))
         rc = wait_foreground(guest)
     finally:
-        if guest is not None:
-            stop(guest)
-        stop(proxy)
+        if provisioned:
+            _teardown_session(read_meta(name) or
+                              {"name": name, "sandbox": sandbox_name(name)})
+        # Only tear down the proxy if this command started it and nothing else needs it.
+        if not proxy_was_running and not list_metas():
+            stop_proxy(read_proxy() or proxy)
     sys.exit(rc)
+
+
+def cmd_up(args):
+    check_env(args.env)
+    rule_paths = resolve_rules(args.preset or ["claude"], args.rules or [])
+    ruleset = load_ruleset(rule_paths)
+    name = args.name or uuid4().hex[:6]
+    _validate_name(name)
+    if session_dir(name).exists():
+        die(f"session {name!r} already exists")
+    ws, mounts = _workspace_mount(args.workspace)
+    proxy = ensure_proxy(args.port)
+    port = pick_port(proxy, name)
+    _provision_session(name, args.image, port, rule_paths, ruleset, mounts, ws, args.env)
+    say(f"session {name} up · proxy :{port} · audit: tail -f {proxy['log']}")
+    print(name)
+
+
+def cmd_exec(args):
+    meta = read_meta(args.name)
+    if not meta:
+        die(f"no such session: {args.name!r} (silkgate ls)")
+    check_env(args.env)
+    cmd = _strip_cmd_sep(args.cmd)
+    if not cmd:
+        die("nothing to run — usage: silkgate exec NAME [-t] [-e K=V]... -- CMD ...")
+    tty = args.tty if args.tty is not None else sys.stdin.isatty()
+    guest = subprocess.Popen(msb_exec_argv(meta["sandbox"], cmd, tty=tty, env=args.env))
+    sys.exit(wait_foreground(guest))
+
+
+def cmd_attach(args):
+    meta = read_meta(args.name)
+    if not meta:
+        die(f"no such session: {args.name!r} (silkgate ls)")
+    guest = subprocess.Popen(msb_exec_argv(meta["sandbox"], ["claude"], tty=True))
+    sys.exit(wait_foreground(guest))
+
+
+def cmd_down(args):
+    meta = read_meta(args.name)
+    if not meta:
+        die(f"no such session: {args.name!r} (silkgate ls)")
+    _teardown_session(meta)
+    _maybe_stop_proxy()
+    say(f"session {args.name} down")
+
+
+def _age(iso):
+    try:
+        t = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return "?"
+    secs = max(0, int((datetime.now(t.tzinfo) - t).total_seconds()))
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if secs >= size:
+            return f"{secs // size}{unit}"
+    return f"{secs}s"
+
+
+def _msb_statuses():
+    """sandbox name -> STATUS, parsed from `msb list` (NAME/IMAGE/STATUS columns)."""
+    msb = shutil.which("msb")
+    if not msb:
+        return {}
+    try:
+        out = subprocess.run([msb, "list"], capture_output=True, text=True).stdout
+    except OSError:
+        return {}
+    statuses = {}
+    for line in out.splitlines()[1:]:            # skip the header row
+        cols = line.split()
+        if len(cols) >= 3:
+            statuses[cols[0]] = cols[2]
+    return statuses
+
+
+def _print_table(rows):
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip())
+
+
+def cmd_ls(args):
+    metas = list_metas()
+    if not metas:
+        print("no sessions")
+    else:
+        statuses = _msb_statuses()
+        rows = [("NAME", "STATUS", "PORT", "WORKSPACE", "AGE")]
+        for m in metas:
+            rows.append((m["name"], statuses.get(m["sandbox"], "?"),
+                         str(m.get("port", "?")), m.get("workspace") or "-",
+                         _age(m.get("created"))))
+        _print_table(rows)
+    proxy = read_proxy()
+    if proxy and proxy_alive(proxy.get("pid")):
+        pool = proxy["ports"]
+        print(f"proxy: pid {proxy['pid']} alive · ports {pool[0]}-{pool[-1]} · {proxy['log']}")
+    else:
+        print("proxy: not running")
+
+
+def cmd_secret_set(args):
+    name = args.name
+    value = os.environ.get(f"EGRESS_SECRET_{name.upper()}")
+    if not value:
+        die(f'missing secret: EGRESS_SECRET_{name.upper()}="<header>: <value>"')
+    if not _proxy_running():
+        die("shared proxy not running — start a session first (silkgate up)")
+    _sock_call({"op": "set_secret", "name": name.lower(), "value": value})
+    say(f"secret {name.lower()} set")            # value never printed
+
+
+def cmd_secret_ls(args):
+    if not _proxy_running():
+        die("shared proxy not running — start a session first (silkgate up)")
+    for n in sorted(_sock_call({"op": "list_secrets"}).get("names", [])):
+        print(n)
 
 
 FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
@@ -325,19 +777,63 @@ def main():
     p.add_argument("--port", type=int, default=8090, help="proxy listen port (default: 8090)")
     p.set_defaults(fn=cmd_verify)
 
+    def env_opt(p):
+        p.add_argument("-e", "--env", action="append", default=[], metavar="NAME=VALUE",
+                       help="set an env var in the guest (repeatable; secrets belong in "
+                            "EGRESS_SECRET_* + inject_auth instead)")
+
     p = sub.add_parser("run", help="run an egress-locked guest behind the proxy")
     rules_opts(p)
-    p.add_argument("--port", type=int, default=8090, help="proxy listen port (default: 8090)")
+    p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
+                   help="shared-proxy base port when this command starts it (default: 8090)")
     p.add_argument("--image", default=DEFAULT_IMAGE, help=f"guest image (default: {DEFAULT_IMAGE})")
     p.add_argument("--workspace", metavar="DIR", help="mount DIR at /workspace (rw)")
-    p.add_argument("-e", "--env", action="append", default=[], metavar="NAME=VALUE",
-                   help="set an env var in the guest (repeatable; secrets belong in "
-                        "EGRESS_SECRET_* + inject_auth instead)")
+    env_opt(p)
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
                    help="allocate a PTY (default: yes if stdin is a TTY)")
     p.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD ...",
                    help="guest command (default: claude)")
     p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("up", help="start a persistent session (background guest + shared proxy)")
+    p.add_argument("--name", metavar="N", help="session name (default: random 6-char id)")
+    p.add_argument("--workspace", metavar="DIR", help="mount DIR at /workspace (rw)")
+    rules_opts(p)
+    env_opt(p)
+    p.add_argument("--image", default=DEFAULT_IMAGE, help=f"guest image (default: {DEFAULT_IMAGE})")
+    p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
+                   help="shared-proxy base port when this command starts it (default: 8090)")
+    p.set_defaults(fn=cmd_up)
+
+    p = sub.add_parser("exec", help="run a command in a session's guest")
+    p.add_argument("name", metavar="NAME", help="session name")
+    p.add_argument("-t", "--tty", action=argparse.BooleanOptionalAction,
+                   help="allocate a PTY (default: yes if stdin is a TTY)")
+    env_opt(p)
+    # nargs='*' (not REMAINDER): with a positional NAME first, REMAINDER would swallow
+    # -t/-e that follow NAME. '*' lets them parse; use `--` to pass flags on to CMD.
+    p.add_argument("cmd", nargs="*", metavar="-- CMD ...",
+                   help="command to run in the guest (use -- before flag-bearing commands)")
+    p.set_defaults(fn=cmd_exec)
+
+    p = sub.add_parser("attach", help="attach a TTY to a session (runs claude)")
+    p.add_argument("name", metavar="NAME", help="session name")
+    p.set_defaults(fn=cmd_attach)
+
+    p = sub.add_parser("down", help="stop + remove a session (and the proxy if it was the last)")
+    p.add_argument("name", metavar="NAME", help="session name")
+    p.set_defaults(fn=cmd_down)
+
+    p = sub.add_parser("ls", help="list sessions and shared-proxy health")
+    p.set_defaults(fn=cmd_ls)
+
+    p = sub.add_parser("secret", help="manage host-held secrets in the shared proxy")
+    ssub = p.add_subparsers(dest="secret_cmd", required=True)
+    q = ssub.add_parser("set", help="push EGRESS_SECRET_<NAME> to the proxy (value never on argv)")
+    q.add_argument("name", metavar="NAME", help="secret name (reads EGRESS_SECRET_<NAME>)")
+    q.set_defaults(fn=cmd_secret_set)
+    q = ssub.add_parser("ls", help="list secret names held by the proxy (names only)")
+    q.set_defaults(fn=cmd_secret_ls)
 
     # SIGTERM must run the finally-blocks that stop mitmdump/msb, not kill us outright.
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))
