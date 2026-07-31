@@ -179,8 +179,9 @@ msb run claude-sandbox:poc --pull never -t \
   -- claude
 ```
 `msb run`'s stdio is the channel back to the parent: `-t` gives you the TUI; a parent **agent**
-instead drops `-t` and drives `claude -p --output-format stream-json` (one-shot per turn,
-`--resume <id>` to continue), reading the structured event stream.
+instead drops `-t` and drives `claude -p --output-format stream-json`, reading the structured
+event stream. One `msb run` is one turn — session state dies with the VM, so `--resume` fails
+across runs; multi-turn needs a long-lived guest or a persisted state mount.
 
 ## Notes / residual (see doc/THREAT-MODEL.md Tier 3)
 - The proxy decrypts via a private CA you own; don't reuse that CA elsewhere.

@@ -123,7 +123,9 @@ The `msb run` process's **stdio is the channel** back to the parent — a proces
 egress, so it never touches the proxy boundary:
 - **Human (interactive TUI):** `msb run -t … -- claude` attaches Claude Code's TUI to the terminal.
 - **Parent agent (programmatic):** `msb run … -- claude -p --output-format stream-json` emits a
-  structured event stream the parent reads (`--resume <id>` to continue across turns).
+  structured event stream the parent reads. One `msb run` is one turn: session state lives in
+  `/root/.claude` and dies with the VM, so `--resume <id>` fails across runs — multi-turn needs
+  a long-lived guest (`msb exec` per turn) or a persisted state mount.
 
 With an Anthropic **Console/org API key** (injected at the proxy) *both* work — but interactive
 additionally probes `platform.claude.com/v1/oauth/hello` at startup and fails only if that host is
