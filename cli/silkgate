@@ -173,19 +173,16 @@ def wait_foreground(proc):
         signal.signal(signal.SIGINT, previous)
 
 
-def msb_argv(image, cmd, port, *, tty=False, pull_never=True, mounts=(), env=()):
+def msb_argv(image, cmd, port, *, pull_never=True, mounts=()):
+    """One-shot `msb run` of a guest locked to one proxy port (the verify path)."""
     argv = [which("msb", "curl -fsSL https://install.microsandbox.dev | sh"), "run", image]
     if pull_never:
         argv += ["--pull", "never"]
-    if tty:
-        argv.append("-t")
     for m in mounts:
         argv += ["-v", m]
     url = f"http://{PROXY_ALIAS}:{port}"
     for var in PROXY_ENV_VARS:
         argv += ["-e", f"{var}={url}"]
-    for pair in env:
-        argv += ["-e", pair]
     argv += ["--net-default-egress", "deny", "--net-rule", f"allow@host:tcp:{port}"]
     return argv + ["--"] + list(cmd)
 
@@ -246,10 +243,6 @@ def _validate_name(name):
 
 def read_meta(name):
     return _read_json(session_dir(name) / "meta.json")
-
-
-def write_meta(name, meta):
-    _write_json(session_dir(name) / "meta.json", meta)
 
 
 def list_metas():
@@ -496,7 +489,7 @@ _ERR_TAG = b"\x1e"          # RS: not something line-oriented guest output produ
 # $? stays the command's own. POSIX sh + mkfifo; stdin is /dev/null, as for any captured run.
 _RELAY_SH = ('d=$(mktemp -d); mkfifo "$d/o" "$d/e"; '
              'while IFS= read -r l || [ -n "$l" ]; do printf "%s\\n" "$l"; done <"$d/o" & po=$!; '
-             'while IFS= read -r l || [ -n "$l" ]; do printf "\\036%s\\n" "$l"; done <"$d/e" & pe=$!; '
+             f'while IFS= read -r l || [ -n "$l" ]; do printf "\\{ord(_ERR_TAG):03o}%s\\n" "$l"; done <"$d/e" & pe=$!; '
              '"$@" </dev/null >"$d/o" 2>"$d/e"; rc=$?; wait $po $pe; rm -rf "$d"; exit $rc')
 
 
@@ -670,7 +663,6 @@ def cmd_run(args):
     check_env(args.env)
     rule_paths = resolve_rules(args.preset or ["claude"], args.rules or [])
     ruleset = load_ruleset(rule_paths)
-    check_secrets(ruleset, fatal=True)          # fail early before touching host state
     cmd = _strip_cmd_sep(args.cmd) or ["claude"]
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
     ws, mounts = _workspace_mount(args.workspace)

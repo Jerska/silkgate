@@ -42,8 +42,20 @@ export EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"   # host-only; pushed to 
 ./cli/silkgate down foo                      # stop + rm the VM, free the port; last out stops the proxy
 ```
 
-`up` pushes every `EGRESS_SECRET_<NAME>` a session's `inject_auth` rules need and refuses to start
-if one is missing. Add or rotate a secret on the running shared proxy with `silkgate secret set
+A guest command's output arrives **live**, with its stdout and stderr on separate streams, so a
+parent can watch a task and still parse a captured `stream-json` — `run` and `exec` relay it out
+of the microVM as it is written. `-t` instead hands the command a real terminal, which changes how
+it behaves (colors, cursor control, both streams merged into the terminal), so keep it for a TUI
+and leave it off for anything you intend to parse. To watch a session you did not start in the
+foreground, or to see only its egress decisions:
+```sh
+./cli/silkgate logs foo -f            # the guest's output, live
+./cli/silkgate logs foo --audit -f    # just this session's allow/deny lines
+```
+
+`up` pushes every `EGRESS_SECRET_<NAME>` a session's `inject_auth` rules need, and refuses to start
+if one is neither in your environment nor already held by the running proxy — so a secret pushed
+once serves later sessions started from a shell that never had it. Add or rotate a secret on the running shared proxy with `silkgate secret set
 anthropic` — it reads `EGRESS_SECRET_ANTHROPIC` from the environment; the value is **never** an
 argument. `silkgate secret ls` lists names only, never values. `silkgate run` is now just `up` →
 `exec` → `down` around an ephemeral auto-named session (so its `--port` sets the shared-proxy base

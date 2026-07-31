@@ -120,7 +120,9 @@ Claude Code nor Codex ships, and the whole reason for the exercise.
 ## Driving the agent — interactive vs programmatic
 
 The guest process's **stdio is the channel** back to the parent — a process pipe, not network
-egress, so it never touches the proxy boundary:
+egress, so it never touches the proxy boundary. The CLI relays that channel line by line as the
+guest writes it, keeping stdout and stderr apart and leaving the command non-interactive, so a
+parent can supervise a run and parse its output at the same time:
 - **Human (interactive TUI):** `silkgate attach <name>` (`msb exec -t … -- claude`) attaches
   Claude Code's TUI to the terminal.
 - **Parent agent (programmatic):** `silkgate exec <name> -- claude -p --output-format stream-json`
