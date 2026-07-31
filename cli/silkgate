@@ -864,8 +864,11 @@ def cmd_logs(args):
             _logs_audit(args)
         else:
             _logs_guest(args, meta)
-    except KeyboardInterrupt:                        # Ctrl-C out of follow: quiet, status 130
-        sys.exit(130)
+    except KeyboardInterrupt:
+        # Ctrl-C out of follow: quiet, status 130. os._exit skips interpreter shutdown, which
+        # would otherwise re-surface the pending SIGINT as a traceback on stderr.
+        sys.stdout.flush()
+        os._exit(130)
     except BrokenPipeError:                          # `silkgate logs -f x | head`: quiet exit
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         sys.exit(0)
