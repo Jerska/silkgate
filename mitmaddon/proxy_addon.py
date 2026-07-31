@@ -52,6 +52,15 @@ def _deny(flow, reason, code=403):
     _audit("deny", flow, reason)
 
 
+def responseheaders(flow: http.HTTPFlow) -> None:
+    # Forward response bytes as they arrive. mitmproxy's default buffers the whole body
+    # before sending anything, which starves streaming consumers: an SSE completion that
+    # generates longer than the client's ~60s timeout can never be delivered, and the
+    # client retries into the same wall. Enforcement is request-side only, so nothing
+    # here needs the assembled response body.
+    flow.response.stream = True
+
+
 def request(flow: http.HTTPFlow) -> None:
     try:
         req = flow.request
