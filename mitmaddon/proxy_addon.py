@@ -116,6 +116,8 @@ class SessionRegistry:
         except OSError:
             names = []
         for name in names:
+            if name.startswith("."):             # CLI staging dirs are not sessions
+                continue
             try:                                 # skip half-written / malformed sessions
                 with open(os.path.join(self._dir, name, "meta.json")) as fh:
                     port = int(json.load(fh)["port"])
@@ -150,6 +152,10 @@ class SessionRegistry:
         """Return (name, RuleSet) for a listener port, or raise SessionError (fail closed)."""
         self._refresh_ports()
         name = self._ports.get(port)
+        if name is None:
+            self._dir_mtime = None               # a miss may be a scan that raced a session's
+            self._refresh_ports()                # appearance — rescan once before denying
+            name = self._ports.get(port)
         if name is None:
             raise SessionError("no session for port")
         return name, self._ruleset(name)

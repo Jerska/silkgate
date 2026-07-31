@@ -34,7 +34,7 @@ make the network the only thing it can do — under inspection.
 │  │  Coding agent (Claude Code / Codex CLI) runs HERE — the whole process tree    │ │
 │  │  toolchain: node, python, git, build tools                                    │ │
 │  │  trust store + NODE_EXTRA_CA_CERTS/REQUESTS_CA_BUNDLE ➜ private CA cert        │ │
-│  │  HTTPS_PROXY=10.0.2.2:8090   ·   NO direct internet route                      │ │
+│  │  HTTPS_PROXY=<session port>  ·   NO direct internet route                      │ │
 │  │  mount (virtiofs):  /workspace ⇄ ~/projects/foo   (rw, the ONLY host path)    │ │
 │  │                     ✗ no ~/.ssh  ✗ no ~/.aws  ✗ no dotfiles  ✗ no host creds  │ │
 │  └──────────────────────────────┬─────────────────────────────────────────────┘  │

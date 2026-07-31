@@ -255,6 +255,8 @@ def list_metas():
         return []
     metas = []
     for d in sorted(SESSIONS_DIR.iterdir()):
+        if d.name.startswith("."):               # staging dirs are not sessions
+            continue
         m = read_meta(d.name)
         if m:
             metas.append(m)
@@ -476,21 +478,30 @@ def _workspace_mount(workspace):
 
 
 def _provision_session(name, image, port, rule_paths, ruleset, mounts, ws, env):
-    """Claim the port (meta.json) and boot the guest; remove the session dir on any failure."""
+    """Stage the session dir then rename it into the registry, so its appearance is atomic:
+    the addon rescans on the sessions-dir mtime and must never see (and cache) a half-written
+    session. Boot the guest after; remove the session on any failure."""
     sdir = session_dir(name)
-    try:
-        sdir.mkdir(parents=True)                        # exist_ok=False: race-safe claim
-    except FileExistsError:
+    if sdir.exists():
         die(f"session already exists: {sdir}")
+    tmp = SESSIONS_DIR / f".tmp-{name}"                  # dot-prefixed: invisible to registries
+    shutil.rmtree(tmp, ignore_errors=True)               # stale leftover from a crash
+    tmp.mkdir(parents=True)
     try:
-        (sdir / "rules.txt").write_text(_compose_rules(rule_paths))
-        write_meta(name, {"name": name, "sandbox": sandbox_name(name), "port": port,
-                          "image": image, "workspace": ws, "created": now_iso()})
+        (tmp / "rules.txt").write_text(_compose_rules(rule_paths))
+        _write_json(tmp / "meta.json", {"name": name, "sandbox": sandbox_name(name),
+                                        "port": port, "image": image, "workspace": ws,
+                                        "created": now_iso()})
+        try:
+            tmp.rename(sdir)                             # atomic claim; fails if name raced us
+        except OSError:
+            die(f"session already exists: {sdir}")
         _push_secrets(ruleset)
         if subprocess.run(msb_create_argv(sandbox_name(name), image, port,
                                           mounts=mounts, env=env)).returncode:
             die(f"msb create failed for session {name!r}")
     except BaseException:                                # incl. SystemExit from die()
+        shutil.rmtree(tmp, ignore_errors=True)
         shutil.rmtree(sdir, ignore_errors=True)
         raise
 
