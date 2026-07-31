@@ -166,7 +166,7 @@ additionally probes `platform.claude.com/v1/oauth/hello` at startup and fails on
 - **Shared MITM CA** — by design you can read all guest TLS. Fine (you own both ends); don't
   reuse that CA elsewhere.
 
-## Tier 1 enforcement on macOS (resolved — primary target)
+## Tier 1 enforcement (resolved — verified on macOS and Linux)
 
 Forcing *all* egress through the proxy on macOS+microsandbox **does not need a nested Linux
 VM, `pf`, or vsock plumbing.** microsandbox does not use libkrun's default TSI mode — it
@@ -184,8 +184,8 @@ attaches a virtio-net device and terminates it in its **own host-side userspace 
   allow rule the default-deny yields NXDOMAIN — no explicit DNS deny is needed. The proxy alias
   resolves via the guest's `/etc/hosts`.
 
-So on macOS, **microsandbox's stack is Tier 1; the mitmproxy + DSL is Tier 2.** No separate
-L3 firewall is built. (Linux alternative: tap + `nft` — see THREAT-MODEL.md.)
+So on both OSes, **microsandbox's stack is Tier 1; the mitmproxy + DSL is Tier 2.** No separate
+L3 firewall is built. (Linux fallback if that ever changes: tap + `nft` — see THREAT-MODEL.md.)
 
 **Fallbacks if microsandbox's policy proves insufficient** (ranked): (a)
 `VZFileHandleNetworkDeviceAttachment` userspace gateway (fork gvproxy) — strongest, but
@@ -194,7 +194,9 @@ containment, but needs a custom host relay (no host `AF_VSOCK` on macOS) + an in
 TCP→vsock shim; (c) host `pf` on `bridge100` keyed by VM subnet — fragile (races Apple's
 InternetSharing daemon), belt-and-suspenders only.
 
-**Verified live (macOS, Apple Silicon):** a root guest had no direct TCP, DNS, IPv6, or ICMP
-egress — only the proxy was reachable; a root guest re-adding its default route still couldn't
-egress; and the addon allowed the allowlisted host while 403'ing an unlisted one
-(`verify_guest.sh`, 7/7). Caveat: **pin your `msb --version`** — rule-grammar scope names drift pre-1.0.
+**Verified live (macOS/Apple Silicon · Linux/x86_64):** a root guest had no direct TCP, DNS,
+IPv6, or ICMP egress — only the proxy was reachable; a root guest re-adding its default route
+still couldn't egress; and the addon allowed the allowlisted host while 403'ing an unlisted one
+(`verify_guest.sh`, 7/7 on both — macOS on HVF with msb 0.5.4/0.5.7, Linux on KVM with msb
+0.6.8 via the `test/linux/` container, same flags unchanged). Caveat: **pin your
+`msb --version`** — rule-grammar scope names drift pre-1.0.

@@ -52,12 +52,15 @@ guest `HTTPS_PROXY=host.microsandbox.internal:<proxyport>`. DNS: microsandbox in
 UDP/53 at its gateway but applies the egress policy per query, so with no DNS allow rule the
 default-deny yields NXDOMAIN — no explicit DNS deny needed; the proxy alias resolves via
 `/etc/hosts`, so nothing breaks. Native on
-HVF — no nested VM, no `pf`. *(Verified live on macOS/Apple Silicon: a root guest had no direct
-TCP/DNS/IPv6/ICMP egress and couldn't escape by re-routing — `verify_guest.sh` 7/7. Pin your `msb --version`; scope names drift pre-1.0.)*
+HVF and KVM — no nested VM, no `pf`, no `nft`. *(Verified live 7/7 on macOS/Apple Silicon
+(HVF, msb 0.5.4/0.5.7) **and** Linux/x86_64 (KVM, msb 0.6.8, from the `test/linux/` container
+on a glibc-2.35 host): a root guest had no direct TCP/DNS/IPv6/ICMP egress and couldn't escape
+by re-routing. Pin your `msb --version`; scope names drift pre-1.0.)*
 
-**Linux alternative / CI:** microVM tap device + an `nft` ruleset in the `inet` family on that
+**Linux nft fallback:** microVM tap device + an `nft` ruleset in the `inet` family on that
 interface — allow `ct state established,related`, allow new TCP to `proxy_ip . proxy_port`
 only, `drop` everything else (covers all UDP, ICMP, IPv6, other TCP). Guest has no resolver.
+Not needed while microsandbox's own stack holds (verified above); kept as the fallback.
 
 **Fallbacks** if microsandbox's policy is insufficient: `VZFileHandleNetworkDeviceAttachment`
 userspace gateway (strongest, but Virtualization.framework-only → off libkrun); no-NIC + vsock
@@ -118,6 +121,6 @@ races Apple daemons — defense-in-depth only).
 
 | Tier | Owner | In this design |
 |---|---|---|
-| 1 — network-layer prerequisites | Host/VMM (outside guest) | **Implemented & verified** (macOS via microsandbox, `verify_guest.sh` 7/7; Linux nft) |
+| 1 — network-layer prerequisites | Host/VMM (outside guest) | **Implemented & verified** (macOS & Linux via microsandbox, `verify_guest.sh` 7/7 on both; nft as Linux fallback) |
 | 2 — request-level enforcement | The proxy + rule engine | **Implemented** |
 | 3 — irreducible residual | Rule discipline + operations | **Accepted & documented**, not code |

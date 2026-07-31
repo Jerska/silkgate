@@ -8,6 +8,9 @@
 #   docker build -t silkgate-verify test/linux/
 #   docker run --rm -it --device /dev/kvm -v "$PWD:/silkgate" silkgate-verify \
 #     /silkgate/cli/silkgate verify --full
+#
+# Add --network=host to both commands if DNS fails inside containers (hosts whose
+# resolv.conf points at a localhost stub resolver).
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -1,7 +1,7 @@
 # Silkgate
 
-TLS-terminating egress proxy for a sandboxed, adversarial coding agent, **macOS-first**
-(Apple Silicon). Two enforcement layers:
+TLS-terminating egress proxy for a sandboxed, adversarial coding agent. Verified live on
+**macOS (Apple Silicon)** and **Linux (x86_64/KVM)**. Two enforcement layers:
 
 - **Tier 1 — force all egress to the proxy (outside the guest):** microsandbox's own
   host-side network policy. No nft, no pf, no nested VM.
@@ -34,8 +34,9 @@ The proxy audit log path is printed at startup (`tail -f` it to watch allow/deny
 
 All commands below run from the repo root.
 
-> ⚠️ microsandbox is pre-1.0 (verified against **v0.5.7**, repo `superradcompany/microsandbox`,
-> formerly `microsandbox/microsandbox`). Flags can shift — confirm with `msb run --help`.
+> ⚠️ microsandbox is pre-1.0 (verified against **v0.5.4/v0.5.7 on macOS** and **v0.6.8 on
+> Linux**, repo `superradcompany/microsandbox`, formerly `microsandbox/microsandbox`; the
+> `--net-*` flags were identical across all three). Flags can shift — confirm with `msb run --help`.
 
 ## Step 1 — engine tests (no deps)
 ```sh
@@ -50,11 +51,23 @@ export EGRESS_RULES=mitmaddon/presets/npm.txt                # what verify_guest
 mitmdump -s mitmaddon/proxy_addon.py --listen-port 8090
 ```
 
-## Step 3 — install & start microsandbox (host, Apple Silicon only)
+## Step 3 — install & start microsandbox (host)
 ```sh
 curl -fsSL https://install.microsandbox.dev | sh       # or: brew install superradcompany/tap/microsandbox
 msb server start --dev                                 # required for the server-backed path; harmless otherwise
 ```
+
+**Linux:** you need rw access to `/dev/kvm` (usually membership in the `kvm` group), and the
+msb release binaries need **glibc ≥ 2.39** (check `ldd --version`; they're built on Ubuntu
+24.04). On older hosts, run the proxy + msb inside the `test/linux/` container instead —
+`/dev/kvm` is passed through, so the microVM boundary is the host kernel's KVM either way:
+```sh
+docker build -t silkgate-verify test/linux/
+docker run --rm --device /dev/kvm -v "$PWD:/silkgate" silkgate-verify \
+  /silkgate/cli/silkgate verify --full
+```
+(Add `--network=host` to both commands if DNS fails inside containers — common when the host's
+`resolv.conf` points at a localhost stub resolver.)
 
 ## Step 4 — launch the Debian guest with Tier 1, then verify
 microsandbox runs standard OCI images, so `debian` is pulled from Docker Hub on first use.
@@ -107,7 +120,8 @@ switch them to `http://deb.debian.org` or pre-trust the CA. Default Debian 12 us
 - #3 runs as root (no direct egress) and #7 confirms a root guest re-adding its default route
   still can't get out — enforcement sits in the host stack below the guest NIC. If any of 3–7
   succeed, the boundary leaks → fall back per doc/ARCHITECTURE.md.
-- **Verified 7/7 on macOS (Apple Silicon)** (`iproute2` installed for #7). Now **pin your `msb --version`** and the exact flags here.
+- **Verified 7/7 on macOS (Apple Silicon) and on Linux (x86_64/KVM, via `test/linux/`)**
+  (`iproute2` installed for #7). Now **pin your `msb --version`** and the exact flags here.
 
 ## Step 5 — run Claude Code inside the guest (real agent + key injection)
 Build a guest image with Node + Claude Code + the CA, load it into msb, and run it egress-locked.
