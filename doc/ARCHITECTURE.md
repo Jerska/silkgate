@@ -119,18 +119,68 @@ Claude Code nor Codex ships, and the whole reason for the exercise.
 
 ## Driving the agent — interactive vs programmatic
 
-The `msb run` process's **stdio is the channel** back to the parent — a process pipe, not network
+The guest process's **stdio is the channel** back to the parent — a process pipe, not network
 egress, so it never touches the proxy boundary:
-- **Human (interactive TUI):** `msb run -t … -- claude` attaches Claude Code's TUI to the terminal.
-- **Parent agent (programmatic):** `msb run … -- claude -p --output-format stream-json` emits a
-  structured event stream the parent reads. One `msb run` is one turn: session state lives in
-  `/root/.claude` and dies with the VM, so `--resume <id>` fails across runs — multi-turn needs
-  a long-lived guest (`msb exec` per turn) or a persisted state mount.
+- **Human (interactive TUI):** `silkgate attach <name>` (`msb exec -t … -- claude`) attaches
+  Claude Code's TUI to the terminal.
+- **Parent agent (programmatic):** `silkgate exec <name> -- claude -p --output-format stream-json`
+  emits a structured event stream the parent reads.
+
+**One `msb run` is one turn.** It boots and tears down the VM per command, so session state under
+`/root/.claude` dies with it and `--resume <id>` fails across runs. **Persistent sessions are the
+fix:** `silkgate up` creates the VM once in the background (`msb create`) and each turn is an
+`msb exec` into that live VM, so `/root/.claude` — and the cloned repo, `node_modules`, build
+cache — survive between turns, and `claude -p --resume <id>` works across execs. The one-shot
+`silkgate run` remains: it is now just `up` → `exec` → `down` in a finally block, keeping the
+per-command lifecycle (and the per-turn VM boot) on purpose, for scripts that want no residue.
 
 With an Anthropic **Console/org API key** (injected at the proxy) *both* work — but interactive
 additionally probes `platform.claude.com/v1/oauth/hello` at startup and fails only if that host is
 **blocked**, so interactive runs allowlist `platform.claude.com/v1/oauth/**`. (No OAuth
 `setup-token` — that's Max/Pro-gated and unrelated to API-key auth.)
+
+## The shared-proxy session model
+
+Sessions share **one** mitmproxy process — not one proxy per VM. A single `mitmdump` listens on a
+**pool of ports** (base `8090`, 16 consecutive, `8090..8105`) via repeated `--mode regular@<port>`
+args, and each session claims one port from the pool. `silkgate up` starts this proxy the first
+time it's needed (detached, `start_new_session=True`), waits for the base port to accept, and
+records it in `~/.silkgate/proxy.json`; `silkgate down` terminates it once the last session goes
+away.
+
+**The listener port *is* the session identity — and it's spoof-proof.** Each sandbox's Tier-1
+net-rule allows egress to *only its own* session's port (`--net-rule "allow@host:tcp:<port>"`,
+default-deny otherwise), enforced in microsandbox's host-side stack **below** the guest (see Tier 1
+enforcement). So the port a request arrives on cannot be forged by guest-root: reaching another
+session's port is dropped before a real socket ever opens. The addon reads the accepted port from
+`flow.client_conn.sockname[1]`, maps port → session → that session's RuleSet, and enforces it.
+That ruleset is a **per-session snapshot** composed at `up` time into
+`~/.silkgate/sessions/<name>/rules.txt` (cached per port; invalidated by the sessions-dir mtime and
+the per-session `rules.txt` mtime). Unknown port, missing session, or unparsable rules **fail
+closed** — deny with reason `"no session for port"`, never falling through to another session's
+rules. Audit lines gain a `"session"` field. No per-request tokens are needed or used: the network
+layer already proves identity, once, below the guest.
+
+**Control plane: a unix socket, not an in-band HTTP endpoint.** The proxy also needs a channel for
+the host to push secrets and query health. It must **not** be a network endpoint on a proxy port:
+every guest can reach its proxy port (that is the whole point), so any in-band HTTP control plane
+would be reachable by an adversarial guest and would need its own authentication to be safe.
+Instead the addon serves a line-delimited-JSON protocol on a **unix socket**
+(`~/.silkgate/proxy.sock`, mode `0600`, started in its `running()` hook; a stale socket file is
+unlinked at start). A unix socket in the host filesystem is **unreachable from every guest by
+construction** — no host path is mounted into the guests and there is no network route to it —
+so it needs no auth. Ops: `ping`, `set_secret`, `list_secrets`; unknown ops and malformed lines are
+errors.
+
+**Secrets flow: env → CLI → socket → proxy memory.** The credential lives on the host only as
+`EGRESS_SECRET_<NAME>`. `silkgate up` (and `silkgate secret set <name>`) reads it from the local
+environment and pushes it over the control socket with `set_secret`; the addon holds it in an
+**in-memory** dict, layered over any `EGRESS_SECRET_*` env it was launched with (the socket wins on
+the same name). `inject_auth=<name>` resolves against that store. The value is **never** passed as
+an argv (so it never shows in `ps`), **never** written to disk, and **never** logged or echoed back
+— `list_secrets` returns names only. After pushing, `up` calls `list_secrets` and dies listing any
+`inject_auth` name in the session ruleset still missing, so a session never starts
+believing it holds a key it doesn't.
 
 ## Concrete starter stack
 

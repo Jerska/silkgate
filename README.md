@@ -15,22 +15,55 @@ The CLI automates Steps 1–5 below (prereqs: `pip install mitmproxy`, docker, m
 ```sh
 ./cli/silkgate build                     # guest image + mitmproxy CA, loaded into msb
 ./cli/silkgate verify                    # Tier-1 containment check (add --full for the proxy path)
-export EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"
-./cli/silkgate run                       # interactive Claude Code, egress-locked
+export EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"    # host-only; never enters the guest or argv
+./cli/silkgate run                       # interactive Claude Code, egress-locked (one-shot)
 ./cli/silkgate run --workspace ~/projects/foo -- claude --bare -p "task…"
 ```
 The proxy audit log path is printed at startup (`tail -f` it to watch allow/deny decisions).
 `--preset`/`--rules` compose allowlists; `silkgate proxy` runs just the proxy for manual setups.
 
+### Persistent sessions (multi-turn agents)
+
+`run` is **one-shot**: it boots a microVM, runs one command, tears it down. So each turn pays a VM
+boot and `claude --resume` can't work across turns — the VM, and `/root/.claude` with it, is gone.
+A **session** is a warm background microVM plus a dedicated proxy port; every turn is an `exec` into
+the *same* VM, so its state (cloned repo, `node_modules`, `/root/.claude`) persists and `--resume`
+works. One shared proxy serves all sessions, one port each.
+
+```sh
+export EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"   # host-only; pushed to the proxy over a socket
+./cli/silkgate up --name foo --workspace ~/projects/foo   # warm VM + a proxy port; starts the
+                                                          # shared proxy if it isn't running yet
+./cli/silkgate exec foo -- claude -p "scaffold a Flask app" --output-format json
+# ↑ prints a session_id; the VM persists, so resume that conversation on the next turn:
+./cli/silkgate exec foo -- claude -p --resume <id> "add a /health route and a test"
+./cli/silkgate attach foo                    # same VM, interactive TUI (defaults to claude)
+./cli/silkgate ls                            # sessions (status/port/workspace/age) + proxy health
+./cli/silkgate down foo                      # stop + rm the VM, free the port; last out stops the proxy
+```
+
+`up` pushes every `EGRESS_SECRET_<NAME>` a session's `inject_auth` rules need and refuses to start
+if one is missing. Add or rotate a secret on the running shared proxy with `silkgate secret set
+anthropic` — it reads `EGRESS_SECRET_ANTHROPIC` from the environment; the value is **never** an
+argument. `silkgate secret ls` lists names only, never values. `silkgate run` is now just `up` →
+`exec` → `down` around an ephemeral auto-named session (so its `--port` sets the shared-proxy base
+port when it's the command that starts the proxy).
+
 ## Layout
 - `mitmaddon/rule_engine.py` — dependency-free DSL parser + host/path normalizer + matcher (`python3 mitmaddon/rule_engine.py` self-tests)
-- `mitmaddon/proxy_addon.py` — mitmproxy addon: SNI==Host, allowlist, header/body/query enforcement, secret injection, fail-closed, audit log
+- `mitmaddon/proxy_addon.py` — mitmproxy addon: SNI==Host, allowlist, header/body/query enforcement, secret injection, fail-closed, audit log; single-tenant (`EGRESS_RULES`) or multi-session (`EGRESS_SESSIONS_DIR` + the unix control socket)
 - `mitmaddon/presets/` — composable allowlists; colon-separate paths in `EGRESS_RULES` to combine them.
   `claude.txt` covers both headless and interactive Claude Code (it includes the TUI's
   `platform.claude.com` startup probe); `debian.txt` is for the "full check" only
 - `test/verify_guest.sh` — Tier-1 verification, run as root inside the guest
 - `image/Dockerfile` — Step 5: a Claude Code guest image
-- `cli/silkgate` — host control CLI (`build` / `verify` / `proxy` / `run`), stdlib-only Python
+- `cli/silkgate` — host control CLI (`build` / `verify` / `proxy` / `run` / `up` / `exec` / `attach` / `down` / `ls` / `secret`), stdlib-only Python
+
+Host state lives under `~/.silkgate/` (created on first `run`/`up`):
+- `~/.silkgate/proxy.json` — shared-proxy metadata: pid, base port, the port pool, log path, socket path, start time
+- `~/.silkgate/proxy.sock` — unix control socket (mode 0600) the CLI uses to push secrets and check health; unreachable from any guest
+- `~/.silkgate/sessions/<name>/` — per-session state: `meta.json` (sandbox `sg-<name>`, assigned port, image, workspace, created) + `rules.txt` (the composed ruleset snapshot for that session)
+- `~/.silkgate/logs/proxy-*.log` — proxy audit log (allow/deny decisions), existing location/format
 
 All commands below run from the repo root.
 
