@@ -19,7 +19,9 @@ RUN npm install -g @anthropic-ai/claude-code
 
 # Dummy key ONLY — the proxy injects the real x-api-key for api.anthropic.com.
 # Non-essential traffic disabled (the allowlist would block it anyway).
+# IS_SANDBOX lets Claude Code accept bypassPermissions as root — the microVM is the boundary.
 ENV HOME=/root \
+    IS_SANDBOX=1 \
     ANTHROPIC_API_KEY=sk-ant-DUMMY-replaced-by-egress-proxy \
     NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/egress.crt \
     REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/egress.crt \
