@@ -32,6 +32,7 @@ import signal
 import socket
 import subprocess
 import sys
+import termios
 import time
 from datetime import datetime
 from pathlib import Path
@@ -469,6 +470,99 @@ def msb_exec_argv(sandbox, cmd, *, tty=False, env=()):
     return argv + [sandbox, "--"] + list(cmd)
 
 
+# A PTY makes programs emit terminal control: colors, cursor moves, and a reset burst on
+# exit. Downstream of the relay stdout is a pipe or a file, so those bytes are never drawn —
+# they just corrupt logs and break JSON parsers. Strip them and keep the text.
+_ANSI = re.compile(rb"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]"        # CSI: params per ECMA-48, so the
+                                                            # "<=>?" private forms match too
+                   rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)"  # OSC, incl. one cut off at EOL
+                   rb"|\x1b[()][A-Za-z0-9]"                # charset selection
+                   rb"|\x1b[=>78]"                         # keypad / cursor save-restore
+                   rb"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")  # stray control bytes (keeps \t, \n)
+
+
+def _plain(line):
+    return _ANSI.sub(b"", line.rstrip(b"\r"))
+
+
+_ERR_TAG = b"\x1e"          # RS: not something line-oriented guest output produces on its own
+
+# msb forwards output as it arrives only when its own stdout is a terminal, so a live run
+# needs a PTY — but the *command* must not be the one holding it, or it would switch to
+# interactive behavior (colors, cursor control, a reset burst on exit) and its two streams
+# would merge into the terminal. So give the command plain pipes and relay: two FIFOs carry
+# its streams to loops that tag stderr and write into the PTY the shell holds. The shell
+# waits for both loops, so no trailing line is lost to the race with the command's exit, and
+# $? stays the command's own. POSIX sh + mkfifo; stdin is /dev/null, as for any captured run.
+_RELAY_SH = ('d=$(mktemp -d); mkfifo "$d/o" "$d/e"; '
+             'while IFS= read -r l || [ -n "$l" ]; do printf "%s\\n" "$l"; done <"$d/o" & po=$!; '
+             'while IFS= read -r l || [ -n "$l" ]; do printf "\\036%s\\n" "$l"; done <"$d/e" & pe=$!; '
+             '"$@" </dev/null >"$d/o" 2>"$d/e"; rc=$?; wait $po $pe; rm -rf "$d"; exit $rc')
+
+
+def run_guest(build_argv, cmd, *, tty):
+    """Run a guest command and return its exit code.
+
+    Default (`--no-tty`): the command runs non-interactively with pipes for stdout/stderr,
+    and its output still arrives live, split across our own two streams — see _RELAY_SH.
+    With `-t` the command gets a real terminal instead, for a TUI.
+    """
+    if tty:
+        if sys.stdout.isatty():
+            # Inheriting a real terminal is what keeps a TUI fully interactive.
+            return wait_foreground(subprocess.Popen(build_argv(cmd)))
+        return _pty_relay(build_argv(cmd), demux=False)
+    return _pty_relay(build_argv(["sh", "-c", _RELAY_SH, "_"] + list(cmd)), demux=True)
+
+
+def _pty_relay(argv, *, demux):
+    """Run argv with a PTY for its stdio and copy what it writes to our own streams.
+
+    `demux` splits the tagged lines back out (and drops terminal control bytes, insurance
+    against a program that colors regardless of not being on a terminal); without it the
+    bytes pass through untouched, which a TUI driven from a pipe needs.
+    """
+    ptm, pts = os.openpty()
+    try:
+        attrs = termios.tcgetattr(pts)                  # no echo: our EOF byte below would
+        attrs[3] &= ~termios.ECHO                       # otherwise come back as "^D"
+        termios.tcsetattr(pts, termios.TCSANOW, attrs)
+        proc = subprocess.Popen(argv, stdin=pts, stdout=pts, stderr=pts)
+        os.close(pts)
+        if not sys.stdin.isatty():
+            os.write(ptm, b"\x04")                      # EOF: nothing will type at this PTY
+        buf = b""
+        while True:
+            try:
+                chunk = os.read(ptm, 65536)
+            except OSError:                             # slave closed — the child is done
+                break
+            if not chunk:
+                break
+            if not demux:
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+                continue
+            buf += chunk
+            while b"\n" in buf:                         # a line is the unit for both the
+                line, buf = buf.split(b"\n", 1)         # stderr tag and ANSI stripping
+                _relay(line, newline=True)
+        if buf:
+            _relay(buf, newline=False)
+        return wait_foreground(proc)
+    finally:
+        os.close(ptm)
+
+
+def _relay(line, *, newline):
+    """Write one relayed line to our stdout, or to stderr if the guest tagged it."""
+    tagged = line.startswith(_ERR_TAG)
+    stream = sys.stderr.buffer if tagged else sys.stdout.buffer
+    text = _plain(line[len(_ERR_TAG):] if tagged else line)
+    stream.write(text + b"\n" if newline else text)
+    stream.flush()
+
+
 def _workspace_mount(workspace):
     if not workspace:
         return None, []
@@ -589,8 +683,8 @@ def cmd_run(args):
         _provision_session(name, args.image, port, rule_paths, ruleset, mounts, ws, args.env)
         provisioned = True
         say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
-        guest = subprocess.Popen(msb_exec_argv(sandbox_name(name), cmd, tty=tty, env=args.env))
-        rc = wait_foreground(guest)
+        rc = run_guest(lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
+                       cmd, tty=tty)
     finally:
         if provisioned:
             _teardown_session(read_meta(name) or
@@ -626,16 +720,16 @@ def cmd_exec(args):
     if not cmd:
         die("nothing to run — usage: silkgate exec NAME [-t] [-e K=V]... -- CMD ...")
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
-    guest = subprocess.Popen(msb_exec_argv(meta["sandbox"], cmd, tty=tty, env=args.env))
-    sys.exit(wait_foreground(guest))
+    sys.exit(run_guest(lambda c: msb_exec_argv(meta["sandbox"], c, tty=tty, env=args.env),
+                       cmd, tty=tty))
 
 
 def cmd_attach(args):
     meta = read_meta(args.name)
     if not meta:
         die(f"no such session: {args.name!r} (silkgate ls)")
-    guest = subprocess.Popen(msb_exec_argv(meta["sandbox"], ["claude"], tty=True))
-    sys.exit(wait_foreground(guest))
+    sys.exit(run_guest(lambda c: msb_exec_argv(meta["sandbox"], c, tty=True),
+                       ["claude"], tty=True))
 
 
 def cmd_down(args):
@@ -974,7 +1068,9 @@ def main():
     p.add_argument("--workspace", metavar="DIR", help="mount DIR at /workspace (rw)")
     env_opt(p)
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
-                   help="allocate a PTY (default: yes if stdin is a TTY)")
+                   help="give the command a terminal, for a TUI (default: yes if stdin is a "
+                        "TTY). --no-tty runs it non-interactively — output is still live, "
+                        "with stdout and stderr kept apart")
     p.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD ...",
                    help="guest command (default: claude)")
     p.set_defaults(fn=cmd_run)
@@ -992,7 +1088,9 @@ def main():
     p = sub.add_parser("exec", help="run a command in a session's guest")
     p.add_argument("name", metavar="NAME", help="session name")
     p.add_argument("-t", "--tty", action=argparse.BooleanOptionalAction,
-                   help="allocate a PTY (default: yes if stdin is a TTY)")
+                   help="give the command a terminal, for a TUI (default: yes if stdin is a "
+                        "TTY). --no-tty runs it non-interactively — output is still live, "
+                        "with stdout and stderr kept apart")
     env_opt(p)
     # nargs='*' (not REMAINDER): with a positional NAME first, REMAINDER would swallow
     # -t/-e that follow NAME. '*' lets them parse; use `--` to pass flags on to CMD.
