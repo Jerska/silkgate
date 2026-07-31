@@ -33,6 +33,7 @@ IMAGE_DIR = REPO / "image"
 MITM_CA = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
 LOG_DIR = Path.home() / ".silkgate" / "logs"
 PROXY_ALIAS = "host.microsandbox.internal"   # resolves via the guest's /etc/hosts
+PROXY_ENV_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
 DEFAULT_IMAGE = "claude-sandbox:poc"
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
@@ -86,6 +87,16 @@ def load_ruleset(paths):
         except ValueError as e:
             die(f"{p}: {e}")
     return RuleSet(rules)
+
+
+def check_env(pairs):
+    """Validate -e NAME=VALUE pairs; clobbering the proxy config is always an error."""
+    for pair in pairs:
+        name, sep, _ = pair.partition("=")
+        if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            die(f"bad -e argument {pair!r} (expected NAME=VALUE)")
+        if name in PROXY_ENV_VARS:
+            die(f"-e {name} collides with the proxy configuration silkgate sets")
 
 
 def check_secrets(ruleset, fatal):
@@ -144,7 +155,7 @@ def wait_foreground(proc):
         signal.signal(signal.SIGINT, previous)
 
 
-def msb_argv(image, cmd, port, *, tty=False, pull_never=True, mounts=()):
+def msb_argv(image, cmd, port, *, tty=False, pull_never=True, mounts=(), env=()):
     argv = [which("msb", "curl -fsSL https://install.microsandbox.dev | sh"), "run", image]
     if pull_never:
         argv += ["--pull", "never"]
@@ -153,8 +164,10 @@ def msb_argv(image, cmd, port, *, tty=False, pull_never=True, mounts=()):
     for m in mounts:
         argv += ["-v", m]
     url = f"http://{PROXY_ALIAS}:{port}"
-    for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+    for var in PROXY_ENV_VARS:
         argv += ["-e", f"{var}={url}"]
+    for pair in env:
+        argv += ["-e", pair]
     argv += ["--net-default-egress", "deny", "--net-rule", f"allow@host:tcp:{port}"]
     return argv + ["--"] + list(cmd)
 
@@ -215,6 +228,7 @@ def cmd_proxy(args):
 
 
 def cmd_run(args):
+    check_env(args.env)
     rule_paths = resolve_rules(args.preset or ["claude"], args.rules or [])
     check_secrets(load_ruleset(rule_paths), fatal=True)
     cmd = args.cmd
@@ -232,7 +246,8 @@ def cmd_run(args):
     say(f"proxy :{args.port} ({', '.join(p.name for p in rule_paths)}) · audit: tail -f {log_path}")
     guest = None
     try:
-        guest = subprocess.Popen(msb_argv(args.image, cmd, args.port, tty=tty, mounts=mounts))
+        guest = subprocess.Popen(msb_argv(args.image, cmd, args.port, tty=tty, mounts=mounts,
+                                          env=args.env))
         rc = wait_foreground(guest)
     finally:
         if guest is not None:
@@ -315,6 +330,9 @@ def main():
     p.add_argument("--port", type=int, default=8090, help="proxy listen port (default: 8090)")
     p.add_argument("--image", default=DEFAULT_IMAGE, help=f"guest image (default: {DEFAULT_IMAGE})")
     p.add_argument("--workspace", metavar="DIR", help="mount DIR at /workspace (rw)")
+    p.add_argument("-e", "--env", action="append", default=[], metavar="NAME=VALUE",
+                   help="set an env var in the guest (repeatable; secrets belong in "
+                        "EGRESS_SECRET_* + inject_auth instead)")
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
                    help="allocate a PTY (default: yes if stdin is a TTY)")
     p.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD ...",
