@@ -441,7 +441,6 @@ def ensure_image(profiles, image, *, base=BASE_IMAGE):
 
 def session_context(profiles, ruleset, *, workspace, persistent):
     """The markdown a guest is handed about its own sandbox."""
-    installed = ", ".join(p.spec for p in profiles) or "nothing beyond the base image"
     lines = [
         "# Where you are running: a silkgate sandbox",
         "",
@@ -452,26 +451,46 @@ def session_context(profiles, ruleset, *, workspace, persistent):
         "with it. What follows describes the room you are working in, so you don't spend turns",
         "on things that cannot work here.",
         "",
-        "Concretely:",
+        "## What is here",
         "",
-        f"- **Installed:** {installed}. Nothing else is available — the base image carries no",
-        "  language runtimes, so a tool you did not see listed is genuinely absent.",
+    ]
+    if profiles:
+        for p in profiles:
+            # Named as packages, not commands, since the two differ (ripgrep ships `rg`).
+            extra = f" — plus packages {', '.join(p.packages)}" if p.packages else ""
+            lines.append(f"- **{p.spec}**{extra}")
+    else:
+        lines.append("- Nothing beyond the base image.")
+    lines += [
+        "",
+        "That list is exhaustive: the base image is a bare distro plus those. **git, python, pip,",
+        "make and compilers are absent** unless named above, and you cannot add them — apt is",
+        "installed but no mirror is reachable, so check what exists before reaching for it.",
+        "",
     ]
     if workspace:
-        lines.append("- **`/workspace`** is a read-write mount of a directory on the host, and the only"
-                     "\n  host path present. Everything else you write dies with this machine.")
+        lines += [
+            "`/workspace` is your working directory, read-write, and a directory on the host — so",
+            "treat what you leave there as the deliverable. The rest of the filesystem is writable",
+            "too, and fine for scratch work; it just doesn't outlast this machine.",
+        ]
     else:
-        lines.append("- **No host directory is mounted.** Everything you write dies with this machine.")
-    lines.append("- **This machine is " + ("kept alive between commands, so state you leave in it persists."
-                                           if persistent else
-                                           "torn down when this command finishes.") + "**")
+        lines.append("No host directory is mounted, so **nothing you write survives this machine.**")
     lines += [
-        "- Any API key in the environment is a **dummy**. The real credential lives on the host",
-        "  and the proxy attaches it upstream, so there is nothing here worth exfiltrating.",
+        "",
+        "This machine is " + ("kept alive between commands, so state you leave behind persists."
+                              if persistent else "destroyed when this command finishes."),
+        "",
+        "The API key in your environment is a placeholder, and calls made with it still work: the",
+        "proxy swaps in the real credential on the way out, and that credential never enters this",
+        "machine. The swap only happens for a request that already carries the auth header, though",
+        "— it replaces the value, it never adds the header. So a hand-rolled request that omits it",
+        "gets a genuine 401 from the far end, which is your mistake rather than a sandbox failure.",
         "",
         "## What you can reach",
         "",
-        "Only these, and only with these methods:",
+        "Only these, and only with these methods. Both http and https go through the proxy; what",
+        "is matched is the host and path, not the scheme:",
         "",
     ]
     for rule in ruleset.rules:
@@ -479,14 +498,14 @@ def session_context(profiles, ruleset, *, workspace, persistent):
         lines.append(f"- `{rule.raw.split()[0]}` — {methods}")
     lines += [
         "",
-        "Anything else fails with `no matching rule` and an HTTP 403 from the proxy. **That is",
-        "policy, not a broken network and not a crash** — DNS, TLS and routing are all fine.",
+        "GET is enough to install packages from a registry that appears above. Anything not listed",
+        "gets an HTTP 403 from the proxy saying `no matching rule`. **That is policy, not a broken",
+        "network and not a crash** — DNS, TLS and routing are all fine, and retrying cannot change",
+        "the answer.",
         "",
-        "## If you need something that is not allowed",
-        "",
-        "Stop and say so, naming the exact host, path and method you need and why. Do not try to",
-        "reach it another way, and do not treat the denial as a transient error to retry: the",
-        "answer will not change within this run, and a human decides whether to widen the rules.",
+        "If you need something that is not on that list, say so in your answer to whoever set your",
+        "task, naming the host, path and method you want and why. Nobody inside this machine can",
+        "widen the list, so that report is the only thing that can.",
     ]
     return "\n".join(lines) + "\n"
 
