@@ -12,21 +12,22 @@ guest: microsandbox's host-side network policy (Tier 1) and the mitmproxy addon 
 ## Setup (once per machine)
 
 ```sh
-./cli/silkgate build                                     # guest image + CA, loaded into msb
+./cli/silkgate profiles                                  # what capabilities exist
 export EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"     # host-only, injected at the proxy
 ```
-The guest holds a dummy key. Confirm the real one never lands there:
-`./cli/silkgate run -- printenv ANTHROPIC_API_KEY` prints the dummy.
+Images are built from the profiles you name, on first use, then cached — so there is no separate
+setup step. The guest holds a dummy key; confirm the real one never lands there with
+`./cli/silkgate run --with claude -- printenv ANTHROPIC_API_KEY`.
 
 ## One-shot: a single task, then gone
 
 ```sh
-./cli/silkgate run --workspace ~/projects/foo -- \
+./cli/silkgate run --with claude --workspace ~/projects/foo -- \
   claude --bare -p "task…" --permission-mode bypassPermissions \
   --output-format stream-json --verbose
 ```
 `bypassPermissions` is right here: the microVM is the boundary, so in-guest tool prompts add
-nothing (the image sets `IS_SANDBOX=1`, which is what lets it run as root). Output streams live
+nothing (the claude profile sets `IS_SANDBOX=1`, which is what lets it run as root). Output streams live
 as the agent works, with the guest's stdout and stderr kept on separate streams — so redirect
 stdout to a file and parse the `result` event for the answer, `session_id`, and cost. The real
 deliverables are the **workspace diff** (review it on the host before pushing) and the **audit
@@ -38,7 +39,7 @@ log** whose path is printed at startup.
 work. A session keeps the VM and `/root/.claude` alive:
 
 ```sh
-./cli/silkgate up --name foo --workspace ~/projects/foo
+./cli/silkgate up --name foo --with claude --workspace ~/projects/foo
 ./cli/silkgate exec foo -- claude -p "first turn" --output-format json   # prints session_id
 ./cli/silkgate exec foo -- claude -p --resume <id> "second turn"         # same VM, so it works
 ./cli/silkgate attach foo             # interactive TUI in the same VM
@@ -55,12 +56,18 @@ To watch a session you did not launch in the foreground, or to see its egress de
 ./cli/silkgate logs foo --audit -f    # this session's allow/deny decisions
 ```
 
-## Egress rules
+## Profiles: the image and the policy are one declaration
 
-`--preset NAME` (repeatable) and `--rules FILE` compose the allowlist; the default is `claude`.
+`--with NAME[@VERSION]` (repeatable) picks capabilities from `profiles/`. A profile carries both
+how to install itself (`setup.sh`, at image build time) and what it may reach (`rules.txt`,
+enforced by the proxy), so a guest never holds a tool whose traffic nobody allowed. `--with
+node@22.11.0 --with claude` builds and caches its own image, keyed by a hash of those inputs;
+`--rule 'host/path GET'` adds a one-off rule without a profile.
+
 Anything unlisted is denied, with a reason in the audit log. Grant the minimum: every allowed
 destination is an exfil channel, so prefer download-only (GET) and never allowlist an endpoint
-that reflects headers or bodies back.
+that reflects headers or bodies back. Adding a capability means writing a profile — a directory
+with those two files — not editing an image.
 
 ## Gotchas (each cost real debugging time)
 
@@ -75,8 +82,9 @@ that reflects headers or bodies back.
   host code execution via hooks or `core.fsmonitor`. For agents that need history, give each one
   a full clone and `git fetch <clone> branch:branch` from the host afterwards; fetch copies
   objects without executing anything from the remote.
-- **The guest has node, not python3** — a sandboxed agent cannot run Python self-tests. Verify
-  Python work on the host, and expect the agent to say it could not check its own output.
+- **The guest has only what its profiles installed.** The base carries no runtimes at all, so a
+  `--with claude` guest has no node, python3, or git. Add `--with node@22`, `--with python`, or
+  `--with git` when the task needs them, or expect the agent to report it could not run anything.
 - **Guest rewrites can drop the exec bit** — `chmod +x` after an agent edits a script.
-- **A custom image needs `sh` and `mkfifo`** for the live-output relay. An image too minimal for
-  those can still run under `-t`, which needs neither — at the cost of merged streams.
+- **A custom `--image` needs `sh` and `mkfifo`** for the live-output relay. An image too minimal
+  for those can still run under `-t`, which needs neither — at the cost of merged streams.

@@ -1,0 +1,2 @@
+pypi.org/simple/**              GET  max_body=0
+files.pythonhosted.org/**       GET  max_body=0

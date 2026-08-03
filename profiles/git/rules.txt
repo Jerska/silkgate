@@ -1,0 +1,5 @@
+# Clone and fetch only. The DSL defaults to GET, so a push (which POSTs to
+# git-receive-pack) matches no rule and is denied; keep it that way.
+github.com/**                     GET
+raw.githubusercontent.com/**      GET
+codeload.github.com/**            GET

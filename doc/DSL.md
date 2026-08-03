@@ -4,6 +4,10 @@
 > [`mitmaddon/rule_engine.py`](../mitmaddon/rule_engine.py) (dependency-free;
 > `python3 mitmaddon/rule_engine.py` self-tests, 54/54). Design rationale:
 > [THREAT-MODEL.md](./THREAT-MODEL.md).
+>
+> Rules live in `profiles/<name>/rules.txt`, one profile per capability; a session's ruleset is
+> the profiles it was started `--with`, concatenated. The proxy reads the composed snapshot at
+> `~/.silkgate/sessions/<name>/rules.txt`.
 
 ## Grammar
 

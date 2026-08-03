@@ -1,3 +1,0 @@
-# apt mirrors for the Tier-1 "full check" only — drop from EGRESS_RULES once verified.
-deb.debian.org/**        GET
-security.debian.org/**   GET

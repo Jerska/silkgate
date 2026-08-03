@@ -1,0 +1,5 @@
+# What test/verify_guest.sh reaches for, plus the Debian mirrors so the full check can
+# install its probe tools *through* the proxy. Never compose this into a real task.
+registry.npmjs.org/**           GET
+deb.debian.org/**               GET
+security.debian.org/**          GET

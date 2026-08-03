@@ -1,21 +1,24 @@
 """mitmproxy addon — Tier 2 egress enforcement over rule_engine.
 
-Single-tenant (one shared ruleset, one listener):
-    pip install mitmproxy
-    export EGRESS_RULES=mitmaddon/presets/claude.txt         # colon-separate to combine presets
+Every request is resolved the same way: the listener port it arrived on picks a ruleset.
+Which registry answers that question is the only difference between the two ways to run:
+
+    export EGRESS_RULES=/path/to/rules.txt                   # colon-separate to combine files
     export EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-..."   # injected; never in the guest
     mitmdump -s mitmaddon/proxy_addon.py --listen-port 8090
+        one ruleset, every port — for guests silkgate doesn't manage
 
-Multi-session (one shared proxy serves every session; identity == listener port):
     export EGRESS_SESSIONS_DIR=~/.silkgate/sessions          # <name>/meta.json + <name>/rules.txt
     export EGRESS_CONTROL_SOCK=~/.silkgate/proxy.sock        # unix control socket (secrets)
     mitmdump -s mitmaddon/proxy_addon.py --mode regular@8090 --mode regular@8091 ...
+        one proxy serving many sessions, each on its own port
+
 Exactly one of EGRESS_RULES / EGRESS_SESSIONS_DIR must be set (die at load otherwise).
 
 Tier 1 (forcing all guest traffic here, enforced outside the guest) is microsandbox's own
-host-side network policy — see ../doc/THREAT-MODEL.md and ../README.md. This addon assumes the
-guest can only reach this proxy, and — in multi-session mode — only its own listener port, so
-the accepted port is spoof-proof session identity.
+host-side network policy — see ../README.md. This addon assumes the guest can only reach this
+proxy, and — with a session registry — only its own listener port, so the accepted port is
+spoof-proof session identity.
 """
 import asyncio
 import json
@@ -28,24 +31,13 @@ from rule_engine import RuleSet, normalize_host
 
 logger = logging.getLogger("egress")
 
-# --- mode selection: exactly one of EGRESS_RULES / EGRESS_SESSIONS_DIR --------
+# --- configuration: exactly one of EGRESS_RULES / EGRESS_SESSIONS_DIR ---------
 _RULES_PATH = os.environ.get("EGRESS_RULES")
 _SESSIONS_DIR = os.environ.get("EGRESS_SESSIONS_DIR")
 _CONTROL_SOCK = os.environ.get("EGRESS_CONTROL_SOCK")
 if bool(_RULES_PATH) == bool(_SESSIONS_DIR):
-    raise RuntimeError("set exactly one of EGRESS_RULES (single-tenant, colon-separated rule "
-                       "files) or EGRESS_SESSIONS_DIR (multi-session registry)")
-_MULTI = _SESSIONS_DIR is not None
-
-# Single-tenant: one ruleset for the life of the process (the DSL is line-based, so files are
-# concatenated). Multi-session builds rulesets per-port via the registry below.
-RULES = None
-if not _MULTI:
-    _texts = []
-    for _p in _RULES_PATH.split(":"):
-        with open(_p) as _fh:
-            _texts.append(_fh.read())
-    RULES = RuleSet.parse("\n".join(_texts))
+    raise RuntimeError("set exactly one of EGRESS_RULES (one ruleset, colon-separated rule "
+                       "files) or EGRESS_SESSIONS_DIR (a session per listener port)")
 
 
 # --- secret store: in-memory (set over the control socket) layered over env ---
@@ -81,9 +73,23 @@ def _secret(name):
     return SECRETS.get(name)
 
 
-# --- multi-session registry: port -> RuleSet, cached, mtime-invalidated -------
+# --- registries: a listener port resolves to a ruleset (and maybe a session) ---
 class SessionError(Exception):
     """Fail-closed session-resolution failure; the message is the audit deny reason."""
+
+
+class FixedRegistry:
+    """One ruleset, whatever port a request arrives on. Sessions are simply absent."""
+
+    def __init__(self, paths):
+        texts = []
+        for path in paths:
+            with open(path) as fh:
+                texts.append(fh.read())
+        self._ruleset = RuleSet.parse("\n".join(texts))
+
+    def resolve(self, port):
+        return None, self._ruleset
 
 
 class SessionRegistry:
@@ -161,7 +167,8 @@ class SessionRegistry:
         return name, self._ruleset(name)
 
 
-REGISTRY = SessionRegistry(_SESSIONS_DIR) if _MULTI else None
+REGISTRY = (SessionRegistry(_SESSIONS_DIR) if _SESSIONS_DIR
+            else FixedRegistry(_RULES_PATH.split(":")))
 
 
 # --- control socket: line-delimited JSON, ping / set_secret / list_secrets ----
@@ -227,16 +234,14 @@ def running():
 
 # --- request enforcement -----------------------------------------------------
 def _audit(decision, flow, reason="", session=None):
-    rec = {
+    logger.info(json.dumps({
         "decision": decision,
         "method": flow.request.method,
         "host": flow.request.pretty_host,
         "path": flow.request.path,
         "reason": reason,
-    }
-    if _MULTI:
-        rec["session"] = session
-    logger.info(json.dumps(rec))
+        "session": session,
+    }))
 
 
 def _deny(flow, reason, code=403, session=None):
@@ -259,17 +264,15 @@ def request(flow: http.HTTPFlow) -> None:
     try:
         req = flow.request
 
-        # 0. Session resolution (multi-session mode): the accepted listener port is spoof-proof
-        #    identity (Tier-1 lets a guest reach only its own port). Unknown port / missing
-        #    session / unparsable rules fail closed — never fall through to another's ruleset.
-        if _MULTI:
-            try:
-                session, ruleset = REGISTRY.resolve(flow.client_conn.sockname[1])
-            except SessionError as e:
-                _deny(flow, str(e), session=session)
-                return
-        else:
-            ruleset = RULES
+        # 0. Which ruleset applies: the accepted listener port decides. With sessions that
+        #    port is spoof-proof identity (Tier-1 lets a guest reach only its own), and an
+        #    unknown port, a missing session, or unparsable rules fail closed rather than
+        #    fall through to somebody else's ruleset.
+        try:
+            session, ruleset = REGISTRY.resolve(flow.client_conn.sockname[1])
+        except SessionError as e:
+            _deny(flow, str(e), session=session)
+            return
 
         # 1. Host normalization (null-byte / homograph / IP guard) — same path as the engine.
         host = normalize_host(req.pretty_host)

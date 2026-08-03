@@ -6,23 +6,30 @@ sessions instead share ONE background mitmdump (a pool of listener ports) across
 many background guests — `up`/`exec`/`attach`/`down`, one guest per session, one
 dedicated proxy port each. Host state lives under ~/.silkgate. See ../README.md.
 
-    silkgate build                 build the guest image and load it into msb
+    silkgate profiles              list the profiles in profiles/
+    silkgate build --with X        build the image a profile list describes, into msb
     silkgate verify [--full]       Tier-1 containment check (test/verify_guest.sh)
-    silkgate proxy [--preset X]    run only the proxy (single-tenant), audit on stdout
+    silkgate proxy --with X        run one ruleset on one port, audit on stdout
     silkgate run [-- CMD ...]      ephemeral session (up + exec + down), foreground
     silkgate up [--name N ...]     start a persistent session (bg guest + shared proxy)
     silkgate exec N [-t] -- CMD    run a command in a session's guest
-    silkgate attach N              attach a TTY to a session (default cmd: claude)
+    silkgate attach N              attach a TTY to a session, running its default command
     silkgate logs N [-f|--audit]   tail a session's guest output (or its proxy decisions)
     silkgate down N                stop + remove a session (+ the proxy if it was the last)
     silkgate ls                    list sessions + shared-proxy health
     silkgate secret set NAME       push EGRESS_SECRET_<NAME> to the shared proxy (never argv)
     silkgate secret ls             list secret names held by the proxy (names only)
 
+A profile (profiles/<name>/) is one capability: setup.sh installs it at image build
+time, rules.txt says what it may reach at run time. One `--with` list therefore
+decides both the image — synthesized here, hash-tagged, cached in msb — and the
+egress policy, so a guest can't hold a tool whose traffic nobody allowed.
+
 Secrets stay in the environment: EGRESS_SECRET_<NAME>="<header>: <value>" on the
 host feeds inject_auth=<name> rules; the guest never sees them.
 """
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -32,6 +39,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 from datetime import datetime
@@ -40,19 +48,20 @@ from uuid import uuid4
 
 REPO = Path(__file__).resolve().parent.parent
 ADDON = REPO / "mitmaddon" / "proxy_addon.py"
-PRESET_DIR = REPO / "mitmaddon" / "presets"
-IMAGE_DIR = REPO / "image"
+PROFILE_DIR = REPO / "profiles"
 MITM_CA = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
 SILK_DIR = Path.home() / ".silkgate"
 LOG_DIR = SILK_DIR / "logs"
 SESSIONS_DIR = SILK_DIR / "sessions"
+CA_DIR = SILK_DIR / "ca"                      # public MITM cert only, never the key
 PROXY_JSON = SILK_DIR / "proxy.json"          # shared-proxy meta (pid/ports/log/sock)
 PROXY_SOCK = SILK_DIR / "proxy.sock"          # control socket (line-delimited JSON)
 POOL_SIZE = 16                                 # base_port .. base_port+15
 DEFAULT_BASE_PORT = 8090
 PROXY_ALIAS = "host.microsandbox.internal"   # resolves via the guest's /etc/hosts
 PROXY_ENV_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
-DEFAULT_IMAGE = "claude-sandbox:poc"
+BASE_IMAGE = "debian:bookworm-slim"   # profiles layer on top of this
+IMAGE_NS = "silkgate"                # generated images: silkgate/<slug>:<hash12>
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet
@@ -78,33 +87,97 @@ def tail(path, lines=10):
     return "\n".join(path.read_text(errors="replace").splitlines()[-lines:])
 
 
-# --- rules -------------------------------------------------------------------
+# --- profiles ----------------------------------------------------------------
+# A profile is one capability: how to install it (setup.sh, run at build time) and what it
+# may reach once running (rules.txt, enforced by the proxy). Both come from the same
+# `--with` list, so an image can't end up with a tool whose egress nobody allowed.
 
-def resolve_rules(presets, files):
-    paths = []
-    for name in presets:
-        p = PRESET_DIR / f"{name}.txt"
-        if not p.is_file():
-            avail = ", ".join(sorted(q.stem for q in PRESET_DIR.glob("*.txt")))
-            die(f"unknown preset {name!r} (available: {avail})")
-        paths.append(p)
-    for f in files:
-        p = Path(f)
-        if not p.is_file():
-            die(f"rules file not found: {f}")
-        paths.append(p.resolve())
-    return paths
+class Profile:
+    """One resolved `--with name[@version]`: its files, its version, its metadata."""
+
+    __slots__ = ("name", "version", "dir", "conf", "rules", "setup", "env")
+
+    def __init__(self, name, version=None):
+        self.name, self.dir = name, PROFILE_DIR / name
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) or not self.dir.is_dir():
+            avail = ", ".join(sorted(p.name for p in PROFILE_DIR.iterdir() if p.is_dir()))
+            die(f"unknown profile {name!r} (available: {avail})")
+        self.conf = _parse_conf(self.dir / "profile.conf")
+        self.rules = _read_if(self.dir / "rules.txt")
+        self.setup = _read_if(self.dir / "setup.sh")
+        self.env = _read_if(self.dir / "env")
+        default = self.conf.get("default_version")
+        if version and not default:
+            die(f"profile {name!r} takes no version (it installs nothing versioned)")
+        self.version = version or default
+
+    @property
+    def spec(self):
+        return f"{self.name}@{self.version}" if self.version else self.name
+
+    def env_pairs(self):
+        return [ln for ln in self.env.splitlines() if ln.strip() and not ln.startswith("#")]
 
 
-def load_ruleset(paths):
+def _parse_conf(path):
+    """`key = value` lines; blanks and #-comments ignored."""
+    conf = {}
+    for line in _read_if(path).splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            die(f"{path}: expected 'key = value', got {line!r}")
+        conf[key.strip()] = value.strip()
+    return conf
+
+
+def _read_if(path):
+    return path.read_text() if path.is_file() else ""
+
+
+def resolve_profiles(specs):
+    """Turn `--with` specs into Profiles, in the order given (which the image hash keeps)."""
+    profiles = []
+    for spec in specs:
+        name, _, version = spec.partition("@")
+        profiles.append(Profile(name, version or None))
+    have = {p.name for p in profiles}
+    for p in profiles:
+        missing = [r for r in re.split(r"[,\s]+", p.conf.get("requires", "")) if r and r not in have]
+        if missing:
+            die(f"profile {p.name!r} requires {', '.join(missing)} — add --with for them")
+    return profiles
+
+
+def profile_command(profiles):
+    """The default command to run in the guest: the last profile that names one."""
+    for p in reversed(profiles):
+        if p.conf.get("command"):
+            return p.conf["command"].split()
+    return None
+
+
+def compose_rules(profiles, extra_rules=()):
+    """The session's ruleset text: every profile's rules, plus any inline --rule."""
+    out = []
+    for p in profiles:
+        if p.rules.strip():
+            out.append(f"# --- profile {p.spec} ---")
+            out.append(p.rules.rstrip("\n"))
+    if extra_rules:
+        out.append("# --- --rule ---")
+        out.extend(extra_rules)
+    return "\n".join(out) + "\n" if out else ""
+
+
+def load_ruleset(text, where="rules"):
     """Parse up front so bad rules fail here, not inside mitmdump at startup."""
-    rules = []
-    for p in paths:
-        try:
-            rules.extend(RuleSet.parse(p.read_text()).rules)
-        except ValueError as e:
-            die(f"{p}: {e}")
-    return RuleSet(rules)
+    try:
+        return RuleSet.parse(text)
+    except ValueError as e:
+        die(f"{where}: {e}")
 
 
 def check_env(pairs):
@@ -131,12 +204,16 @@ def check_secrets(ruleset, fatal):
 
 # --- host processes ----------------------------------------------------------
 
-def start_proxy(rule_paths, port):
-    """Start mitmdump in the background; return (proc, audit log path)."""
+def start_proxy(rules_text, port):
+    """Start a single-ruleset mitmdump in the background; return (proc, audit log path)."""
     mitmdump = which("mitmdump", "pip install mitmproxy")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = LOG_DIR / f"proxy-{datetime.now():%Y%m%d-%H%M%S}.log"
-    env = dict(os.environ, EGRESS_RULES=":".join(str(p) for p in rule_paths))
+    stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
+    log_path = LOG_DIR / f"proxy-{stamp}.log"
+    rules_file = LOG_DIR / f"proxy-{stamp}.rules"
+    rules_file.write_text(rules_text)
+    env = dict(os.environ, EGRESS_RULES=str(rules_file))
+    env.pop("EGRESS_SESSIONS_DIR", None)
     with open(log_path, "wb") as log:
         proc = subprocess.Popen([mitmdump, "-s", str(ADDON), "--listen-port", str(port)],
                                 env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -188,7 +265,12 @@ def msb_argv(image, cmd, port, *, pull_never=True, mounts=()):
 
 
 def ensure_ca():
-    """Put the mitmproxy CA cert at image/egress-ca.pem, generating it on first use."""
+    """Return a guest-safe copy of the CA *certificate*, generating the CA on first use.
+
+    ~/.mitmproxy also holds mitmproxy-ca.pem — the private key, which is the whole reason
+    the proxy can be trusted — so nothing here ever hands out that directory. Callers get
+    a directory containing the public cert alone, safe to mount or copy into an image.
+    """
     if not MITM_CA.is_file():
         mitmdump = which("mitmdump", "pip install mitmproxy")
         say("generating the mitmproxy CA (first run)…")
@@ -203,7 +285,107 @@ def ensure_ca():
         stop(proc)
         if not MITM_CA.is_file():
             die(f"mitmproxy did not create {MITM_CA} — run mitmdump once manually")
-    shutil.copyfile(MITM_CA, IMAGE_DIR / "egress-ca.pem")
+    CA_DIR.mkdir(parents=True, exist_ok=True)
+    cert = CA_DIR / "egress-ca.pem"
+    shutil.copyfile(MITM_CA, cert)
+    return cert
+
+
+# --- generated images --------------------------------------------------------
+# There is no Dockerfile in this repo: an image is the base plus one layer per profile,
+# synthesized here. The tag carries a hash of everything that shapes the result, so a
+# session can ask for an image by profile list and get a cache hit or an honest rebuild.
+
+_DOCKER_PLATFORMS = {"arm64": "linux/arm64", "aarch64": "linux/arm64",
+                     "x86_64": "linux/amd64", "amd64": "linux/amd64"}
+
+# What silkgate itself needs of any guest: the CA it terminates TLS with, in the system
+# trust store and in the env vars runtimes read; a shell and mkfifo/mktemp for the live
+# output relay (coreutils, already in the base); and /workspace as the working directory.
+_BASE_LAYER = """FROM {base}
+RUN apt-get update \\
+    && apt-get install -y --no-install-recommends ca-certificates \\
+    && rm -rf /var/lib/apt/lists/*
+COPY egress-ca.pem /usr/local/share/ca-certificates/egress.crt
+RUN update-ca-certificates
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/egress.crt \\
+    REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/egress.crt \\
+    GIT_SSL_CAINFO=/usr/local/share/ca-certificates/egress.crt
+WORKDIR /workspace
+"""
+
+
+def image_ref(profiles, base=BASE_IMAGE):
+    """`silkgate/<slug>:<hash12>` — slug to read, hash to be exact.
+
+    The hash covers the base and, per profile in order, its name, resolved version, and the
+    bytes of its setup/rules/env. Editing any of those is a different image, so a stale
+    cache hit can't happen; reordering is a different image too, since layers stack.
+    """
+    h = hashlib.sha256(base.encode())
+    for p in profiles:
+        h.update(b"\0" + p.spec.encode())
+        for text in (p.setup, p.rules, p.env):
+            h.update(b"\0" + text.encode())
+    slug = "-".join(p.name for p in profiles) or "base"
+    return f"{IMAGE_NS}/{slug[:60]}:{h.hexdigest()[:12]}"
+
+
+def image_in_msb(ref):
+    msb = shutil.which("msb")
+    if not msb:
+        return False
+    out = subprocess.run([msb, "image", "ls"], capture_output=True, text=True).stdout
+    return any(line.split()[:1] == [ref] for line in out.splitlines()[1:])
+
+
+def write_build_context(directory, profiles, base):
+    """The synthesized Dockerfile plus everything it COPYs."""
+    shutil.copyfile(ensure_ca(), directory / "egress-ca.pem")
+    lines = [_BASE_LAYER.format(base=base)]
+    for p in profiles:
+        if p.setup.strip():
+            (directory / f"setup-{p.name}.sh").write_text(p.setup)
+            # One COPY+RUN per profile, so editing the last one rebuilds only its layer.
+            lines.append(f"COPY setup-{p.name}.sh /silkgate/setup-{p.name}.sh")
+            lines.append(f'RUN VERSION="{p.version or ""}" sh /silkgate/setup-{p.name}.sh')
+        if p.env_pairs():
+            lines.append("ENV " + " \\\n    ".join(p.env_pairs()))
+    (directory / "Dockerfile").write_text("\n".join(lines) + "\n")
+
+
+def build_image(profiles, *, base=BASE_IMAGE, platform_=None, quiet=False):
+    """Build (and load into msb) the image these profiles describe; return its ref."""
+    docker = which("docker", "images are built with docker, then loaded into msb")
+    msb = which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
+    plat = platform_ or _DOCKER_PLATFORMS.get(platform.machine().lower())
+    if plat is None:
+        die(f"unknown host arch {platform.machine()!r} — pass --platform (e.g. linux/amd64)")
+    ref = image_ref(profiles, base)
+    with tempfile.TemporaryDirectory(prefix="silkgate-build-") as tmp:
+        context = Path(tmp)
+        write_build_context(context, profiles, base)
+        say(f"building {ref} ({', '.join(p.spec for p in profiles) or 'base only'})")
+        out = subprocess.DEVNULL if quiet else None
+        if subprocess.run([docker, "build", "--platform", plat, "-t", ref, str(context)],
+                          stdout=out, stderr=out).returncode:
+            die(f"docker build failed for {ref}")
+    save = subprocess.Popen([docker, "save", ref], stdout=subprocess.PIPE)
+    load = subprocess.run([msb, "load"], stdin=save.stdout, stdout=out, stderr=out)
+    save.stdout.close()
+    if save.wait() or load.returncode:
+        die(f"docker save | msb load failed for {ref}")
+    return ref
+
+
+def ensure_image(profiles, image, *, base=BASE_IMAGE):
+    """An explicit --image wins; otherwise build the profiles' image unless msb has it."""
+    if image:
+        return image
+    ref = image_ref(profiles, base)
+    if image_in_msb(ref):
+        return ref
+    return build_image(profiles, base=base)
 
 
 # --- persistent sessions: host state ----------------------------------------
@@ -256,15 +438,6 @@ def list_metas():
         if m:
             metas.append(m)
     return metas
-
-
-def _compose_rules(paths):
-    """Snapshot the composed ruleset into one text blob for the session's rules.txt."""
-    out = []
-    for p in paths:
-        out.append(f"# --- {p} ---")
-        out.append(p.read_text().rstrip("\n"))
-    return "\n".join(out) + "\n"
 
 
 # --- shared proxy -----------------------------------------------------------
@@ -565,7 +738,7 @@ def _workspace_mount(workspace):
     return str(w), [f"{w}:/workspace:rw"]
 
 
-def _provision_session(name, image, port, rule_paths, ruleset, mounts, ws, env):
+def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra):
     """Stage the session dir then rename it into the registry, so its appearance is atomic:
     the addon rescans on the sessions-dir mtime and must never see (and cache) a half-written
     session. Boot the guest after; remove the session on any failure."""
@@ -576,10 +749,10 @@ def _provision_session(name, image, port, rule_paths, ruleset, mounts, ws, env):
     shutil.rmtree(tmp, ignore_errors=True)               # stale leftover from a crash
     tmp.mkdir(parents=True)
     try:
-        (tmp / "rules.txt").write_text(_compose_rules(rule_paths))
+        (tmp / "rules.txt").write_text(rules_text)
         _write_json(tmp / "meta.json", {"name": name, "sandbox": sandbox_name(name),
                                         "port": port, "image": image, "workspace": ws,
-                                        "created": now_iso()})
+                                        "created": now_iso(), **meta_extra})
         try:
             tmp.rename(sdir)                             # atomic claim; fails if name raced us
         except OSError:
@@ -620,33 +793,39 @@ def _maybe_stop_proxy():
 
 # --- commands ------------------------------------------------------------------
 
-_DOCKER_PLATFORMS = {"arm64": "linux/arm64", "aarch64": "linux/arm64",
-                     "x86_64": "linux/amd64", "amd64": "linux/amd64"}
-
-
 def cmd_build(args):
-    docker = which("docker", "the guest image is built with docker, then loaded into msb")
-    msb = which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
-    plat = args.platform or _DOCKER_PLATFORMS.get(platform.machine().lower())
-    if plat is None:
-        die(f"unknown host arch {platform.machine()!r} — pass --platform (e.g. linux/amd64)")
-    ensure_ca()
-    if subprocess.run([docker, "build", "--platform", plat,
-                       "-t", args.tag, str(IMAGE_DIR)]).returncode:
-        die("docker build failed")
-    save = subprocess.Popen([docker, "save", args.tag], stdout=subprocess.PIPE)
-    load = subprocess.run([msb, "load"], stdin=save.stdout)
-    save.stdout.close()
-    if save.wait() or load.returncode:
-        die("docker save | msb load failed")
-    say(f"loaded {args.tag} into msb")
+    profiles = resolve_profiles(args.with_ or [])
+    load_ruleset(compose_rules(profiles))            # bad rules fail before a long build
+    ref = build_image(profiles, base=args.base, platform_=args.platform)
+    say(f"loaded {ref} into msb")
+    print(ref)
+
+
+def cmd_profiles(args):
+    rows = [("PROFILE", "VERSION", "INSTALLS", "REACHES", "DESCRIPTION")]
+    for d in sorted(p for p in PROFILE_DIR.iterdir() if p.is_dir()):
+        prof = Profile(d.name)
+        hosts = sorted({ln.split()[0].split("/")[0]
+                        for ln in prof.rules.splitlines()
+                        if ln.strip() and not ln.startswith("#")})
+        rows.append((prof.name, prof.version or "-", "yes" if prof.setup.strip() else "-",
+                     ", ".join(hosts) or "-", prof.conf.get("description", "")))
+    _print_table(rows)
 
 
 def cmd_proxy(args):
-    rule_paths = resolve_rules(args.preset or ["claude"], args.rules or [])
-    check_secrets(load_ruleset(rule_paths), fatal=False)
+    """One ruleset, one port, in the foreground — for guests silkgate doesn't manage."""
+    profiles = resolve_profiles(args.with_ or [])
+    rules_text = compose_rules(profiles, args.rule or [])
+    if not rules_text.strip():
+        die("no rules — pass --with PROFILE and/or --rule 'host/path GET'")
+    check_secrets(load_ruleset(rules_text), fatal=False)
     mitmdump = which("mitmdump", "pip install mitmproxy")
-    env = dict(os.environ, EGRESS_RULES=":".join(str(p) for p in rule_paths))
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    rules_file = LOG_DIR / f"standalone-{datetime.now():%Y%m%d-%H%M%S}.rules"
+    rules_file.write_text(rules_text)
+    env = dict(os.environ, EGRESS_RULES=str(rules_file))
+    env.pop("EGRESS_SESSIONS_DIR", None)
     proc = subprocess.Popen([mitmdump, "-s", str(ADDON), "--listen-port", str(args.port)], env=env)
     try:
         sys.exit(wait_foreground(proc))
@@ -661,18 +840,21 @@ def _strip_cmd_sep(cmd):
 def cmd_run(args):
     """One-shot over a persistent session: up (ephemeral) -> exec -> down, all foreground."""
     check_env(args.env)
-    rule_paths = resolve_rules(args.preset or ["claude"], args.rules or [])
-    ruleset = load_ruleset(rule_paths)
-    cmd = _strip_cmd_sep(args.cmd) or ["claude"]
+    profiles, rules_text, ruleset = _session_policy(args)
+    cmd = _strip_cmd_sep(args.cmd) or profile_command(profiles)
+    if not cmd:
+        die("nothing to run — pass a command after -- (or --with a profile that names one)")
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
     ws, mounts = _workspace_mount(args.workspace)
+    image = ensure_image(profiles, args.image)
     name = uuid4().hex[:6]
     proxy_was_running = _proxy_running()        # --port is the base port iff WE start it
     proxy = ensure_proxy(args.port)
     port = pick_port(proxy, name)
     rc, provisioned = 1, False
     try:
-        _provision_session(name, args.image, port, rule_paths, ruleset, mounts, ws, args.env)
+        _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
+                           _session_meta(profiles, cmd))
         provisioned = True
         say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
         rc = run_guest(lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
@@ -687,18 +869,33 @@ def cmd_run(args):
     sys.exit(rc)
 
 
+def _session_policy(args):
+    """Profiles -> (profiles, composed rules text, parsed ruleset), failing on bad rules."""
+    profiles = resolve_profiles(args.with_ or [])
+    rules_text = compose_rules(profiles, args.rule or [])
+    if not rules_text.strip():
+        die("no egress rules — pass --with PROFILE and/or --rule 'host/path GET'")
+    return profiles, rules_text, load_ruleset(rules_text)
+
+
+def _session_meta(profiles, cmd):
+    """What a session records about how it was asked for, so exec/attach/ls can use it."""
+    return {"profiles": [p.spec for p in profiles], "command": cmd}
+
+
 def cmd_up(args):
     check_env(args.env)
-    rule_paths = resolve_rules(args.preset or ["claude"], args.rules or [])
-    ruleset = load_ruleset(rule_paths)
+    profiles, rules_text, ruleset = _session_policy(args)
     name = args.name or uuid4().hex[:6]
     _validate_name(name)
     if session_dir(name).exists():
         die(f"session {name!r} already exists")
     ws, mounts = _workspace_mount(args.workspace)
+    image = ensure_image(profiles, args.image)
     proxy = ensure_proxy(args.port)
     port = pick_port(proxy, name)
-    _provision_session(name, args.image, port, rule_paths, ruleset, mounts, ws, args.env)
+    _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
+                       _session_meta(profiles, profile_command(profiles)))
     say(f"session {name} up · proxy :{port} · audit: tail -f {proxy['log']}")
     print(name)
 
@@ -708,7 +905,7 @@ def cmd_exec(args):
     if not meta:
         die(f"no such session: {args.name!r} (silkgate ls)")
     check_env(args.env)
-    cmd = _strip_cmd_sep(args.cmd)
+    cmd = _strip_cmd_sep(args.cmd) or meta.get("command")
     if not cmd:
         die("nothing to run — usage: silkgate exec NAME [-t] [-e K=V]... -- CMD ...")
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
@@ -720,8 +917,10 @@ def cmd_attach(args):
     meta = read_meta(args.name)
     if not meta:
         die(f"no such session: {args.name!r} (silkgate ls)")
-    sys.exit(run_guest(lambda c: msb_exec_argv(meta["sandbox"], c, tty=True),
-                       ["claude"], tty=True))
+    cmd = meta.get("command")
+    if not cmd:
+        die(f"session {args.name!r} has no default command — use: silkgate exec {args.name} -t -- CMD")
+    sys.exit(run_guest(lambda c: msb_exec_argv(meta["sandbox"], c, tty=True), cmd, tty=True))
 
 
 def cmd_down(args):
@@ -978,25 +1177,28 @@ def cmd_secret_ls(args):
         print(n)
 
 
+# The full check installs its own probe tools *through* the proxy, then trusts the CA so
+# the https probes can complete. The CA is mounted in, since nothing is baked here.
 FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
               "apt-get update && "
               "apt-get install -y --no-install-recommends"
               " curl ca-certificates dnsutils iputils-ping iproute2 && "
-              "cp /mnt/poc/image/egress-ca.pem /usr/local/share/ca-certificates/egress.crt && "
+              "cp /mnt/ca/egress-ca.pem /usr/local/share/ca-certificates/egress.crt && "
               "update-ca-certificates && ")
 
 
 def cmd_verify(args):
-    rule_paths = resolve_rules(["npm", "debian"] if args.full else ["npm"], [])
-    load_ruleset(rule_paths)
+    rules_text = compose_rules(resolve_profiles(["probe"]))
+    load_ruleset(rules_text)
     script = "bash /mnt/poc/test/verify_guest.sh"
+    mounts = [f"{REPO}:/mnt/poc:ro"]
     if args.full:
-        ensure_ca()
+        mounts.append(f"{ensure_ca().parent}:/mnt/ca:ro")
         script = FULL_SETUP + script
-    proxy, log_path = start_proxy(rule_paths, args.port)
+    proxy, log_path = start_proxy(rules_text, args.port)
     say(f"proxy :{args.port} · audit: tail -f {log_path}")
     argv = msb_argv("debian", ["bash", "-c", script], args.port,
-                    pull_never=False, mounts=[f"{REPO}:/mnt/poc:ro"])
+                    pull_never=False, mounts=mounts)
     result = guest = None
     try:
         guest = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -1025,19 +1227,26 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
 
-    def rules_opts(p):
-        p.add_argument("--preset", action="append", metavar="NAME",
-                       help="preset from mitmaddon/presets/ (repeatable; default: claude)")
-        p.add_argument("--rules", action="append", metavar="FILE",
-                       help="extra rules file (repeatable)")
+    def profile_opts(p, *, rules_only=False):
+        p.add_argument("-w", "--with", dest="with_", action="append", metavar="PROFILE[@VER]",
+                       help="a profile from profiles/ — what to install and what it may reach "
+                            "(repeatable; `silkgate profiles` lists them)")
+        if not rules_only:
+            p.add_argument("--base", default=BASE_IMAGE,
+                           help=f"image the profiles layer onto (default: {BASE_IMAGE})")
+        p.add_argument("--rule", action="append", metavar="RULE",
+                       help="one extra rule in DSL syntax, e.g. 'example.com/** GET' (repeatable)")
 
-    p = sub.add_parser("build", help="build the guest image and load it into msb")
-    p.add_argument("--tag", default=DEFAULT_IMAGE, help=f"image tag (default: {DEFAULT_IMAGE})")
+    p = sub.add_parser("profiles", help="list the available profiles")
+    p.set_defaults(fn=cmd_profiles)
+
+    p = sub.add_parser("build", help="build the image a profile list describes, into msb")
+    profile_opts(p)
     p.add_argument("--platform", metavar="P", help="docker platform (default: matches the host arch)")
     p.set_defaults(fn=cmd_build)
 
-    p = sub.add_parser("proxy", help="run only the proxy in the foreground")
-    rules_opts(p)
+    p = sub.add_parser("proxy", help="run one ruleset on one port, in the foreground")
+    profile_opts(p, rules_only=True)
     p.add_argument("--port", type=int, default=8090, help="proxy listen port (default: 8090)")
     p.set_defaults(fn=cmd_proxy)
 
@@ -1053,10 +1262,11 @@ def main():
                             "EGRESS_SECRET_* + inject_auth instead)")
 
     p = sub.add_parser("run", help="run an egress-locked guest behind the proxy")
-    rules_opts(p)
+    profile_opts(p)
     p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
                    help="shared-proxy base port when this command starts it (default: 8090)")
-    p.add_argument("--image", default=DEFAULT_IMAGE, help=f"guest image (default: {DEFAULT_IMAGE})")
+    p.add_argument("--image", metavar="REF",
+                   help="run this image instead of the one the profiles describe")
     p.add_argument("--workspace", metavar="DIR", help="mount DIR at /workspace (rw)")
     env_opt(p)
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
@@ -1064,15 +1274,16 @@ def main():
                         "TTY). --no-tty runs it non-interactively — output is still live, "
                         "with stdout and stderr kept apart")
     p.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD ...",
-                   help="guest command (default: claude)")
+                   help="guest command (default: whatever the profiles name)")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("up", help="start a persistent session (background guest + shared proxy)")
     p.add_argument("--name", metavar="N", help="session name (default: random 6-char id)")
     p.add_argument("--workspace", metavar="DIR", help="mount DIR at /workspace (rw)")
-    rules_opts(p)
+    profile_opts(p)
     env_opt(p)
-    p.add_argument("--image", default=DEFAULT_IMAGE, help=f"guest image (default: {DEFAULT_IMAGE})")
+    p.add_argument("--image", metavar="REF",
+                   help="run this image instead of the one the profiles describe")
     p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
                    help="shared-proxy base port when this command starts it (default: 8090)")
     p.set_defaults(fn=cmd_up)
@@ -1090,7 +1301,7 @@ def main():
                    help="command to run in the guest (use -- before flag-bearing commands)")
     p.set_defaults(fn=cmd_exec)
 
-    p = sub.add_parser("attach", help="attach a TTY to a session (runs claude)")
+    p = sub.add_parser("attach", help="attach a TTY to a session, running its default command")
     p.add_argument("name", metavar="NAME", help="session name")
     p.set_defaults(fn=cmd_attach)
 

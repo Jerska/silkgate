@@ -192,8 +192,12 @@ believing it holds a key it doesn't.
   mitmproxy; keep the rule engine dependency-free and portable.)
 - **microVM:** microsandbox for "one tool, both OSes" (Apache 2.0, libkrun); or Lima +
   Firecracker for maturity.
-- **Guest image:** minimal Debian/Alpine + Node/Python/git + agent CLI + CA cert + proxy
-  env vars in `/etc/environment`.
+- **Guest image:** nothing hand-written. A base distro image plus one layer per **profile**,
+  synthesized at build time and cached by a hash of what went into it. A profile pairs the
+  install step for a capability with the egress rules that capability needs, so the image and
+  the policy are declared once, together — see [`profiles/`](../profiles/) and the README.
+  Runtimes and the agent harness are both just profiles: nothing about a particular agent is
+  baked into the base.
 
 ## Hardening checklist
 
