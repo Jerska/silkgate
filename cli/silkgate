@@ -54,6 +54,7 @@ SILK_DIR = Path.home() / ".silkgate"
 LOG_DIR = SILK_DIR / "logs"
 SESSIONS_DIR = SILK_DIR / "sessions"
 CA_DIR = SILK_DIR / "ca"                      # public MITM cert only, never the key
+DOCKER_CFG_DIR = SILK_DIR / "docker"          # our own DOCKER_CONFIG — see docker_env()
 PROXY_JSON = SILK_DIR / "proxy.json"          # shared-proxy meta (pid/ports/log/sock)
 PROXY_SOCK = SILK_DIR / "proxy.sock"          # control socket (line-delimited JSON)
 POOL_SIZE = 16                                 # base_port .. base_port+15
@@ -368,6 +369,29 @@ def write_build_context(directory, profiles, base):
     (directory / "Dockerfile").write_text("\n".join(lines) + "\n")
 
 
+def docker_env():
+    """Env for our docker calls, with a config that has no credential helper.
+
+    Everything we build comes from public images, so credentials are never needed — but a
+    `credsStore` in the user's config makes the CLI shell out to that helper anyway, and on
+    macOS a helper reading its app's data trips the "would like to access data from other
+    apps" prompt on every build. Point DOCKER_CONFIG at our own directory instead; CLI
+    plugins are discovered relative to it, so link theirs in or buildx disappears. An
+    explicit DOCKER_CONFIG in the environment is left alone — that's a deliberate choice.
+    """
+    if os.environ.get("DOCKER_CONFIG"):
+        return None
+    DOCKER_CFG_DIR.mkdir(parents=True, exist_ok=True)
+    config = DOCKER_CFG_DIR / "config.json"
+    if not config.is_file():
+        config.write_text("{}\n")
+    plugins = DOCKER_CFG_DIR / "cli-plugins"
+    user_plugins = Path.home() / ".docker" / "cli-plugins"
+    if user_plugins.is_dir() and not plugins.exists():
+        plugins.symlink_to(user_plugins)
+    return dict(os.environ, DOCKER_CONFIG=str(DOCKER_CFG_DIR))
+
+
 def build_image(profiles, *, base=BASE_IMAGE, platform_=None, quiet=False):
     """Build (and load into msb) the image these profiles describe; return its ref."""
     docker = which("docker", "images are built with docker, then loaded into msb")
@@ -376,15 +400,16 @@ def build_image(profiles, *, base=BASE_IMAGE, platform_=None, quiet=False):
     if plat is None:
         die(f"unknown host arch {platform.machine()!r} — pass --platform (e.g. linux/amd64)")
     ref = image_ref(profiles, base)
+    env = docker_env()
     with tempfile.TemporaryDirectory(prefix="silkgate-build-") as tmp:
         context = Path(tmp)
         write_build_context(context, profiles, base)
         say(f"building {ref} ({', '.join(p.spec for p in profiles) or 'base only'})")
         out = subprocess.DEVNULL if quiet else None
         if subprocess.run([docker, "build", "--platform", plat, "-t", ref, str(context)],
-                          stdout=out, stderr=out).returncode:
+                          env=env, stdout=out, stderr=out).returncode:
             die(f"docker build failed for {ref}")
-    save = subprocess.Popen([docker, "save", ref], stdout=subprocess.PIPE)
+    save = subprocess.Popen([docker, "save", ref], env=env, stdout=subprocess.PIPE)
     load = subprocess.run([msb, "load"], stdin=save.stdout, stdout=out, stderr=out)
     save.stdout.close()
     if save.wait() or load.returncode:
