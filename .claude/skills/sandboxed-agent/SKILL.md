@@ -69,6 +69,19 @@ destination is an exfil channel, so prefer download-only (GET) and never allowli
 that reflects headers or bodies back. Adding a capability means writing a profile — a directory
 with those two files — not editing an image.
 
+## Tell the guest agent where it is
+
+Each session generates a description of its own sandbox — installed profiles, the allowlist, the
+mount, that the API key is a dummy — and puts it at `/silkgate/CONTEXT.md` and in
+`$SILKGATE_CONTEXT` (the text itself, not a path). Pass it along or the agent will rediscover
+the limits by trial and error:
+
+```sh
+./cli/silkgate exec foo -- claude --bare -p "<task>" --append-system-prompt-file /silkgate/CONTEXT.md
+```
+`--bare` skips CLAUDE.md discovery entirely, so that flag is the only thing that works with it.
+Without `--bare`, a plain `claude -p` also picks it up from `/root/.claude/CLAUDE.md`.
+
 ## Gotchas (each cost real debugging time)
 
 - **A denied request is not a crash.** The agent sees `no matching rule`, usually reports it,

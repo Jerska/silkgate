@@ -55,6 +55,7 @@ LOG_DIR = SILK_DIR / "logs"
 SESSIONS_DIR = SILK_DIR / "sessions"
 CA_DIR = SILK_DIR / "ca"                      # public MITM cert only, never the key
 DOCKER_CFG_DIR = SILK_DIR / "docker"          # our own DOCKER_CONFIG — see docker_env()
+GUEST_CONTEXT = "/silkgate/CONTEXT.md"        # what the guest is told about its sandbox
 PROXY_JSON = SILK_DIR / "proxy.json"          # shared-proxy meta (pid/ports/log/sock)
 PROXY_SOCK = SILK_DIR / "proxy.sock"          # control socket (line-delimited JSON)
 POOL_SIZE = 16                                 # base_port .. base_port+15
@@ -185,11 +186,16 @@ def load_ruleset(text, where="rules"):
 def check_env(pairs):
     """Validate -e NAME=VALUE pairs; clobbering the proxy config is always an error."""
     for pair in pairs:
-        name, sep, _ = pair.partition("=")
+        name, sep, value = pair.partition("=")
         if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             die(f"bad -e argument {pair!r} (expected NAME=VALUE)")
         if name in PROXY_ENV_VARS:
             die(f"-e {name} collides with the proxy configuration silkgate sets")
+        if "\n" in value:
+            # msb aborts the guest (SIGABRT, before the agent relay comes up) on any env
+            # value containing a newline, at any size. Fail here with a reason instead.
+            die(f"-e {name} value contains a newline, which microsandbox cannot pass; "
+                "write it to a file in the workspace instead")
 
 
 def check_secrets(ruleset, fatal):
@@ -427,6 +433,64 @@ def ensure_image(profiles, image, *, base=BASE_IMAGE):
     return build_image(profiles, base=base)
 
 
+# --- what the guest is told about itself --------------------------------------
+# Generated per session, not written by hand: silkgate already knows the profiles, the
+# ruleset and the mount, and a hand-kept file would drift from them immediately. This is
+# a courtesy to a cooperating agent — it saves turns wasted on things the sandbox forbids
+# — and never a control: an adversarial guest ignores it, so nothing may rely on it.
+
+def session_context(profiles, ruleset, *, workspace, persistent):
+    """The markdown a guest is handed about its own sandbox."""
+    installed = ", ".join(p.spec for p in profiles) or "nothing beyond the base image"
+    lines = [
+        "# Where you are running: a silkgate sandbox",
+        "",
+        "Silkgate runs a command — usually a coding agent — inside a small, disposable virtual",
+        "machine, with everything that machine sends to the network passing through a proxy that",
+        "permits a named list of destinations. The point is latitude: because the machine is",
+        "isolated and its network is narrow, you can be given a real task and left to get on",
+        "with it. What follows describes the room you are working in, so you don't spend turns",
+        "on things that cannot work here.",
+        "",
+        "Concretely:",
+        "",
+        f"- **Installed:** {installed}. Nothing else is available — the base image carries no",
+        "  language runtimes, so a tool you did not see listed is genuinely absent.",
+    ]
+    if workspace:
+        lines.append("- **`/workspace`** is a read-write mount of a directory on the host, and the only"
+                     "\n  host path present. Everything else you write dies with this machine.")
+    else:
+        lines.append("- **No host directory is mounted.** Everything you write dies with this machine.")
+    lines.append("- **This machine is " + ("kept alive between commands, so state you leave in it persists."
+                                           if persistent else
+                                           "torn down when this command finishes.") + "**")
+    lines += [
+        "- Any API key in the environment is a **dummy**. The real credential lives on the host",
+        "  and the proxy attaches it upstream, so there is nothing here worth exfiltrating.",
+        "",
+        "## What you can reach",
+        "",
+        "Only these, and only with these methods:",
+        "",
+    ]
+    for rule in ruleset.rules:
+        methods = " ".join(sorted(rule.methods))
+        lines.append(f"- `{rule.raw.split()[0]}` — {methods}")
+    lines += [
+        "",
+        "Anything else fails with `no matching rule` and an HTTP 403 from the proxy. **That is",
+        "policy, not a broken network and not a crash** — DNS, TLS and routing are all fine.",
+        "",
+        "## If you need something that is not allowed",
+        "",
+        "Stop and say so, naming the exact host, path and method you need and why. Do not try to",
+        "reach it another way, and do not treat the denial as a transient error to retry: the",
+        "answer will not change within this run, and a human decides whether to widen the rules.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 # --- persistent sessions: host state ----------------------------------------
 
 def now_iso():
@@ -652,11 +716,13 @@ def _msb():
     return which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
 
 
-def msb_create_argv(sandbox, image, port, *, mounts=(), env=()):
+def msb_create_argv(sandbox, image, port, *, mounts=(), env=(), copies=()):
     """A backgrounded, idling guest whose only egress is its own proxy port."""
     argv = [_msb(), "create", image, "--name", sandbox, "--pull", "never"]
     for m in mounts:
         argv += ["-v", m]
+    for src, dst in copies:                             # into the rootfs, before boot
+        argv += ["--copy-file", f"{src}:{dst}"]
     url = f"http://{PROXY_ALIAS}:{port}"
     for var in PROXY_ENV_VARS:                          # inherited by every later exec
         argv += ["-e", f"{var}={url}"]
@@ -699,7 +765,16 @@ _ERR_TAG = b"\x1e"          # RS: not something line-oriented guest output produ
 # its streams to loops that tag stderr and write into the PTY the shell holds. The shell
 # waits for both loops, so no trailing line is lost to the race with the command's exit, and
 # $? stays the command's own. POSIX sh + mkfifo; stdin is /dev/null, as for any captured run.
-_RELAY_SH = ('d=$(mktemp -d); mkfifo "$d/o" "$d/e"; '
+# SILKGATE_CONTEXT carries the sandbox context itself, not a path to it, so a prompt can be
+# composed inline: claude -p "$SILKGATE_CONTEXT
+#
+# <task>". It has to be exported in here rather than passed with `msb -e`, because msb aborts
+# the guest on any env value containing a newline — and this one is markdown.
+_EXPORT_CONTEXT = ('[ -f %s ] && SILKGATE_CONTEXT=$(cat %s) && export SILKGATE_CONTEXT; '
+                   % (GUEST_CONTEXT, GUEST_CONTEXT))
+
+_RELAY_SH = (_EXPORT_CONTEXT
+             + 'd=$(mktemp -d); mkfifo "$d/o" "$d/e"; '
              'while IFS= read -r l || [ -n "$l" ]; do printf "%s\\n" "$l"; done <"$d/o" & po=$!; '
              f'while IFS= read -r l || [ -n "$l" ]; do printf "\\{ord(_ERR_TAG):03o}%s\\n" "$l"; done <"$d/e" & pe=$!; '
              '"$@" </dev/null >"$d/o" 2>"$d/e"; rc=$?; wait $po $pe; rm -rf "$d"; exit $rc')
@@ -713,6 +788,8 @@ def run_guest(build_argv, cmd, *, tty):
     With `-t` the command gets a real terminal instead, for a TUI.
     """
     if tty:
+        # A terminal run gets no relay, so the context export needs its own tiny shell.
+        cmd = ["sh", "-c", _EXPORT_CONTEXT + 'exec "$@"', "_"] + list(cmd)
         if sys.stdout.isatty():
             # Inheriting a real terminal is what keeps a TUI fully interactive.
             return wait_foreground(subprocess.Popen(build_argv(cmd)))
@@ -777,7 +854,8 @@ def _workspace_mount(workspace):
     return str(w), [f"{w}:/workspace:rw"]
 
 
-def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra):
+def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
+                       context=None, context_paths=()):
     """Stage the session dir then rename it into the registry, so its appearance is atomic:
     the addon rescans on the sessions-dir mtime and must never see (and cache) a half-written
     session. Boot the guest after; remove the session on any failure."""
@@ -789,6 +867,8 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
     tmp.mkdir(parents=True)
     try:
         (tmp / "rules.txt").write_text(rules_text)
+        if context:
+            (tmp / "context.md").write_text(context)
         _write_json(tmp / "meta.json", {"name": name, "sandbox": sandbox_name(name),
                                         "port": port, "image": image, "workspace": ws,
                                         "created": now_iso(), **meta_extra})
@@ -797,8 +877,11 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
         except OSError:
             die(f"session already exists: {sdir}")
         _push_secrets(ruleset)
+        # The context goes into the rootfs, never the workspace: it must not appear in the
+        # user's project, and a guest rewriting it changes nothing that matters.
+        copies = [(sdir / "context.md", dst) for dst in context_paths] if context else []
         if subprocess.run(msb_create_argv(sandbox_name(name), image, port,
-                                          mounts=mounts, env=env)).returncode:
+                                          mounts=mounts, env=env, copies=copies)).returncode:
             die(f"msb create failed for session {name!r}")
     except BaseException:                                # incl. SystemExit from die()
         shutil.rmtree(tmp, ignore_errors=True)
@@ -893,8 +976,9 @@ def cmd_run(args):
     port = pick_port(proxy, name)
     rc, provisioned = 1, False
     try:
+        ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=False)
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
-                           _session_meta(profiles, cmd))
+                           _session_meta(profiles, cmd), ctx, ctx_paths)
         provisioned = True
         say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
         rc = run_guest(lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
@@ -923,6 +1007,19 @@ def _session_meta(profiles, cmd):
     return {"profiles": [p.spec for p in profiles], "command": cmd}
 
 
+def _context_for(args, profiles, ruleset, ws, *, persistent):
+    """(context text, where to put it in the guest) — or (None, ()) with --no-context.
+
+    Always at GUEST_CONTEXT, plus wherever a harness profile says its own tool looks for
+    instructions (`context_path`), which is how this stays harness-agnostic.
+    """
+    if args.no_context:
+        return None, ()
+    paths = [GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
+                               if p.conf.get("context_path")]
+    return session_context(profiles, ruleset, workspace=ws, persistent=persistent), paths
+
+
 def cmd_up(args):
     check_env(args.env)
     profiles, rules_text, ruleset = _session_policy(args)
@@ -934,8 +1031,9 @@ def cmd_up(args):
     image = ensure_image(profiles, args.image)
     proxy = ensure_proxy(args.port)
     port = pick_port(proxy, name)
+    ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=True)
     _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
-                       _session_meta(profiles, profile_command(profiles)))
+                       _session_meta(profiles, profile_command(profiles)), ctx, ctx_paths)
     say(f"session {name} up · proxy :{port} · audit: tail -f {proxy['log']}")
     print(name)
 
@@ -1300,6 +1398,9 @@ def main():
         p.add_argument("-e", "--env", action="append", default=[], metavar="NAME=VALUE",
                        help="set an env var in the guest (repeatable; secrets belong in "
                             "EGRESS_SECRET_* + inject_auth instead)")
+        p.add_argument("--no-context", action="store_true",
+                       help=f"don't describe the sandbox to the guest ({GUEST_CONTEXT} and "
+                            "$SILKGATE_CONTEXT)")
 
     p = sub.add_parser("run", help="run an egress-locked guest behind the proxy")
     profile_opts(p)

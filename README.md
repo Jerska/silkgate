@@ -65,6 +65,30 @@ so a different harness is just a different profile. Setup steps run inside `dock
 the host, which has its own network, so installing a compiler or hitting apt mirrors never
 touches the proxy or the policy the session will run under.
 
+## Telling the guest where it is
+
+A cooperating agent wastes turns discovering the sandbox the hard way — reaching for a runtime
+that isn't installed, retrying a host that policy will never allow. So each session generates a
+description of itself from its own profiles, ruleset and mount, and puts it in the guest two
+ways:
+
+```sh
+# inline, for any harness — the variable holds the text itself, not a path
+./cli/silkgate exec foo -- sh -c 'claude -p "$SILKGATE_CONTEXT
+
+Now: <task>"'
+# or as a file, which Claude Code accepts even under --bare
+./cli/silkgate exec foo -- claude --bare -p "<task>" --append-system-prompt-file /silkgate/CONTEXT.md
+```
+
+It lands at `/silkgate/CONTEXT.md` in the rootfs — never in `/workspace`, so it cannot appear in
+the project — plus wherever a profile's `context_path` says its harness looks for instructions.
+`--no-context` skips the whole thing.
+
+This is a courtesy, not a control. An adversarial guest ignores every word of it, so nothing may
+rely on it; what it buys is fewer wasted turns, and denials reported as requests ("I need
+`pypi.org` for X") instead of retried in a loop.
+
 ## Persistent sessions (multi-turn agents)
 
 `run` is one-shot: it creates a microVM, runs one command, tears it down. Boot is ~0.3s, so
