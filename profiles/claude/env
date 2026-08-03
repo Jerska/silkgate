@@ -1,4 +1,3 @@
-PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 USE_BUILTIN_RIPGREP=0
 ANTHROPIC_API_KEY=sk-ant-DUMMY-replaced-by-egress-proxy
 DISABLE_AUTOUPDATER=1

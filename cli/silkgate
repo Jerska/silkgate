@@ -95,7 +95,7 @@ def tail(path, lines=10):
 class Profile:
     """One resolved `--with name[@version]`: its files, its version, its metadata."""
 
-    __slots__ = ("name", "version", "dir", "conf", "rules", "setup", "env")
+    __slots__ = ("name", "version", "dir", "conf", "rules", "setup", "env", "packages")
 
     def __init__(self, name, version=None):
         self.name, self.dir = name, PROFILE_DIR / name
@@ -106,6 +106,7 @@ class Profile:
         self.rules = _read_if(self.dir / "rules.txt")
         self.setup = _read_if(self.dir / "setup.sh")
         self.env = _read_if(self.dir / "env")
+        self.packages = [t for t in re.split(r"[,\s]+", self.conf.get("packages", "")) if t]
         default = self.conf.get("default_version")
         if version and not default:
             die(f"profile {name!r} takes no version (it installs nothing versioned)")
@@ -310,7 +311,8 @@ COPY egress-ca.pem /usr/local/share/ca-certificates/egress.crt
 RUN update-ca-certificates
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/egress.crt \\
     REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/egress.crt \\
-    GIT_SSL_CAINFO=/usr/local/share/ca-certificates/egress.crt
+    GIT_SSL_CAINFO=/usr/local/share/ca-certificates/egress.crt \\
+    PATH=/root/.local/bin:$PATH
 WORKDIR /workspace
 """
 
@@ -318,13 +320,15 @@ WORKDIR /workspace
 def image_ref(profiles, base=BASE_IMAGE):
     """`silkgate/<slug>:<hash12>` — slug to read, hash to be exact.
 
-    The hash covers the base and, per profile in order, its name, resolved version, and the
-    bytes of its setup/rules/env. Editing any of those is a different image, so a stale
-    cache hit can't happen; reordering is a different image too, since layers stack.
+    The hash covers the base and, per profile in order, its name, resolved version, declared
+    packages, and the bytes of its setup/rules/env. Editing any of those is a different
+    image, so a stale cache hit can't happen; reordering is a different image too, since
+    layers stack.
     """
     h = hashlib.sha256(base.encode())
     for p in profiles:
         h.update(b"\0" + p.spec.encode())
+        h.update(b"\0" + " ".join(p.packages).encode())
         for text in (p.setup, p.rules, p.env):
             h.update(b"\0" + text.encode())
     slug = "-".join(p.name for p in profiles) or "base"
@@ -343,6 +347,16 @@ def write_build_context(directory, profiles, base):
     """The synthesized Dockerfile plus everything it COPYs."""
     shutil.copyfile(ensure_ca(), directory / "egress-ca.pem")
     lines = [_BASE_LAYER.format(base=base)]
+    # Every profile's `packages` in one transaction: apt resolves them together, shared
+    # dependencies land once, and no setup.sh has to carry update/clean boilerplate. A
+    # profile that needs a package from outside the distro's repos adds the source and
+    # installs it in its own setup.sh instead.
+    packages = sorted({pkg for p in profiles for pkg in p.packages})
+    if packages:
+        lines.append("RUN apt-get update \\\n"
+                     "    && apt-get install -y --no-install-recommends \\\n        "
+                     + " \\\n        ".join(packages)
+                     + " \\\n    && rm -rf /var/lib/apt/lists/*")
     for p in profiles:
         if p.setup.strip():
             (directory / f"setup-{p.name}.sh").write_text(p.setup)
@@ -808,7 +822,8 @@ def cmd_profiles(args):
         hosts = sorted({ln.split()[0].split("/")[0]
                         for ln in prof.rules.splitlines()
                         if ln.strip() and not ln.startswith("#")})
-        rows.append((prof.name, prof.version or "-", "yes" if prof.setup.strip() else "-",
+        installs = list(prof.packages) + (["setup.sh"] if prof.setup.strip() else [])
+        rows.append((prof.name, prof.version or "-", " ".join(installs) or "-",
                      ", ".join(hosts) or "-", prof.conf.get("description", "")))
     _print_table(rows)
 

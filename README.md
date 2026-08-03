@@ -33,11 +33,17 @@ A profile is one capability, and it owns both halves of that capability:
 
 ```
 profiles/node/
-  profile.conf     description, default_version, requires, command
+  profile.conf     description, default_version, packages, requires, command
   setup.sh         how to install it — runs at image build time, as root, with $VERSION
   rules.txt        what it may reach at run time — enforced by the proxy
   env              optional KEY=VALUE lines baked into the image
 ```
+
+`packages` are distro packages, and every profile's are installed in **one** transaction
+before any `setup.sh` runs: apt resolves them together, shared dependencies land once, and no
+profile carries update/clean boilerplate. `setup.sh` is then only the interesting part — often
+a single pinned download, and `git` and `probe` need no script at all. A profile that wants a
+package from outside the distro's repos adds that source and installs it in its own `setup.sh`.
 
 Because one `--with` list drives both, an image cannot end up holding a tool whose traffic
 nobody allowed. Compose them freely, and pin versions where it matters:
