@@ -212,6 +212,29 @@ def check_secrets(ruleset, fatal):
 
 # --- host processes ----------------------------------------------------------
 
+# Where proxy listeners bind. Guests reach the proxy as host.microsandbox.internal, a
+# gateway address owned by the VMM process itself — no host interface holds it — and the
+# VMM delivers guest->host traffic over loopback: a 127.0.0.1 listener sees a guest
+# connection arrive with a loopback peer address (observed on macOS/HVF, msb 0.5.4). So
+# loopback serves every guest while keeping the pool ports — each one an allowlist plus
+# header-triggered credential injection — off the LAN, which mitmdump's default bind
+# ('', every interface) would expose. On a platform whose microsandbox routes guests
+# through a real bridge/tap address instead, point silkgate at that one interface:
+#     SILKGATE_PROXY_BIND=<address> silkgate up ...
+PROXY_BIND = os.environ.get("SILKGATE_PROXY_BIND", "127.0.0.1")
+
+
+def _probe_addr(port):
+    """Where readiness checks dial: the bind address itself, so probe and bind cannot
+    drift apart — except a wildcard bind, which is dialed via loopback."""
+    host = PROXY_BIND or "127.0.0.1"
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"
+    return (host, port)
+
+
 def start_proxy(rules_text, port):
     """Start a single-ruleset mitmdump in the background; return (proc, audit log path)."""
     mitmdump = which("mitmdump", "pip install mitmproxy")
@@ -222,15 +245,18 @@ def start_proxy(rules_text, port):
     rules_file.write_text(rules_text)
     env = dict(os.environ, EGRESS_RULES=str(rules_file))
     env.pop("EGRESS_SESSIONS_DIR", None)
+    # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
+    # instead of becoming an opaque tunnel around the addon's per-request checks.
+    argv = [mitmdump, "-s", str(ADDON), "--listen-host", PROXY_BIND,
+            "--set", "rawtcp=false", "--listen-port", str(port)]
     with open(log_path, "wb") as log:
-        proc = subprocess.Popen([mitmdump, "-s", str(ADDON), "--listen-port", str(port)],
-                                env=env, stdout=log, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             die(f"proxy exited at startup — {log_path}:\n{tail(log_path)}")
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            with socket.create_connection(_probe_addr(port), timeout=0.5):
                 return proc, log_path
         except OSError:
             time.sleep(0.2)
@@ -569,6 +595,9 @@ def read_proxy():
 
 
 def proxy_alive(pid):
+    """Whether *some* process holds `pid` — liveness only, never identity: after an
+    unclean exit the pid in proxy.json may belong to a recycled, unrelated process.
+    Anything that trusts or signals the proxy goes through _proxy_ident() instead."""
     if not pid:
         return False
     try:
@@ -580,9 +609,62 @@ def proxy_alive(pid):
     return True
 
 
+def _peer_pid(sock):
+    """The pid on the far end of a connected unix socket, straight from the kernel;
+    0 if it cannot say (callers treat that as alive-but-unnamed)."""
+    try:
+        if hasattr(socket, "SO_PEERCRED"):        # Linux: struct ucred {pid, uid, gid}
+            import struct
+            cred = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                   struct.calcsize("3i"))
+            return struct.unpack("3i", cred)[0]
+        return sock.getsockopt(0, 0x0002)          # macOS: SOL_LOCAL, LOCAL_PEERPID
+    except OSError:
+        return 0
+
+
+def _proxy_ident():
+    """The pid of the live shared proxy, or None if nothing is — identity, not liveness.
+
+    Only the process bound to our control socket path can answer a ping there, and the
+    kernel names the peer of that connection; proxy.json is just a record that can
+    outlive (or misname) the process it describes. Returns 0 for a proxy that answered
+    but whose pid the kernel could not report."""
+    if not PROXY_SOCK.exists():
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(2)
+            s.connect(str(PROXY_SOCK))
+            f = s.makefile("rw")
+            f.write('{"op": "ping"}\n')
+            f.flush()
+            line = f.readline()
+            if not line or not json.loads(line).get("ok"):
+                return None
+            return _peer_pid(s)
+    except (OSError, ValueError):
+        return None
+
+
 def _proxy_running():
-    m = read_proxy()
-    return bool(m and proxy_alive(m.get("pid")))
+    return _proxy_ident() is not None
+
+
+class _proxy_lock:
+    """Exclusive advisory lock over proxy lifecycle and port claims (flock, so the
+    kernel drops it with the process — it cannot go stale). Serializing proxy start,
+    proxy stop and port claiming is what keeps a `down` that found no sessions from
+    killing the proxy between another command's ensure_proxy and its port claim."""
+
+    def __enter__(self):
+        import fcntl
+        SILK_DIR.mkdir(parents=True, exist_ok=True)
+        self._fd = os.open(SILK_DIR / "proxy.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
+
+    def __exit__(self, *exc):
+        os.close(self._fd)
 
 
 def _clear_proxy_files():
@@ -600,7 +682,10 @@ def start_shared_proxy(base_port):
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"proxy-{datetime.now():%Y%m%d-%H%M%S}.log"
     ports = list(range(base_port, base_port + POOL_SIZE))
-    argv = [mitmdump, "-s", str(ADDON)]
+    # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
+    # instead of becoming an opaque tunnel around the addon's per-request checks.
+    argv = [mitmdump, "-s", str(ADDON), "--listen-host", PROXY_BIND,
+            "--set", "rawtcp=false"]
     for p in ports:
         argv += ["--mode", f"regular@{p}"]
     # Multi-session mode: EGRESS_SESSIONS_DIR on, EGRESS_RULES off (addon needs exactly one).
@@ -615,7 +700,7 @@ def start_shared_proxy(base_port):
         if proc.poll() is not None:
             die(f"proxy exited at startup — {log_path}:\n{tail(log_path)}")
         try:
-            with socket.create_connection(("127.0.0.1", base_port), timeout=0.5):
+            with socket.create_connection(_probe_addr(base_port), timeout=0.5):
                 break
         except OSError:
             time.sleep(0.2)
@@ -633,10 +718,23 @@ def start_shared_proxy(base_port):
 
 def ensure_proxy(base_port):
     """Return the running shared-proxy meta, starting it (on base_port) if need be."""
+    with _proxy_lock():
+        return _ensure_proxy_locked(base_port)
+
+
+def _ensure_proxy_locked(base_port):
+    """ensure_proxy's body, for callers already holding _proxy_lock."""
     meta = read_proxy()
-    if meta and proxy_alive(meta.get("pid")):
+    ident = _proxy_ident()
+    if ident is not None:                      # something live answers on our socket path
+        if meta is None:
+            die(f"a proxy (pid {ident or 'unknown'}) holds {PROXY_SOCK} but {PROXY_JSON} "
+                "is gone — kill that process and retry")
+        if ident and meta.get("pid") != ident:
+            meta["pid"] = ident                # proxy.json outlived the proxy it described;
+            _write_json(PROXY_JSON, meta)      # the socket's owner is the identity
         return meta
-    if meta:                                  # stale meta from a dead proxy
+    if meta:                                   # record of a proxy that no longer answers
         _clear_proxy_files()
     meta = start_shared_proxy(base_port)
     _wait_control_sock(10)                     # base-port readiness ≠ socket readiness
@@ -644,28 +742,127 @@ def ensure_proxy(base_port):
 
 
 def stop_proxy(meta):
-    pid = meta.get("pid") if meta else None
-    if pid and proxy_alive(pid):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and proxy_alive(pid):
-            time.sleep(0.1)
-        if proxy_alive(pid):
+    """Stop the shared proxy — unless a session or an in-flight port claim still needs it.
+
+    Identity before force: only the process that answers on the control socket is ever
+    signalled, so a stale proxy.json whose pid was recycled cannot draw a SIGKILL onto an
+    unrelated process. When nothing answers there is nothing to kill, only files to clear."""
+    with _proxy_lock():
+        if list_metas() or _live_claims():
+            return
+        ident = _proxy_ident()
+        if ident is None:
+            _clear_proxy_files()
+            return
+        pid = ident or (meta or {}).get("pid")  # 0 = alive but unnamed: fall back to record
+        if pid:
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
-    _clear_proxy_files()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and proxy_alive(pid):
+                time.sleep(0.1)
+            if proxy_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        _clear_proxy_files()
+
+
+# A pool port is claimed the moment it is picked, by an O_EXCL marker file in here — not
+# by the session's meta.json, which appears only when _provision_session renames the
+# staged dir into place, long after the port was chosen. The claim is what makes "the
+# port is spoof-proof session identity" hold under concurrency; metas alone are a TOCTOU
+# where two `up`s pick the same port and the addon polices one guest with the other's
+# ruleset. The dot prefix keeps the addon's registry from reading claims as sessions.
+
+def _port_claims_dir():
+    return SESSIONS_DIR / ".ports"
+
+
+def _claim_path(port):
+    return _port_claims_dir() / str(port)
+
+
+def _claim_port(port, name):
+    """Claim `port` for session `name`; False if a claim already exists."""
+    _port_claims_dir().mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(_claim_path(port), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps({"name": name, "pid": os.getpid(), "created": now_iso()}))
+    return True
+
+
+def _claim_stale(port, path):
+    """Whether a claim is a crash leftover that may be reaped (caller holds _proxy_lock).
+
+    Not stale while its session dir exists — the guest may still hold L3 access to the
+    port even if unhealthy, and only `down` frees that — nor while any session's meta
+    names the port, nor while the claiming process is alive (provisioning in flight)."""
+    info = _read_json(path) or {}
+    name = info.get("name")
+    if name and session_dir(name).exists():
+        return False
+    if any(m.get("port") == port for m in list_metas()):
+        return False
+    return not proxy_alive(info.get("pid"))
+
+
+def _release_port(name, port=None):
+    """Drop `name`'s claim(s); with no port to go by, every claim naming the session.
+    Only claims naming `name` are touched, so a port that was reaped and re-claimed by
+    a newer session is left alone."""
+    try:
+        paths = [_claim_path(port)] if port else list(_port_claims_dir().iterdir())
+    except OSError:
+        return
+    for path in paths:
+        info = _read_json(path)
+        if info and info.get("name") == name:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _live_claims():
+    """Claimed ports that are not crash leftovers — sessions in flight or kept alive."""
+    try:
+        names = os.listdir(_port_claims_dir())
+    except OSError:
+        return []
+    return [int(n) for n in names
+            if n.isdigit() and not _claim_stale(int(n), _claim_path(int(n)))]
 
 
 def pick_port(proxy, name):
-    """Lowest pool port not already claimed by another session's meta."""
-    claimed = {m.get("port") for m in list_metas() if m.get("name") != name}
-    for p in proxy["ports"]:
-        if p not in claimed:
+    """Claim the lowest free pool port for `name` and return it.
+
+    Existing metas count as claims too, so sessions provisioned before their claim file
+    existed keep their ports. A claim whose maker died before its session appeared is a
+    crash leftover: reaped and reused. A pool held entirely by live sessions and claims
+    is genuinely full, and an error."""
+    with _proxy_lock():
+        taken = {m.get("port") for m in list_metas() if m.get("name") != name}
+        for p in proxy["ports"]:
+            if p in taken:
+                continue
+            if not _claim_port(p, name):
+                if not _claim_stale(p, _claim_path(p)):
+                    continue
+                _claim_path(p).unlink(missing_ok=True)   # leftover; reaped under the lock
+                if not _claim_port(p, name):
+                    continue
+            # `down <last>` may have stopped the proxy between our caller's ensure_proxy
+            # and the claim above. The claim is visible to stop_proxy from here on, so
+            # one re-check under the same lock closes that window for good.
+            if not _proxy_running():
+                _ensure_proxy_locked(proxy["base_port"])
             return p
     die(f"no free proxy ports (pool {proxy['ports'][0]}..{proxy['ports'][-1]} is full)")
 
@@ -877,13 +1074,16 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
                        context=None, context_paths=()):
     """Stage the session dir then rename it into the registry, so its appearance is atomic:
     the addon rescans on the sessions-dir mtime and must never see (and cache) a half-written
-    session. Boot the guest after; remove the session on any failure."""
+    session. Boot the guest after. On failure, undo only what is ours: the staging dir, the
+    renamed dir if the rename was ours (never a racing winner's), the port claim, and — once
+    create ran — whatever sandbox msb half-registered."""
     sdir = session_dir(name)
     if sdir.exists():
         die(f"session already exists: {sdir}")
     tmp = SESSIONS_DIR / f".tmp-{name}"                  # dot-prefixed: invisible to registries
     shutil.rmtree(tmp, ignore_errors=True)               # stale leftover from a crash
     tmp.mkdir(parents=True)
+    owned = False                                        # whether the rename made sdir ours
     try:
         (tmp / "rules.txt").write_text(rules_text)
         if context:
@@ -893,6 +1093,7 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
                                         "created": now_iso(), **meta_extra})
         try:
             tmp.rename(sdir)                             # atomic claim; fails if name raced us
+            owned = True
         except OSError:
             die(f"session already exists: {sdir}")
         _push_secrets(ruleset)
@@ -901,30 +1102,55 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
         copies = [(sdir / "context.md", dst) for dst in context_paths] if context else []
         if subprocess.run(msb_create_argv(sandbox_name(name), image, port,
                                           mounts=mounts, env=env, copies=copies)).returncode:
+            _remove_sandbox(sandbox_name(name))          # a failed create can still register it
             die(f"msb create failed for session {name!r}")
     except BaseException:                                # incl. SystemExit from die()
         shutil.rmtree(tmp, ignore_errors=True)
-        shutil.rmtree(sdir, ignore_errors=True)
+        if owned:
+            shutil.rmtree(sdir, ignore_errors=True)
+        _release_port(name, port)
         raise
 
 
+def _remove_sandbox(sandbox):
+    """Best-effort `msb stop` then `msb rm`; True iff the sandbox is verifiably gone.
+    An rm failure is forgiven only when `msb list` no longer shows the name — rm also
+    fails for a sandbox that never registered, which is just as gone."""
+    msb = shutil.which("msb")
+    if not msb or not sandbox:
+        return False
+    subprocess.run([msb, "stop", sandbox],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not subprocess.run([msb, "rm", sandbox],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        return True
+    listed = subprocess.run([msb, "list"], capture_output=True, text=True)
+    if listed.returncode:
+        return False                                     # cannot prove it is gone
+    return not any(line.split()[:1] == [sandbox] for line in listed.stdout.splitlines()[1:])
+
+
 def _teardown_session(meta):
-    """Stop (required) then rm the guest, then drop the session dir. Best-effort, fail-clean."""
+    """Stop and rm the guest, and only then free the session dir and its port — in that
+    order, because while a guest that can reach the port may still exist, the port must
+    stay reserved, or the next session inherits a guest policed by the wrong ruleset. A
+    sandbox that cannot be removed therefore keeps its session, port and all, and this
+    dies so no caller mistakes it for gone."""
     name = meta.get("name")
     sandbox = meta.get("sandbox") or (sandbox_name(name) if name else None)
-    msb = shutil.which("msb")
-    if msb and sandbox:
-        subprocess.run([msb, "stop", sandbox],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if subprocess.run([msb, "rm", sandbox],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-            say(f"warning: msb rm {sandbox} failed — remove it manually")
+    if sandbox and not _remove_sandbox(sandbox):
+        die(f"msb rm {sandbox} failed — session {name!r} kept, its proxy port still "
+            f"reserved; remove the sandbox manually, then `silkgate down {name}`")
     if name:
+        # The claim goes first, while meta.json still pins the port for pick_port; the
+        # rmtree is then what genuinely frees it.
+        _release_port(name, meta.get("port"))
         shutil.rmtree(session_dir(name), ignore_errors=True)
 
 
 def _maybe_stop_proxy():
-    """Terminate the shared proxy once the last session is gone."""
+    """Stop the shared proxy once the last session is gone. The check here is a courtesy;
+    stop_proxy re-checks sessions and port claims under the lifecycle lock."""
     if list_metas():
         return
     meta = read_proxy()
