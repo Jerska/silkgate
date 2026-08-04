@@ -56,8 +56,8 @@ default-deny yields NXDOMAIN — no explicit DNS deny needed; the proxy alias re
 `/etc/hosts`, so nothing breaks. Native on
 HVF and KVM — no nested VM, no `pf`, no `nft`. *(Verified live 7/7: a root guest had no direct
 TCP/DNS/IPv6/ICMP egress and couldn't escape by re-routing. On macOS/Apple Silicon (HVF, msb
-0.5.4/0.5.7) re-verified after the latest fixes; on Linux/x86_64 (KVM, msb 0.6.8, from the
-`test/linux/` container on a glibc-2.35 host) last run before them, not since. Pin your
+0.5.4/0.5.7) by hand; on Linux/x86_64 (KVM, msb 0.6.8, in the `test/linux/` container) by CI on
+every push, which fails the run unless all seven checks report having run. Pin your
 `msb --version`; scope names drift pre-1.0.)*
 
 **Linux nft fallback:** microVM tap device + an `nft` ruleset in the `inet` family on that
@@ -130,6 +130,6 @@ races Apple daemons — defense-in-depth only).
 
 | Tier | Owner | In this design |
 |---|---|---|
-| 1 — network-layer prerequisites | Host/VMM (outside guest) | **Implemented & verified** (`verify_guest.sh` 7/7 — macOS re-verified after the latest fixes, Linux last run before them; nft as Linux fallback) |
+| 1 — network-layer prerequisites | Host/VMM (outside guest) | **Implemented & verified** (`verify_guest.sh` 7/7 — macOS by hand, Linux in CI on every push; nft as Linux fallback) |
 | 2 — request-level enforcement | The proxy + rule engine | **Implemented** |
 | 3 — irreducible residual | Rule discipline + operations | **Accepted & documented**, not code |

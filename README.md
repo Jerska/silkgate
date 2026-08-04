@@ -2,9 +2,10 @@
 
 Run an untrusted coding agent — or any untrusted command — in a microVM whose **only** route to
 the network is a TLS-terminating proxy that allowlists per request. Verified live on **macOS
-(Apple Silicon)**; **Linux (x86_64/KVM)** was last verified before the current round of fixes
-(see [Verifying containment](#verifying-containment)). Two enforcement layers, both outside
-the guest:
+(Apple Silicon)**, by hand, and on **Linux (x86_64/KVM, msb 0.6.8)** by CI on every push — the
+containment workflow runs the full seven-check probe inside the `test/linux/` container and fails
+if any check merely skipped (see [Verifying containment](#verifying-containment)). Two enforcement
+layers, both outside the guest:
 
 - **Tier 1 — force all egress to the proxy:** microsandbox's own host-side network policy. No
   nft, no pf, no nested VM.
