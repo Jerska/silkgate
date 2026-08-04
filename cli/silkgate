@@ -94,6 +94,37 @@ def tail(path, lines=10):
 # may reach once running (rules.txt, enforced by the proxy). Both come from the same
 # `--with` list, so an image can't end up with a tool whose egress nobody allowed.
 
+# A version and an image reference both reach the generated Dockerfile verbatim — the version
+# as shell text inside `RUN VERSION="<v>" sh setup.sh`, the base as a `FROM` line — and
+# `docker build` runs as root on the host, with the host's network, outside the proxy. That is
+# the one place a silkgate command line escapes silkgate, so both are charset-checked where
+# they are parsed: the error names the flag instead of arriving as a strange build failure.
+_VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+_IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}")
+
+# `probe` is not a capability a task may hold: its rules open the Debian mirrors so that
+# `verify --full` can install its probe tools *through* the proxy (profiles/probe/rules.txt).
+# Only that one path resolves it; everywhere else it is refused rather than composed.
+_VERIFY_ONLY = frozenset({"probe"})
+
+
+def _version_error(version):
+    """Why `version` cannot be interpolated into a generated Dockerfile, or None."""
+    if _VERSION_RE.fullmatch(version):
+        return None
+    return (f"invalid version {version!r} — letters and digits plus '.', '_', '+', '-', "
+            "starting alphanumeric; it becomes shell text at image build time")
+
+
+def _image_error(ref):
+    """Why `ref` cannot be used as an image reference, or None."""
+    if _IMAGE_RE.fullmatch(ref):
+        return None
+    return (f"invalid image reference {ref!r} — registry/name[:tag][@digest] characters only "
+            "(letters, digits and '.', '_', '-', ':', '/', '@'); a newline here would be an "
+            "extra Dockerfile directive")
+
+
 class Profile:
     """One resolved `--with name[@version]`: its files, its version, its metadata."""
 
@@ -113,6 +144,10 @@ class Profile:
         if version and not default:
             die(f"profile {name!r} takes no version (it installs nothing versioned)")
         self.version = version or default
+        if self.version:
+            bad = _version_error(self.version)      # a profile.conf default is checked too
+            if bad:
+                die(f"profile {name!r}: {bad}")
 
     @property
     def spec(self):
@@ -140,11 +175,14 @@ def _read_if(path):
     return path.read_text() if path.is_file() else ""
 
 
-def resolve_profiles(specs):
+def resolve_profiles(specs, *, allow_verify_only=False):
     """Turn `--with` specs into Profiles, in the order given (which the image hash keeps)."""
     profiles = []
     for spec in specs:
         name, _, version = spec.partition("@")
+        if name in _VERIFY_ONLY and not allow_verify_only:
+            die(f"profile {name!r} is for `silkgate verify` only — it opens the Debian mirrors "
+                "so the containment check can install its probe tools through the proxy")
         profiles.append(Profile(name, version or None))
     have = {p.name for p in profiles}
     for p in profiles:
@@ -183,6 +221,13 @@ def load_ruleset(text, where="rules"):
         die(f"{where}: {e}")
 
 
+# The other half of the proxy configuration: NO_PROXY/no_proxy is an exemption list every
+# HTTP client honours, and Tier 1 drops the direct connection it sends them to — so it takes
+# hosts out of the proxy's reach without taking them out of the policy, which is the same
+# footgun as clobbering HTTPS_PROXY and reads like the opposite.
+_NO_PROXY_VARS = ("NO_PROXY", "no_proxy")
+
+
 def check_env(pairs):
     """Validate -e NAME=VALUE pairs; clobbering the proxy config is always an error."""
     for pair in pairs:
@@ -191,6 +236,10 @@ def check_env(pairs):
             die(f"bad -e argument {pair!r} (expected NAME=VALUE)")
         if name in PROXY_ENV_VARS:
             die(f"-e {name} collides with the proxy configuration silkgate sets")
+        if name in _NO_PROXY_VARS:
+            die(f"-e {name} tells the guest's clients to bypass the proxy for the hosts it "
+                "names, and Tier 1 drops those connections — they fail instead of being "
+                "policed, and nothing in it widens the allowlist")
         if "\n" in value:
             # msb aborts the guest (SIGABRT, before the agent relay comes up) on any env
             # value containing a newline, at any size. Fail here with a reason instead.
@@ -515,23 +564,37 @@ def session_context(profiles, ruleset, *, workspace, persistent):
         "",
         "## What you can reach",
         "",
-        "Only these, and only with these methods. Both http and https go through the proxy; what",
-        "is matched is the host and path, not the scheme:",
-        "",
     ]
-    for rule in ruleset.rules:
-        methods = " ".join(sorted(rule.methods))
-        lines.append(f"- `{rule.raw.split()[0]}` — {methods}")
+    if ruleset.rules:
+        lines += [
+            "Only these, and only with these methods. Both http and https go through the proxy; what",
+            "is matched is the host and path, not the scheme:",
+            "",
+        ]
+        for rule in ruleset.rules:
+            methods = " ".join(sorted(rule.methods))
+            lines.append(f"- `{rule.raw.split()[0]}` — {methods}")
+        lines += [
+            "",
+            "GET is enough to install packages from a registry that appears above. Anything not",
+            "listed gets an HTTP 403 from the proxy saying `no matching rule`. **That is policy, not",
+            "a broken network and not a crash** — DNS, TLS and routing are all fine, and retrying",
+            "cannot change the answer.",
+        ]
+    else:
+        # An empty allowlist is the strictest policy silkgate can express, and it is a normal
+        # configuration rather than a broken one — so say what it means instead of a bare list.
+        lines += [
+            "**Nothing.** The allowlist for this machine is empty, so every request gets an HTTP 403",
+            "from the proxy saying `no matching rule` — there is no host, port or protocol that",
+            "works, and no DNS either. **That is policy, not a broken network and not a crash**, and",
+            "retrying cannot change the answer. Work from what is already on this machine.",
+        ]
     lines += [
         "",
-        "GET is enough to install packages from a registry that appears above. Anything not listed",
-        "gets an HTTP 403 from the proxy saying `no matching rule`. **That is policy, not a broken",
-        "network and not a crash** — DNS, TLS and routing are all fine, and retrying cannot change",
-        "the answer.",
-        "",
-        "If you need something that is not on that list, say so in your answer to whoever set your",
-        "task, naming the host, path and method you want and why. Nobody inside this machine can",
-        "widen the list, so that report is the only thing that can.",
+        "If you need a destination that is not listed above, say so in your answer to whoever set",
+        "your task, naming the host, path and method you want and why. Nobody inside this machine",
+        "can widen the list, so that report is the only thing that can.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -565,14 +628,41 @@ def sandbox_name(name):
     return f"sg-{name}"
 
 
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
+# What msb accepts as a sandbox name. meta.json's "sandbox" reaches `msb exec`/`msb rm` argv,
+# so it is held to this before it is used — a value msb would read as a flag is not a name.
+_SANDBOX_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+
+def _name_ok(name):
+    return bool(_NAME_RE.fullmatch(name or ""))
+
+
 def _validate_name(name):
     # Used as a dir name, an msb sandbox name (sg-<name>), and a net-rule component.
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name or ""):
+    if not _name_ok(name):
         die(f"invalid session name {name!r} (letters, digits, '-', '_'; ≤32 chars)")
 
 
 def read_meta(name):
-    return _read_json(session_dir(name) / "meta.json")
+    """One session's meta.json, or None when there is no such session.
+
+    Every command that takes a session name reaches the registry through here, so this is
+    where the name is checked. Unchecked it is a path component of session_dir(), so a name
+    carrying '..' or a leading '/' reads a meta.json from outside the registry — and what
+    that file says then becomes msb argv ("sandbox") and an rmtree target ("name"). A meta
+    that disagrees with the directory it was found in is refused rather than used.
+    """
+    _validate_name(name)
+    meta = _read_json(session_dir(name) / "meta.json")
+    if meta is None:
+        return None
+    if meta.get("name") != name:
+        die(f"session {name!r}: its meta.json names session {meta.get('name')!r} — refusing it")
+    sandbox = meta.get("sandbox")
+    if sandbox is not None and not _SANDBOX_RE.fullmatch(str(sandbox)):
+        die(f"session {name!r}: its meta.json names sandbox {sandbox!r} — refusing it")
+    return meta
 
 
 def list_metas():
@@ -580,7 +670,7 @@ def list_metas():
         return []
     metas = []
     for d in sorted(SESSIONS_DIR.iterdir()):
-        if d.name.startswith("."):               # staging dirs are not sessions
+        if d.name.startswith(".") or not _name_ok(d.name):   # not something silkgate created
             continue
         m = read_meta(d.name)
         if m:
@@ -1061,12 +1151,44 @@ def _relay(line, *, newline):
     stream.flush()
 
 
+# The mount is the only host path a guest can write, and it is rw, so what it must never be
+# handed is a directory the host itself later reads as instructions: home, silkgate's own
+# state, the checkout this CLI runs from, or a repository's `.git` — hooks and
+# `core.fsmonitor` there are host code execution the next time a human runs git in it.
+def _forbidden_mounts():
+    return ((Path.home(), "your home directory"),
+            (SILK_DIR, "silkgate's own state (session rulesets, the control socket, the CA)"),
+            (REPO, "the silkgate checkout this CLI runs from"))
+
+
 def _workspace_mount(workspace):
+    """(resolved host path, msb -v arguments) for --workspace, or (None, []) for no mount.
+
+    A *linked worktree* is deliberately allowed and is the pattern to reach for when a guest
+    needs a repository: its `.git` is a file naming a gitdir outside the mount, so no hook and
+    no config is in the guest's reach. Only the mount root is examined — a repository nested
+    deeper inside it is exposed the same way and is the operator's call.
+    """
     if not workspace:
         return None, []
     w = Path(workspace).resolve()
     if not w.is_dir():
         die(f"workspace is not a directory: {w}")
+    if w.parent == w:
+        die(f"refusing to mount {w} at /workspace: that is the whole filesystem")
+    for path, what in _forbidden_mounts():
+        target = Path(path).resolve()
+        if w == target or w in target.parents:
+            die(f"refusing to mount {w} at /workspace: it is (or contains) {what}, and the "
+                "guest gets it read-write — mount the project directory itself instead")
+    dotgit = w / ".git"
+    if dotgit.is_dir():
+        die(f"refusing to mount {w} at /workspace: it holds a .git directory, so the guest "
+            "would get read-write access to hooks and config — host code execution the next "
+            "time you run git there. Mount a linked worktree instead (git worktree add).")
+    if dotgit.is_file():
+        say(f"note: {w} is a linked git worktree — hooks and config live outside the mount and "
+            "are beyond the guest's reach, but the .git pointer file itself is not")
     return str(w), [f"{w}:/workspace:rw"]
 
 
@@ -1239,12 +1361,18 @@ def cmd_run(args):
 
 
 def _session_policy(args):
-    """Profiles -> (profiles, composed rules text, parsed ruleset), failing on bad rules."""
+    """Profiles -> (profiles, composed rules text, parsed ruleset), failing on bad rules.
+
+    No profile and no --rule composes an empty ruleset, which is legal: it is the strictest
+    policy silkgate can express — default-deny with nothing exempted — and the alternative
+    of a rule written to match nothing would sit in shell history reading like an allowance.
+    """
     profiles = resolve_profiles(args.with_ or [])
     rules_text = compose_rules(profiles, args.rule or [])
-    if not rules_text.strip():
-        die("no egress rules — pass --with PROFILE and/or --rule 'host/path GET'")
-    return profiles, rules_text, load_ruleset(rules_text)
+    ruleset = load_ruleset(rules_text)
+    if not ruleset.rules:
+        say("empty allowlist — this guest can reach nothing; every request is denied")
+    return profiles, rules_text, ruleset
 
 
 def _session_meta(profiles, cmd):
@@ -1570,8 +1698,45 @@ FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
               "update-ca-certificates && ")
 
 
+# verify_guest.sh scores seven numbered checks and reports which of them ran. Checks 3 and 7
+# are the containment core and need no installed tool, so a bare guest must run them; the rest
+# need tools only `--full` installs. A check that did not run proves nothing, so the set that
+# ran is asserted rather than a count of passes — five SKIPs and two PASSes is not containment.
+_VERIFY_CHECKS = frozenset(range(1, 8))
+_VERIFY_TOOL_FREE = frozenset({3, 7})
+
+
+def _ids(ids):
+    return ", ".join(str(i) for i in sorted(ids))
+
+
+def _parse_checks(line):
+    """`CHECKS: ran=3,7 skipped=1,2` -> ({3, 7}, {1, 2})."""
+    fields = dict(re.findall(r"(ran|skipped)=([\d,]*)", line))
+
+    def ids(key):
+        return {int(i) for i in fields.get(key, "").split(",") if i}
+
+    return ids("ran"), ids("skipped")
+
+
+def _verify_shortfall(passed, failed, ran, skipped, *, full):
+    """Why a verify run does not prove containment, or None if it does."""
+    if failed:
+        return f"containment check FAILED ({passed} passed, {failed} failed)"
+    missing = (_VERIFY_CHECKS if full else _VERIFY_TOOL_FREE) - ran
+    if missing:
+        return (f"containment unproven — check(s) {_ids(missing)} never ran"
+                + (f" (skipped: {_ids(skipped)})" if skipped else "")
+                + ("; --full installs the tools all seven need" if full
+                   else "; those two need no installed tool, so something else is wrong"))
+    if passed != len(ran):
+        return f"verify output disagrees with itself: {passed} passed of {len(ran)} that ran"
+    return None
+
+
 def cmd_verify(args):
-    rules_text = compose_rules(resolve_profiles(["probe"]))
+    rules_text = compose_rules(resolve_profiles(["probe"], allow_verify_only=True))
     load_ruleset(rules_text)
     script = "bash /mnt/poc/test/verify_guest.sh"
     mounts = [f"{REPO}:/mnt/poc:ro"]
@@ -1582,7 +1747,7 @@ def cmd_verify(args):
     say(f"proxy :{args.port} · audit: tail -f {log_path}")
     argv = msb_argv("debian", ["bash", "-c", script], args.port,
                     pull_never=False, mounts=mounts)
-    result = guest = None
+    result = checks = guest = None
     try:
         guest = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in guest.stdout:
@@ -1590,6 +1755,8 @@ def cmd_verify(args):
             m = re.search(r"RESULT: (\d+) passed, (\d+) failed", line)
             if m:
                 result = (int(m[1]), int(m[2]))
+            if "CHECKS: ran=" in line:
+                checks = _parse_checks(line)
         wait_foreground(guest)
     finally:
         if guest is not None:
@@ -1597,13 +1764,42 @@ def cmd_verify(args):
         stop(proxy)
     if result is None:
         die("no RESULT line — the guest never ran verify_guest.sh (msb server started?)")
+    if checks is None:
+        die("no CHECKS line — the guest did not report which checks ran, so nothing is proven")
     passed, failed = result
-    if failed or not passed:
-        die(f"containment check FAILED ({passed} passed, {failed} failed)")
-    say(f"containment holds ({passed} passed, 0 failed)")
+    ran, skipped = checks
+    bad = _verify_shortfall(passed, failed, ran, skipped, full=args.full)
+    if bad:
+        die(bad)
+    say(f"containment holds ({passed} passed, 0 failed; checks {_ids(ran)} ran)")
 
 
 # --- entry point ---------------------------------------------------------------
+# The two argument types that reach a generated Dockerfile or an msb argv are checked by
+# argparse itself, so a rejection names the flag it came from: `--with node@22.11.0` is
+# exactly the token a reviewer's eye slides over on a command line composed for approval.
+
+def _with_arg(spec):
+    """argparse type for --with: `name[@version]`. The name is resolved later, against the
+    profiles that exist; only the version is a charset question, and it is asked here."""
+    _, sep, version = spec.partition("@")
+    if sep and not version:
+        raise argparse.ArgumentTypeError(
+            f"{spec!r} pins an empty version — drop the '@' or name a version (an unset shell "
+            "variable expands to this, and would quietly install the default instead)")
+    bad = _version_error(version) if version else None
+    if bad:
+        raise argparse.ArgumentTypeError(bad)
+    return spec
+
+
+def _image_arg(ref):
+    """argparse type for --base and --image."""
+    bad = _image_error(ref)
+    if bad:
+        raise argparse.ArgumentTypeError(bad)
+    return ref
+
 
 def main():
     ap = argparse.ArgumentParser(prog="silkgate", description=__doc__,
@@ -1612,10 +1808,11 @@ def main():
 
     def profile_opts(p, *, rules_only=False):
         p.add_argument("-w", "--with", dest="with_", action="append", metavar="PROFILE[@VER]",
+                       type=_with_arg,
                        help="a profile from profiles/ — what to install and what it may reach "
                             "(repeatable; `silkgate profiles` lists them)")
         if not rules_only:
-            p.add_argument("--base", default=BASE_IMAGE,
+            p.add_argument("--base", default=BASE_IMAGE, type=_image_arg,
                            help=f"image the profiles layer onto (default: {BASE_IMAGE})")
         p.add_argument("--rule", action="append", metavar="RULE",
                        help="one extra rule in DSL syntax, e.g. 'example.com/** GET' (repeatable)")
@@ -1651,9 +1848,11 @@ def main():
     profile_opts(p)
     p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
                    help="shared-proxy base port when this command starts it (default: 8090)")
-    p.add_argument("--image", metavar="REF",
+    p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")
-    p.add_argument("--workspace", metavar="DIR", help="mount DIR at /workspace (rw)")
+    p.add_argument("--workspace", metavar="DIR",
+                   help="mount DIR at /workspace (rw). Not $HOME and not a directory "
+                        "holding a .git directory — for a repo, mount a linked worktree")
     env_opt(p)
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
                    help="give the command a terminal, for a TUI (default: yes if stdin is a "
@@ -1665,10 +1864,12 @@ def main():
 
     p = sub.add_parser("up", help="start a persistent session (background guest + shared proxy)")
     p.add_argument("--name", metavar="N", help="session name (default: random 6-char id)")
-    p.add_argument("--workspace", metavar="DIR", help="mount DIR at /workspace (rw)")
+    p.add_argument("--workspace", metavar="DIR",
+                   help="mount DIR at /workspace (rw). Not $HOME and not a directory "
+                        "holding a .git directory — for a repo, mount a linked worktree")
     profile_opts(p)
     env_opt(p)
-    p.add_argument("--image", metavar="REF",
+    p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")
     p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
                    help="shared-proxy base port when this command starts it (default: 8090)")
