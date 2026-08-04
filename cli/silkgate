@@ -307,10 +307,62 @@ def _probe_addr(port):
     return (host, port)
 
 
+# Retention for ~/.silkgate/logs. Every proxy start writes a fresh proxy-<stamp>.log —
+# the single-ruleset paths a .rules snapshot beside it — and nothing else ever removes
+# one. The audit trail is what post-incident review leans on, so unbounded growth and
+# silent deletion are both wrong; pruning therefore favours keeping: a file is removed
+# only when it is BOTH older than the retention age AND beyond the newest LOG_RETAIN_COUNT
+# of its kind, every removal is announced, and SILKGATE_LOG_RETAIN_DAYS=0 keeps everything
+# (archive elsewhere if the trail must outlive the machine).
+LOG_RETAIN_DAYS = 30
+LOG_RETAIN_COUNT = 20
+_LOG_PATTERNS = ("proxy-*.log", "proxy-*.rules", "standalone-*.rules")
+
+
+def _prune_logs():
+    """Apply the retention policy above; runs where log files are created.
+
+    The log a live proxy is writing is safe twice over: proxy.json names it (checked
+    here), and being written keeps its mtime inside the retention age — so even a
+    foreground proxy another silkgate process started, which has no proxy.json, cannot
+    lose its log while it runs."""
+    try:
+        days = float(os.environ.get("SILKGATE_LOG_RETAIN_DAYS", "") or LOG_RETAIN_DAYS)
+    except ValueError:
+        days = LOG_RETAIN_DAYS
+    if days <= 0:                                # 0 (or less): retention is off, keep all
+        return
+    live = (read_proxy() or {}).get("log")
+    live = Path(live) if live else None
+    cutoff = time.time() - days * 86400
+    pruned = 0
+    for pattern in _LOG_PATTERNS:
+        stamped = []
+        for p in LOG_DIR.glob(pattern):
+            try:
+                stamped.append((p.stat().st_mtime, p))
+            except OSError:                      # vanished mid-scan: already gone
+                continue
+        stamped.sort(reverse=True)
+        for mtime, p in stamped[LOG_RETAIN_COUNT:]:
+            if p == live or mtime >= cutoff:
+                continue
+            try:
+                p.unlink()
+                pruned += 1
+            except OSError:
+                pass
+    if pruned:
+        say(f"pruned {pruned} audit log file(s) older than {days:g}d from {LOG_DIR} "
+            f"(the {LOG_RETAIN_COUNT} newest of each kind always stay; "
+            "SILKGATE_LOG_RETAIN_DAYS=0 keeps everything)")
+
+
 def start_proxy(rules_text, port):
     """Start a single-ruleset mitmdump in the background; return (proc, audit log path)."""
     mitmdump = which("mitmdump", "pip install mitmproxy")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _prune_logs()
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
     log_path = LOG_DIR / f"proxy-{stamp}.log"
     rules_file = LOG_DIR / f"proxy-{stamp}.rules"
@@ -375,21 +427,31 @@ def ensure_ca():
     ~/.mitmproxy also holds mitmproxy-ca.pem — the private key, which is the whole reason
     the proxy can be trusted — so nothing here ever hands out that directory. Callers get
     a directory containing the public cert alone, safe to mount or copy into an image.
+
+    Generation opens no socket: mitmdump writes the CA into confdir during startup, so
+    `--no-server` plus an addon that shuts the master down once startup completes is a
+    one-shot that leaves the CA behind without ever listening — a listener here would be
+    a bare proxy with no addon and no rules, open for as long as the wait takes.
     """
     if not MITM_CA.is_file():
         mitmdump = which("mitmdump", "pip install mitmproxy")
         say("generating the mitmproxy CA (first run)…")
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-        proc = subprocess.Popen([mitmdump, "-q", "--listen-port", str(port)],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and not MITM_CA.is_file():
-            time.sleep(0.2)
-        stop(proc)
+        with tempfile.TemporaryDirectory(prefix="silkgate-ca-") as tmp:
+            addon = Path(tmp) / "shutdown_after_startup.py"
+            addon.write_text("from mitmproxy import ctx\n"
+                             "\n"
+                             "def running():\n"
+                             "    ctx.master.shutdown()\n")
+            argv = [mitmdump, "--no-server", "-s", str(addon),
+                    "--set", f"confdir={MITM_CA.parent}"]
+            try:
+                proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                die(f"mitmdump did not finish generating {MITM_CA} within 60s")
         if not MITM_CA.is_file():
-            die(f"mitmproxy did not create {MITM_CA} — run mitmdump once manually")
+            detail = (proc.stderr or proc.stdout).strip().splitlines()
+            die(f"mitmdump did not create {MITM_CA}"
+                + (f" — {detail[-1]}" if detail else ""))
     CA_DIR.mkdir(parents=True, exist_ok=True)
     cert = CA_DIR / "egress-ca.pem"
     shutil.copyfile(MITM_CA, cert)
@@ -804,6 +866,7 @@ def start_shared_proxy(base_port):
     mitmdump = which("mitmdump", "pip install mitmproxy")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    _prune_logs()
     log_path = LOG_DIR / f"proxy-{datetime.now():%Y%m%d-%H%M%S}.log"
     ports = list(range(base_port, base_port + POOL_SIZE))
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
@@ -1454,7 +1517,14 @@ def cmd_profiles(args):
 
 
 def cmd_proxy(args):
-    """One ruleset, one port, in the foreground — for guests silkgate doesn't manage."""
+    """One ruleset, one port, in the foreground — for guests silkgate doesn't manage.
+
+    Binds PROXY_BINDS like the other two proxy entry points: loopback, both families,
+    by default — each listener is an allowlist plus header-triggered credential
+    injection, which no LAN peer was ever meant to reach. A guest on another machine
+    needs a host interface it can route to; name it (and nothing wider) with
+    SILKGATE_PROXY_BIND=<address> — see the note above PROXY_BINDS.
+    """
     profiles = resolve_profiles(args.with_ or [])
     rules_text = compose_rules(profiles, args.rule or [])
     if not rules_text.strip():
@@ -1462,11 +1532,15 @@ def cmd_proxy(args):
     check_secrets(load_ruleset(rules_text), fatal=False)
     mitmdump = which("mitmdump", "pip install mitmproxy")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _prune_logs()
     rules_file = LOG_DIR / f"standalone-{datetime.now():%Y%m%d-%H%M%S}.rules"
     rules_file.write_text(rules_text)
     env = dict(os.environ, EGRESS_RULES=str(rules_file))
     env.pop("EGRESS_SESSIONS_DIR", None)
-    proc = subprocess.Popen([mitmdump, "-s", str(ADDON), "--listen-port", str(args.port)], env=env)
+    # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
+    # instead of becoming an opaque tunnel around the addon's per-request checks.
+    argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"] + _modes(args.port)
+    proc = subprocess.Popen(argv, env=env)
     try:
         sys.exit(wait_foreground(proc))
     finally:
@@ -1649,11 +1723,16 @@ def cmd_ls(args):
                          _age(m.get("created"))))
         _print_table(rows)
     proxy = read_proxy()
-    if proxy and proxy_alive(proxy.get("pid")):
-        pool = proxy["ports"]
-        print(f"proxy: pid {proxy['pid']} alive · ports {pool[0]}-{pool[-1]} · {proxy['log']}")
+    ident = _proxy_ident()               # identity via the control socket, never pid alone:
+    if ident is None:                    # after an unclean exit proxy.json survives and its
+        print("proxy: not running")      # pid may belong to a recycled, unrelated process
+    elif proxy is None:
+        print(f"proxy: pid {ident or 'unknown'} answers on {PROXY_SOCK} but {PROXY_JSON} "
+              "is gone — kill that process and retry")
     else:
-        print("proxy: not running")
+        pool = proxy["ports"]
+        pid = ident or proxy.get("pid")  # 0 = answered, but the kernel could not name it
+        print(f"proxy: pid {pid} alive · ports {pool[0]}-{pool[-1]} · {proxy['log']}")
 
 
 # --- logs: per-session observability ----------------------------------------
@@ -1763,7 +1842,8 @@ def _logs_audit(args):
     if not proxy or not proxy.get("log"):
         die("shared proxy not running — no audit log (silkgate ls)")
     if args.since is not None:
-        say("--since has no effect on --audit (audit records carry no timestamp)")
+        say("--since applies to the guest log only — --audit starts from the whole "
+            "file (--tail trims it)")
     name = args.name
     path = Path(proxy["log"])
     lines, offset = _read_from(path, 0)              # first view = the whole file's history
@@ -1780,7 +1860,9 @@ def _logs_audit(args):
         if not session_dir(name).exists():
             die(f"session {name!r} is gone — stopped following")
         p = read_proxy()
-        if not (p and proxy_alive(p.get("pid"))):    # last `down` stopped the shared proxy
+        # Identity, not pid liveness: after an unclean exit proxy.json survives and its
+        # pid may be recycled, so only a proxy answering on the control socket counts.
+        if not (p and _proxy_running()):
             die("shared proxy is gone — stopped following")
         new_path = Path(p.get("log") or path)
         if new_path != path:                         # proxy restarted onto a fresh log file
