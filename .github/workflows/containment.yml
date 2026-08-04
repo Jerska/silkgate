@@ -1,0 +1,68 @@
+# The claim under test is the repo's central one: a guest's only route to the network is
+# the proxy. `verify --full` boots a real microVM and asserts all seven guest checks ran
+# (cli/silkgate refuses a run where any check skipped), so a green here is the live
+# containment result, not a proxy for it.
+#
+# Everything runs through test/linux/ — the same container the README documents for Linux
+# hosts — so one workflow also proves that container still builds with its pinned
+# mitmproxy and msb, and CI exercises exactly the path a human would run.
+#
+# GitHub's Linux runners are documented to expose /dev/kvm, but that is the kind of claim
+# this repo exists to distrust. The probe below decides at runtime; a runner without KVM
+# produces a loud skip — a warning annotation and a step summary saying the check DID NOT
+# run — never a green that quietly proved nothing.
+name: containment
+
+on: [push, pull_request]
+
+concurrency:
+  group: containment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    # msb's release binaries need glibc >= 2.39, which is noble's; the container supplies
+    # its own userland either way, but docker and /dev/kvm come from this image.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Needs no KVM, so it runs on every runner: a pin that stopped resolving, or an
+      # installer that ignores the msb version it was asked for, fails this build loudly
+      # (the Dockerfile interrogates the installed msb instead of trusting the installer).
+      - name: build the verification container
+        run: docker build -t silkgate-verify test/linux/
+
+      - name: probe for KVM
+        id: kvm
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "present=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=no" >> "$GITHUB_OUTPUT"
+            echo "::warning title=containment check DID NOT RUN::no /dev/kvm on this runner — verify --full was skipped, so this run says nothing about containment"
+            {
+              echo "## ⚠️ containment check DID NOT RUN"
+              echo "No /dev/kvm on this runner. The verification container builds, but"
+              echo "\`verify --full\` needs a microVM; treat containment as unproven for this commit."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # `shell: bash` for pipefail: the verdict must be docker's exit status, not tee's.
+      # silkgate narrates on stderr and the guest on stdout, so both are captured. The
+      # summary quotes the guest's own CHECKS/RESULT lines — the thing to read on a first
+      # run to confirm the check really ran, rather than trusting this file's plumbing.
+      - name: silkgate verify --full
+        if: steps.kvm.outputs.present == 'yes'
+        shell: bash
+        run: |
+          docker run --rm --device /dev/kvm -v "$PWD:/silkgate" silkgate-verify \
+            /silkgate/cli/silkgate verify --full 2>&1 | tee verify.out
+          {
+            echo "## containment check ran"
+            echo '```'
+            grep -E "CHECKS:|RESULT:|containment holds" verify.out \
+              || echo "verify exited 0 but the expected CHECKS/RESULT lines are missing — read the job log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

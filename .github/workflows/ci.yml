@@ -1,0 +1,99 @@
+# Everything here runs on a bare runner — no VM, no docker, no KVM — so a red is
+# reproducible on any machine with python3. The containment check itself needs a
+# microVM and lives in containment.yml.
+name: tests
+
+on: [push, pull_request]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # cli/ and mitmaddon/ are stdlib-only by contract (AGENTS.md) and run on hosts, never
+  # in guests — so the interpreters that matter are the ones hosts actually have. 3.12 is
+  # noble's python3, the one interpreter this repo ships (the test/linux container); 3.13
+  # is what current hosts run. Stdlib-only code is exactly where interpreter drift breaks
+  # things, and nothing is installed here, so covering both costs seconds.
+  stdlib:
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # the cheapest gate first: a file that does not even parse fails here, in seconds
+      - name: syntax
+        run: |
+          python3 -m py_compile cli/silkgate
+          bash -n test/verify_guest.sh
+
+      - name: rule engine self-test
+        run: python3 mitmaddon/rule_engine.py
+
+      # exits non-zero if any of the documented engine fixes regresses. It is the only
+      # file under test/repro/ that renders a verdict — the rest are demonstrations, and
+      # build_injection.py exits non-zero by design — so nothing globs that directory.
+      - name: engine findings stay fixed
+        run: python3 test/repro/engine_claims.py
+
+      # discovery, not a list: a new test/test_*.py joins CI by existing. test_addon.py
+      # is the one file with a third-party import, so it runs in the addon jobs below,
+      # against a mitmproxy this job deliberately does not have. Every file runs even
+      # after one fails, so a red run names all of the broken suites at once.
+      - name: unit tests
+        run: |
+          rc=0
+          for t in test/test_*.py; do
+            case "$t" in */test_addon.py) continue ;; esac
+            echo "=== $t"
+            python3 "$t" || rc=1
+          done
+          exit $rc
+
+  # The addon reaches into mitmproxy internals — flow.request.host_header, the
+  # http_connect hook, .stream semantics — so it is tested against the exact version the
+  # rest of the repo pins, on 3.12: the interpreter the test/linux container runs it on.
+  addon:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: install the pinned mitmproxy
+        run: python3 -m pip install mitmproxy==12.2.3
+      - name: addon enforcement tests
+        run: python3 test/test_addon.py
+
+  # Early warning, not a gate: the same suite against whatever `pip install mitmproxy` on
+  # a current interpreter resolves to today, so the pin's eventual bump is scheduled by a
+  # red canary here instead of forced by a security release. Both mitmproxy and python
+  # float on purpose — pinning python would let a future mitmproxy that needs a newer
+  # interpreter quietly resolve to an old release, and the canary would stop canarying.
+  # The pinned jobs above isolate each variable; the resolved version lands in the step
+  # summary so a failure names the release that broke us. continue-on-error keeps a red
+  # from blocking anything.
+  addon-mitmproxy-latest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: install current mitmproxy
+        run: python3 -m pip install mitmproxy
+      - name: addon enforcement tests against current mitmproxy
+        run: |
+          python3 -c "from importlib.metadata import version; print('mitmproxy', version('mitmproxy'))" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 test/test_addon.py
