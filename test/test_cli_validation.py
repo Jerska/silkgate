@@ -125,6 +125,77 @@ class TestBuildArguments(CliCase):
         self.assertEqual(sg._image_arg(sg.BASE_IMAGE), sg.BASE_IMAGE)
 
 
+class TestBaseFlag(CliCase):
+    """--base was validated everywhere but honoured only by `build`: run/up called
+    ensure_image without it, so a named base silently built the default instead."""
+
+    def test_run_and_up_pass_base_to_ensure_image(self):
+        for argv in (["run", "--base", "example.com/alt:9", "--", "true"],
+                     ["up", "--name", "bf1", "--base", "example.com/alt:9"]):
+            seen = {}
+
+            def spy(profiles, image, *, base=sg.BASE_IMAGE):
+                seen["base"] = base
+                raise SystemExit(42)                        # stop before any proxy/msb work
+
+            with mock.patch.object(sg, "ensure_image", spy), \
+                    mock.patch.object(sys, "argv", ["silkgate"] + argv), \
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as caught:
+                sg.main()
+            self.assertEqual(caught.exception.code, 42, argv)
+            self.assertEqual(seen["base"], "example.com/alt:9", argv)
+
+    def test_image_beside_a_named_base_is_refused(self):
+        # An explicit image means nothing is built, so the base would be ignored — the
+        # exact accepted-then-inert behaviour the passthrough above exists to end.
+        self.assertEqual(sg.ensure_image([], "explicit:1"), "explicit:1")
+        self.refuses("--image and --base", sg.ensure_image, [], "explicit:1",
+                     base="example.com/alt:9")
+        with mock.patch.object(sys, "argv", ["silkgate", "run", "--image", "img:1",
+                                             "--base", "example.com/alt:9", "--", "true"]):
+            self.refuses("--image and --base", sg.main)
+
+
+class TestImageRef(CliCase):
+    """The tag hash must cover everything that shapes the built image, or the cached-image
+    lookup in ensure_image serves a stale build after that thing changes."""
+
+    def test_hash_covers_the_base(self):
+        self.assertNotEqual(sg.image_ref([]), sg.image_ref([], base="ubuntu:24.04"))
+
+    def test_hash_covers_the_base_layer_bytes(self):
+        before = sg.image_ref([])
+        with mock.patch.object(sg, "_BASE_LAYER", sg._BASE_LAYER + "ENV X=1\n"):
+            self.assertNotEqual(before, sg.image_ref([]))
+
+
+class TestGuestCaEnv(CliCase):
+    """Every TLS stack that reads only SSL_CERT_FILE (uv, anything rustls or Go) failed
+    with UnknownIssuer in the guest until it was set by hand; ARCHITECTURE.md promises
+    all five vars."""
+
+    CA_VARS = ("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "GIT_SSL_CAINFO",
+               "SSL_CERT_FILE", "PIP_CERT")
+
+    def test_base_layer_sets_every_promised_var(self):
+        for var in self.CA_VARS:
+            self.assertIn(f"{var}=/usr/local/share/ca-certificates/egress.crt",
+                          sg._BASE_LAYER)
+
+    def test_written_dockerfile_carries_them(self):
+        cert = self.tmp / "egress-ca.pem"
+        cert.write_text("-----BEGIN CERTIFICATE-----\nnot-a-real-ca\n-----END CERTIFICATE-----\n")
+        context = self.tmp / "context"
+        context.mkdir()
+        with mock.patch.object(sg, "ensure_ca", lambda: cert):
+            sg.write_build_context(context, [], "debian:bookworm-slim")
+        dockerfile = (context / "Dockerfile").read_text()
+        self.assertTrue(dockerfile.startswith("FROM debian:bookworm-slim\n"))
+        for var in self.CA_VARS:
+            self.assertIn(f"{var}=/usr/local/share/ca-certificates/egress.crt", dockerfile)
+
+
 class TestSessionNames(CliCase):
     """Finding 8: a session name is a path component of session_dir(), and what the
     meta.json found there says becomes msb argv and an rmtree target."""
@@ -191,6 +262,53 @@ class TestWorkspaceGuard(CliCase):
         self.assertEqual((path, mounts), (str(tree), [f"{tree}:/workspace:rw"]))
         self.assertIn("worktree", err.getvalue())           # said, not silently allowed
 
+    def test_nested_git_directory_is_refused_and_located(self):
+        mount = self.tmp / "mount"
+        (mount / "clean").mkdir(parents=True)
+        (mount / "vendor" / "dep" / ".git" / "hooks").mkdir(parents=True)
+        message = self.refuses("refusing to mount", sg._workspace_mount, str(mount))
+        self.assertIn(str(Path("vendor") / "dep"), message)  # names where it found it
+        self.assertIn("--allow-git-dir", message)            # and both ways forward
+        self.assertIn("worktree", message)
+
+    def test_nested_worktree_pointer_file_stays_allowed(self):
+        mount = self.tmp / "trees"
+        (mount / "wt").mkdir(parents=True)
+        (mount / "wt" / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
+        path, mounts = sg._workspace_mount(str(mount))
+        self.assertEqual((path, mounts), (str(mount), [f"{mount}:/workspace:rw"]))
+
+    def test_allow_git_dir_mounts_anyway_and_says_so(self):
+        repo = self.tmp / "repo"
+        (repo / ".git" / "hooks").mkdir(parents=True)
+        (repo / "sub" / ".git").mkdir(parents=True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            path, mounts = sg._workspace_mount(str(repo), allow_git_dir=True)
+        self.assertEqual((path, mounts), (str(repo), [f"{repo}:/workspace:rw"]))
+        self.assertIn("--allow-git-dir", err.getvalue())    # loud, never silent
+
+    def test_allow_git_dir_does_not_unlock_forbidden_mounts(self):
+        for path in [str(Path.home()), str(REPO), os.sep]:
+            self.refuses("refusing to mount", sg._workspace_mount, path, allow_git_dir=True)
+
+    def test_run_and_up_wire_allow_git_dir(self):
+        for argv in (["run", "--allow-git-dir", "--", "true"],
+                     ["up", "--name", "wire1", "--allow-git-dir"]):
+            seen = {}
+
+            def spy(workspace, *, allow_git_dir=False):
+                seen["flag"] = allow_git_dir
+                raise SystemExit(42)                        # stop before any proxy/msb work
+
+            with mock.patch.object(sg, "_workspace_mount", spy), \
+                    mock.patch.object(sys, "argv", ["silkgate"] + argv), \
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as caught:
+                sg.main()
+            self.assertEqual(caught.exception.code, 42, argv)
+            self.assertTrue(seen["flag"], argv)
+
     def test_host_state_and_home_are_refused(self):
         sg.SILK_DIR = self.tmp / "state" / "silkgate"
         sg.SILK_DIR.mkdir(parents=True)
@@ -223,6 +341,49 @@ class TestProbeQuarantine(CliCase):
     def test_probe_rules_are_what_the_quarantine_is_about(self):
         rules = sg.compose_rules(sg.resolve_profiles(["probe"], allow_verify_only=True))
         self.assertIn("deb.debian.org", rules)
+
+    def test_listing_marks_probe_as_verify_only(self):
+        # cmd_profiles builds Profile objects directly, bypassing resolve_profiles' guard,
+        # so the truth has to be in the listing itself.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            sg.cmd_profiles(None)
+        lines = out.getvalue().splitlines()
+        probe = next(ln for ln in lines if ln.startswith("probe "))
+        self.assertIn("silkgate verify only", probe)
+        for ln in lines:
+            if not ln.startswith(("probe ", "PROFILE")):
+                self.assertNotIn("verify only", ln)
+
+
+class TestProfileRequires(CliCase):
+    """`requires` in profile.conf is an extension point no shipped profile uses yet. It is
+    kept because profiles are user-addable data — a directory, not code — and this is the
+    executed path that keeps the enforcement from rotting unseen."""
+
+    def setUp(self):
+        super().setUp()
+        pdir = self.tmp / "profiles"
+        for name, conf in (("needy", "requires = helper\n"),
+                           ("greedy", "requires = helper, needy\n"),
+                           ("helper", "")):
+            (pdir / name).mkdir(parents=True)
+            if conf:
+                (pdir / name / "profile.conf").write_text(conf)
+        self._profile_dir = sg.PROFILE_DIR
+        sg.PROFILE_DIR = pdir
+        self.addCleanup(setattr, sg, "PROFILE_DIR", self._profile_dir)
+
+    def test_missing_requirement_is_refused_and_named(self):
+        message = self.refuses("requires helper", sg.resolve_profiles, ["needy"])
+        self.assertIn("--with", message)                    # the error names the way out
+        self.refuses("requires helper, needy", sg.resolve_profiles, ["greedy"])
+
+    def test_satisfied_requirement_resolves_in_either_order(self):
+        for specs in (["needy", "helper"], ["helper", "needy"]):
+            self.assertEqual([p.name for p in sg.resolve_profiles(specs)], specs)
+        self.assertEqual([p.name for p in sg.resolve_profiles(["helper", "needy", "greedy"])],
+                         ["helper", "needy", "greedy"])
 
 
 class TestEmptyAllowlist(CliCase):

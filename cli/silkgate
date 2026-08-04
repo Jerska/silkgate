@@ -407,6 +407,9 @@ _DOCKER_PLATFORMS = {"arm64": "linux/arm64", "aarch64": "linux/arm64",
 # What silkgate itself needs of any guest: the CA it terminates TLS with, in the system
 # trust store and in the env vars runtimes read; a shell and mkfifo/mktemp for the live
 # output relay (coreutils, already in the base); and /workspace as the working directory.
+# SSL_CERT_FILE *replaces* the default root store for the stacks that read it (OpenSSL and
+# everything on it, rustls, Go) rather than extending it, and a single PEM cert is a legal
+# one-entry bundle — right for a guest whose only TLS peer, ever, is the proxy's CA.
 _BASE_LAYER = """FROM {base}
 RUN apt-get update \\
     && apt-get install -y --no-install-recommends ca-certificates \\
@@ -416,6 +419,8 @@ RUN update-ca-certificates
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/egress.crt \\
     REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/egress.crt \\
     GIT_SSL_CAINFO=/usr/local/share/ca-certificates/egress.crt \\
+    SSL_CERT_FILE=/usr/local/share/ca-certificates/egress.crt \\
+    PIP_CERT=/usr/local/share/ca-certificates/egress.crt \\
     PATH=/root/.local/bin:$PATH
 WORKDIR /workspace
 """
@@ -424,12 +429,13 @@ WORKDIR /workspace
 def image_ref(profiles, base=BASE_IMAGE):
     """`silkgate/<slug>:<hash12>` — slug to read, hash to be exact.
 
-    The hash covers the base and, per profile in order, its name, resolved version, declared
-    packages, and the bytes of its setup/rules/env. Editing any of those is a different
-    image, so a stale cache hit can't happen; reordering is a different image too, since
-    layers stack.
+    The hash covers the base, the _BASE_LAYER template, and, per profile in order, its
+    name, resolved version, declared packages, and the bytes of its setup/rules/env.
+    Editing any of those is a different image, so a stale cache hit can't happen;
+    reordering is a different image too, since layers stack.
     """
     h = hashlib.sha256(base.encode())
+    h.update(b"\0" + _BASE_LAYER.encode())
     for p in profiles:
         h.update(b"\0" + p.spec.encode())
         h.update(b"\0" + " ".join(p.packages).encode())
@@ -495,7 +501,7 @@ def docker_env():
     return dict(os.environ, DOCKER_CONFIG=str(DOCKER_CFG_DIR))
 
 
-def build_image(profiles, *, base=BASE_IMAGE, platform_=None, quiet=False):
+def build_image(profiles, *, base=BASE_IMAGE, platform_=None):
     """Build (and load into msb) the image these profiles describe; return its ref."""
     docker = which("docker", "images are built with docker, then loaded into msb")
     msb = which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
@@ -508,12 +514,11 @@ def build_image(profiles, *, base=BASE_IMAGE, platform_=None, quiet=False):
         context = Path(tmp)
         write_build_context(context, profiles, base)
         say(f"building {ref} ({', '.join(p.spec for p in profiles) or 'base only'})")
-        out = subprocess.DEVNULL if quiet else None
         if subprocess.run([docker, "build", "--platform", plat, "-t", ref, str(context)],
-                          env=env, stdout=out, stderr=out).returncode:
+                          env=env).returncode:
             die(f"docker build failed for {ref}")
     save = subprocess.Popen([docker, "save", ref], env=env, stdout=subprocess.PIPE)
-    load = subprocess.run([msb, "load"], stdin=save.stdout, stdout=out, stderr=out)
+    load = subprocess.run([msb, "load"], stdin=save.stdout)
     save.stdout.close()
     if save.wait() or load.returncode:
         die(f"docker save | msb load failed for {ref}")
@@ -521,8 +526,15 @@ def build_image(profiles, *, base=BASE_IMAGE, platform_=None, quiet=False):
 
 
 def ensure_image(profiles, image, *, base=BASE_IMAGE):
-    """An explicit --image wins; otherwise build the profiles' image unless msb has it."""
+    """An explicit --image wins; otherwise build the profiles' image unless msb has it.
+
+    --image beside a non-default --base is refused rather than resolved: the image is
+    already chosen, so nothing is built and the base would change nothing — and a flag
+    that is accepted and then ignored reads as honoured."""
     if image:
+        if base != BASE_IMAGE:
+            die("--image and --base together are contradictory: --image names the exact "
+                "image to run, so nothing is built for --base to shape — drop one")
         return image
     ref = image_ref(profiles, base)
     if image_in_msb(ref):
@@ -1276,13 +1288,26 @@ def _forbidden_mounts():
             (REPO, "the silkgate checkout this CLI runs from"))
 
 
-def _workspace_mount(workspace):
+def _find_git_dir(root):
+    """The first `.git` directory at or under `root`, or None. The walk never follows
+    symlinks, so it is bounded by the tree the user chose to mount and cannot leave it."""
+    for dirpath, dirnames, _ in os.walk(root):
+        if ".git" in dirnames:
+            return Path(dirpath) / ".git"
+    return None
+
+
+def _workspace_mount(workspace, *, allow_git_dir=False):
     """(resolved host path, msb -v arguments) for --workspace, or (None, []) for no mount.
 
     A *linked worktree* is deliberately allowed and is the pattern to reach for when a guest
     needs a repository: its `.git` is a file naming a gitdir outside the mount, so no hook and
-    no config is in the guest's reach. Only the mount root is examined — a repository nested
-    deeper inside it is exposed the same way and is the operator's call.
+    no config is in the guest's reach. A `.git` *directory* is refused wherever it sits in the
+    mount, not just at the root — the walk costs one unfollowed-symlink pass over the tree the
+    user pointed at, which the common case (one project directory) makes cheap, and a guard
+    that checked only the root would be trusted as if it checked everything. --allow-git-dir
+    skips the check (and the walk) entirely: the risk then sits on the command line a human
+    approved, never in an environment variable that quietly outlives the decision.
     """
     if not workspace:
         return None, []
@@ -1296,12 +1321,19 @@ def _workspace_mount(workspace):
         if w == target or w in target.parents:
             die(f"refusing to mount {w} at /workspace: it is (or contains) {what}, and the "
                 "guest gets it read-write — mount the project directory itself instead")
-    dotgit = w / ".git"
-    if dotgit.is_dir():
-        die(f"refusing to mount {w} at /workspace: it holds a .git directory, so the guest "
-            "would get read-write access to hooks and config — host code execution the next "
-            "time you run git there. Mount a linked worktree instead (git worktree add).")
-    if dotgit.is_file():
+    if allow_git_dir:
+        say(f"note: --allow-git-dir — {w} is mounted without the .git check, so hooks and "
+            "config of any repository inside are guest-writable: host code execution the "
+            "next time a human runs git there")
+    else:
+        dotgit = _find_git_dir(w)
+        if dotgit is not None:
+            where = "" if dotgit.parent == w else f" (at {dotgit.parent.relative_to(w)})"
+            die(f"refusing to mount {w} at /workspace: it holds a .git directory{where}, so "
+                "the guest would get read-write access to hooks and config — host code "
+                "execution the next time you run git there. Mount a linked worktree instead "
+                "(git worktree add), or accept the risk explicitly with --allow-git-dir.")
+    if (w / ".git").is_file():
         say(f"note: {w} is a linked git worktree — hooks and config live outside the mount and "
             "are beyond the guest's reach, but the .git pointer file itself is not")
     return str(w), [f"{w}:/workspace:rw"]
@@ -1413,8 +1445,11 @@ def cmd_profiles(args):
                         for ln in prof.rules.splitlines()
                         if ln.strip() and not ln.startswith("#")})
         installs = list(prof.packages) + (["setup.sh"] if prof.setup.strip() else [])
+        desc = prof.conf.get("description", "")
+        if prof.name in _VERIFY_ONLY:               # listed like the rest, usable unlike them
+            desc = f"(silkgate verify only — refused with run/up/build/proxy) {desc}"
         rows.append((prof.name, prof.version or "-", " ".join(installs) or "-",
-                     ", ".join(hosts) or "-", prof.conf.get("description", "")))
+                     ", ".join(hosts) or "-", desc))
     _print_table(rows)
 
 
@@ -1450,8 +1485,8 @@ def cmd_run(args):
     if not cmd:
         die("nothing to run — pass a command after -- (or --with a profile that names one)")
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
-    ws, mounts = _workspace_mount(args.workspace)
-    image = ensure_image(profiles, args.image)
+    ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
+    image = ensure_image(profiles, args.image, base=args.base)
     name = uuid4().hex[:6]
     proxy_was_running = _proxy_running()        # --port is the base port iff WE start it
     proxy = ensure_proxy(args.port)
@@ -1518,8 +1553,8 @@ def cmd_up(args):
     _validate_name(name)
     if session_dir(name).exists():
         die(f"session {name!r} already exists")
-    ws, mounts = _workspace_mount(args.workspace)
-    image = ensure_image(profiles, args.image)
+    ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
+    image = ensure_image(profiles, args.image, base=args.base)
     proxy = ensure_proxy(args.port)
     port = pick_port(proxy, name)
     ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=True)
@@ -1976,6 +2011,10 @@ def main():
     p.add_argument("--workspace", metavar="DIR",
                    help="mount DIR at /workspace (rw). Not $HOME and not a directory "
                         "holding a .git directory — for a repo, mount a linked worktree")
+    p.add_argument("--allow-git-dir", action="store_true",
+                   help="mount --workspace even where it holds .git directories — their "
+                        "hooks and config become guest-writable, which is host code "
+                        "execution the next time a human runs git there")
     env_opt(p)
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
                    help="give the command a terminal, for a TUI (default: yes if stdin is a "
@@ -1990,6 +2029,10 @@ def main():
     p.add_argument("--workspace", metavar="DIR",
                    help="mount DIR at /workspace (rw). Not $HOME and not a directory "
                         "holding a .git directory — for a repo, mount a linked worktree")
+    p.add_argument("--allow-git-dir", action="store_true",
+                   help="mount --workspace even where it holds .git directories — their "
+                        "hooks and config become guest-writable, which is host code "
+                        "execution the next time a human runs git there")
     profile_opts(p)
     env_opt(p)
     p.add_argument("--image", metavar="REF", type=_image_arg,
