@@ -129,10 +129,12 @@ session you did not start in the foreground, or to see only its egress decisions
 ```
 
 `up` pushes every `EGRESS_SECRET_<NAME>` the session's `inject_auth` rules need, and refuses to
-start if one is neither in your environment nor already held by the running proxy — so a secret
-pushed once serves later sessions started from a shell that never had it. Add or rotate one with
-`silkgate secret set anthropic`, which reads `EGRESS_SECRET_ANTHROPIC` from the environment; the
-value is **never** an argument. `silkgate secret ls` lists names only.
+start if one is missing from your environment. Secrets are held **per session**, so one shared
+proxy never lets a later session spend a key an earlier one pushed — which means each `up` needs
+the variable in its own environment rather than inheriting one already in the proxy. Add or rotate
+one with `silkgate secret set anthropic --session foo`, which reads `EGRESS_SECRET_ANTHROPIC` from
+the environment; the value is **never** an argument. `silkgate secret ls` lists names only, and
+`--session` narrows it to one.
 
 ## Layout
 

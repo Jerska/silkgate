@@ -190,15 +190,24 @@ construction** — no host path is mounted into the guests and there is no netwo
 so it needs no auth. Ops: `ping`, `set_secret`, `list_secrets`; unknown ops and malformed lines are
 errors.
 
-**Secrets flow: env → CLI → socket → proxy memory.** The credential lives on the host only as
-`EGRESS_SECRET_<NAME>`. `silkgate up` (and `silkgate secret set <name>`) reads it from the local
-environment and pushes it over the control socket with `set_secret`; the addon holds it in an
-**in-memory** dict, layered over any `EGRESS_SECRET_*` env it was launched with (the socket wins on
-the same name). `inject_auth=<name>` resolves against that store. The value is **never** passed as
-an argv (so it never shows in `ps`), **never** written to disk, and **never** logged or echoed back
-— `list_secrets` returns names only. After pushing, `up` calls `list_secrets` and dies listing any
-`inject_auth` name in the session ruleset still missing, so a session never starts
-believing it holds a key it doesn't.
+**Secrets flow: env → CLI → socket → proxy memory, scoped per session.** The credential lives on
+the host only as `EGRESS_SECRET_<NAME>`. `silkgate up` (and `silkgate secret set <name> --session
+<session>`) reads it from the local environment and pushes it over the control socket with
+`set_secret`, naming the session it belongs to; the addon holds it in an **in-memory** dict keyed by
+that session, and `inject_auth=<name>` resolves only within the session the request arrived for —
+the listener port being spoof-proof session identity is what makes that sound. One proxy serving
+many sessions therefore does not let a later session spend a key an earlier one pushed. The
+`EGRESS_SECRET_*` environment the proxy was launched with serves the **standalone** case only
+(`silkgate proxy`, where there are no sessions).
+
+That is a deliberate loss of convenience: a session must be given its own secret rather than
+finding one already in the proxy, so `up` from a shell without the variable fails where it once
+succeeded. It fails at provision, naming the variable.
+
+The value is **never** passed as an argv (so it never shows in `ps`), **never** written to disk, and
+**never** logged or echoed back — `list_secrets` returns names only. After pushing, `up` verifies
+and dies listing any `inject_auth` name in the session ruleset still missing, so a session never
+starts believing it holds a key it doesn't.
 
 ## Concrete starter stack
 
