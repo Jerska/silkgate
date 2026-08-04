@@ -18,7 +18,7 @@ What is covered:
   * `down <last>` racing an `up`: stop_proxy defers to claims; pick_port revives
   * _provision_session losing the name race without destroying the winner
   * _teardown_session keeping the session while the sandbox cannot be removed
-  * both proxy entry points passing --listen-host (loopback) and --set rawtcp=false
+  * both proxy entry points binding each loopback family explicitly, with rawtcp off
 """
 import importlib.util
 import json
@@ -34,6 +34,7 @@ import time
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 CLI = Path(os.environ.get("SILKGATE_CLI", REPO / "cli" / "silkgate"))
@@ -80,9 +81,10 @@ while True:
     threading.Thread(target=handle, args=(c,), daemon=True).start()
 """
 
-# Fake mitmdump: records its argv, binds its listen ports on exactly the host it was
-# given (so a missing --listen-host is observable as a wildcard bind), serves the
-# control protocol on EGRESS_CONTROL_SOCK, and runs until signalled.
+# Fake mitmdump: records its argv, binds each `--mode regular@host:port` on exactly the
+# host it names (so a wildcard bind is observable as one), serves the control protocol on
+# EGRESS_CONTROL_SOCK, and runs until signalled. Mode specs split host from port at the
+# last colon, as mitmproxy's own grammar does, so an IPv6 literal arrives bare.
 FAKE_MITMDUMP_SRC = r"""
 import json, os, socket, sys, threading, time
 rec = os.environ.get("FAKE_MITM_ARGV")
@@ -91,14 +93,20 @@ if rec:
         json.dump(sys.argv[1:], fh)
 def opts(flag):
     return [sys.argv[i + 1] for i, a in enumerate(sys.argv) if a == flag and i + 1 < len(sys.argv)]
-host = (opts("--listen-host") or [""])[0]
-ports = [int(m.split("@", 1)[1]) for m in opts("--mode") if "@" in m]
-ports += [int(p) for p in opts("--listen-port")]
+listens = []
+for m in opts("--mode"):
+    if "@" not in m:
+        continue
+    at = m.split("@", 1)[1]
+    h, _, p = at.rpartition(":")
+    listens.append((h, int(p)))
+listens += [("", int(p)) for p in opts("--listen-port")]
 keep = []
-for p in ports:
-    s = socket.socket()
+for h, p in listens:
+    v6 = ":" in h
+    s = socket.socket(socket.AF_INET6 if v6 else socket.AF_INET)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind((host, p))
+    s.bind((h, p))
     s.listen(16)
     keep.append(s)
 def handle(conn):
@@ -573,13 +581,20 @@ class LifecycleTest(unittest.TestCase):
         pairs = self._flag_pairs(argv)
         self.assertIn(("--set", "rawtcp=false"), pairs,
                       "raw-TCP fallback left on: an unparsable CONNECT becomes a tunnel")
-        self.assertIn(("--listen-host", "127.0.0.1"), pairs,
-                      "no explicit bind: every pool port is open to the LAN")
-        self.assertEqual(sorted(int(m.split("@", 1)[1]) for f, m in pairs
-                                if f == "--mode"),
-                         list(range(base, base + MOD.POOL_SIZE)))
-        with socket.create_connection(("127.0.0.1", base), timeout=2):
-            pass
+        modes = [m.split("@", 1)[1] for f, m in pairs if f == "--mode"]
+        for port in range(base, base + MOD.POOL_SIZE):
+            for addr in ("127.0.0.1", "::1"):
+                self.assertIn(f"{addr}:{port}", modes,
+                              "every pool port needs both loopback families: a guest "
+                              "resolves the host alias to its IPv6 address first")
+        self.assertEqual(len(modes), MOD.POOL_SIZE * 2,
+                         "a bind beyond the two loopbacks would widen the exposure")
+        # Both families must actually accept, not merely appear in the argv: a guest
+        # resolves the host alias to its IPv6 address first, so a v4-only listener is
+        # reached by nothing that trusts getaddrinfo's ordering.
+        for addr in ("127.0.0.1", "::1"):
+            with socket.create_connection((addr, base), timeout=2):
+                pass
         lan = _lan_ip()
         if lan:
             with self.assertRaises(OSError, msg=f"pool port reachable via LAN addr {lan}"):
@@ -594,13 +609,42 @@ class LifecycleTest(unittest.TestCase):
         argv = json.loads(self.mitm_argv.read_text())
         pairs = self._flag_pairs(argv)
         self.assertIn(("--set", "rawtcp=false"), pairs)
-        self.assertIn(("--listen-host", "127.0.0.1"), pairs)
-        self.assertIn(("--listen-port", str(port)), pairs)
+        modes = [m.split("@", 1)[1] for f, m in pairs if f == "--mode"]
+        self.assertEqual(sorted(modes), sorted([f"127.0.0.1:{port}", f"::1:{port}"]))
+        for addr in ("127.0.0.1", "::1"):
+            with socket.create_connection((addr, port), timeout=2):
+                pass
         lan = _lan_ip()
         if lan:
             with self.assertRaises(OSError, msg=f"verify proxy reachable via LAN addr {lan}"):
                 socket.create_connection((lan, port), timeout=2).close()
         MOD.stop(proc)
+
+    def test_modes_place_one_listener_per_bind_address(self):
+        """A mode spec is the only way to bind more than one address, and its grammar
+        splits host from port at the last colon — so an IPv6 literal must go in bare."""
+        self.assertEqual(MOD._modes(8090),
+                         ["--mode", "regular@127.0.0.1:8090", "--mode", "regular@::1:8090"])
+        for binds, want in (
+            (("127.0.0.1",), ["regular@127.0.0.1:9000"]),
+            (("::1",), ["regular@::1:9000"]),
+            (("10.0.0.2", "fd00::2"), ["regular@10.0.0.2:9000", "regular@fd00::2:9000"]),
+        ):
+            with mock.patch.object(MOD, "PROXY_BINDS", binds):
+                self.assertEqual([a for a in MOD._modes(9000) if a != "--mode"], want)
+                # Brackets would be read as part of the hostname and fail to resolve.
+                self.assertNotIn("[", "".join(MOD._modes(9000)))
+
+    def test_bind_override_is_a_list_and_drives_the_readiness_probe(self):
+        """SILKGATE_PROXY_BIND exists for a platform whose guests reach the host on a real
+        interface; the probe follows the bind so the two cannot drift apart."""
+        self.assertEqual(MOD.PROXY_BINDS, ("127.0.0.1", "::1"))
+        self.assertEqual(MOD._probe_addr(8090), ("127.0.0.1", 8090))
+        with mock.patch.object(MOD, "PROXY_BINDS", ("::1",)):
+            self.assertEqual(MOD._probe_addr(8090), ("::1", 8090))
+        for wildcard, dialed in (("0.0.0.0", "127.0.0.1"), ("::", "::1")):
+            with mock.patch.object(MOD, "PROXY_BINDS", (wildcard,)):
+                self.assertEqual(MOD._probe_addr(8090), (dialed, 8090))
 
 
 if __name__ == "__main__":

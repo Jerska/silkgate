@@ -269,16 +269,37 @@ def check_secrets(ruleset, fatal):
 # connection arrive with a loopback peer address (observed on macOS/HVF, msb 0.5.4). So
 # loopback serves every guest while keeping the pool ports — each one an allowlist plus
 # header-triggered credential injection — off the LAN, which mitmdump's default bind
-# ('', every interface) would expose. On a platform whose microsandbox routes guests
-# through a real bridge/tap address instead, point silkgate at that one interface:
-#     SILKGATE_PROXY_BIND=<address> silkgate up ...
-PROXY_BIND = os.environ.get("SILKGATE_PROXY_BIND", "127.0.0.1")
+# ('', every interface) would expose.
+#
+# BOTH loopback families, because the guest's /etc/hosts maps the alias to an IPv6 address
+# as well and getaddrinfo hands that one out first: a v4-only listener leaves a modern curl
+# connecting to [::1] on the host, where the VMM completes the handshake locally and the
+# request then dies on a reset — a failure that looks like the proxy denying it rather than
+# a proxy that was never reached. On a platform whose microsandbox routes guests through a
+# real bridge/tap address instead, name that interface (comma-separated for several):
+#     SILKGATE_PROXY_BIND=<address>[,<address>] silkgate up ...
+PROXY_BINDS = tuple(a.strip() for a in
+                    os.environ.get("SILKGATE_PROXY_BIND", "127.0.0.1,::1").split(",")
+                    if a.strip())
+
+
+def _modes(port):
+    """`--mode` arguments placing one regular-proxy listener per bind address on `port`.
+
+    A mode spec carries its own listen address, which is the only way to bind more than
+    one. Its grammar splits host from port at the last colon, so an IPv6 literal goes in
+    bare — brackets would be read as part of the hostname and fail to resolve.
+    """
+    args = []
+    for addr in PROXY_BINDS:
+        args += ["--mode", f"regular@{addr}:{port}"]
+    return args
 
 
 def _probe_addr(port):
-    """Where readiness checks dial: the bind address itself, so probe and bind cannot
+    """Where readiness checks dial: the first bind address, so probe and bind cannot
     drift apart — except a wildcard bind, which is dialed via loopback."""
-    host = PROXY_BIND or "127.0.0.1"
+    host = (PROXY_BINDS[0] if PROXY_BINDS else "127.0.0.1")
     if host == "0.0.0.0":
         host = "127.0.0.1"
     elif host == "::":
@@ -298,8 +319,7 @@ def start_proxy(rules_text, port):
     env.pop("EGRESS_SESSIONS_DIR", None)
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
-    argv = [mitmdump, "-s", str(ADDON), "--listen-host", PROXY_BIND,
-            "--set", "rawtcp=false", "--listen-port", str(port)]
+    argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"] + _modes(port)
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT)
     deadline = time.monotonic() + 15
@@ -776,10 +796,9 @@ def start_shared_proxy(base_port):
     ports = list(range(base_port, base_port + POOL_SIZE))
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
-    argv = [mitmdump, "-s", str(ADDON), "--listen-host", PROXY_BIND,
-            "--set", "rawtcp=false"]
+    argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"]
     for p in ports:
-        argv += ["--mode", f"regular@{p}"]
+        argv += _modes(p)
     # Multi-session mode: EGRESS_SESSIONS_DIR on, EGRESS_RULES off (addon needs exactly one).
     env = dict(os.environ, EGRESS_SESSIONS_DIR=str(SESSIONS_DIR),
                EGRESS_CONTROL_SOCK=str(PROXY_SOCK))

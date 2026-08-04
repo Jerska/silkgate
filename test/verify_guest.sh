@@ -24,17 +24,29 @@ tcp(){ timeout "$T" bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; }   # exit 0 =
 echo "PROXY=$PROXY"
 
 echo "== control: the probe mechanism itself (tool-free) =="
-# Host:port out of $PROXY — the guest's only permitted egress, so a connect MUST succeed.
+# Host:port out of $PROXY — the guest's only permitted egress, so this MUST work.
 target=${PROXY#*://}; target=${target%%/*}
 case "$target" in
   *:*) phost=${target%:*}; pport=${target##*:} ;;
   *)   phost=$target;      pport=80 ;;
 esac
-if tcp "$phost" "$pport"; then
-  mech=1; echo "[OKAY] 0. bash /dev/tcp works and reaches the proxy at $phost:$pport"
+# A connect alone proves nothing: microsandbox's guest->host NAT completes the TCP
+# handshake inside the VMM, so /dev/tcp reports success even with no listener on the host
+# at all (observed with the proxy stopped). The control therefore speaks HTTP and requires
+# the proxy's own answer — a request no ruleset allows, so it is refused from the proxy's
+# memory and needs neither an allow-rule nor any upstream egress to succeed.
+control(){
+  exec 3<>"/dev/tcp/$1/$2" || return 1
+  printf 'GET http://silkgate.invalid/ HTTP/1.1\r\nHost: silkgate.invalid\r\n\r\n' >&3 || return 1
+  IFS= read -r reply <&3 || return 1
+  exec 3<&-
+  case "$reply" in *40[0-9]*) return 0 ;; *) return 1 ;; esac
+}
+if timeout "$T" bash -c "$(declare -f control); control $phost $pport" 2>/dev/null; then
+  mech=1; echo "[OKAY] 0. bash /dev/tcp works and the proxy answered at $phost:$pport"
 else
-  mech=0; echo "[WARN] 0. bash /dev/tcp cannot reach the proxy at $phost:$pport — a failed"
-  echo "          connect below would not distinguish containment from a broken probe"
+  mech=0; echo "[WARN] 0. no proxy answer at $phost:$pport — a failed connect below would"
+  echo "          not distinguish containment from a probe that cannot reach anything"
 fi
 
 echo "== positive controls (need curl + trusted CA; SKIP if absent) =="
@@ -42,9 +54,15 @@ if have curl; then
   curl -fsS --max-time $T -x "$PROXY" https://registry.npmjs.org/lodash >/dev/null 2>&1 \
     && P 1 "allowed host via proxy" \
     || F 1 "allowed host via proxy  (CA trust / proxy / allow-rule not set up?)"
-  code=$(curl -s -o /dev/null --max-time $T -w '%{http_code}' -x "$PROXY" https://evil.com 2>/dev/null)
-  [ "$code" = "403" ] && P 2 "unlisted host via proxy -> 403" \
-                      || F 2 "unlisted host -> got '$code' (want 403; '000' = CA not trusted)"
+  # The refusal may arrive in-band (403 to the request) or as a rejected CONNECT, which
+  # the proxy answers 403 before any tunnel exists — curl then reports code 000 and names
+  # the 403 on stderr. Both are the proxy denying an unlisted host, so both pass; what
+  # must not pass is a 2xx, or a failure that never mentions a 403 (no CA trust, no proxy).
+  said=$(curl -sS -o /dev/null --max-time $T -w '%{http_code}' -x "$PROXY" https://evil.com 2>&1)
+  case "$said" in
+    *403*) P 2 "unlisted host via proxy -> 403" ;;
+    *)     F 2 "unlisted host -> '$said' (want a 403 from the proxy; '000' alone = never reached it)" ;;
+  esac
 else
   S 1 "allowed host via proxy (curl not installed — see README 'full check')"
   S 2 "unlisted host via proxy -> 403 (curl not installed — see README 'full check')"
