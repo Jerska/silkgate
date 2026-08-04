@@ -469,9 +469,14 @@ _DOCKER_PLATFORMS = {"arm64": "linux/arm64", "aarch64": "linux/arm64",
 # What silkgate itself needs of any guest: the CA it terminates TLS with, in the system
 # trust store and in the env vars runtimes read; a shell and mkfifo/mktemp for the live
 # output relay (coreutils, already in the base); and /workspace as the working directory.
-# SSL_CERT_FILE *replaces* the default root store for the stacks that read it (OpenSSL and
-# everything on it, rustls, Go) rather than extending it, and a single PEM cert is a legal
-# one-entry bundle — right for a guest whose only TLS peer, ever, is the proxy's CA.
+#
+# Which file each variable points at is not interchangeable. NODE_EXTRA_CA_CERTS is additive,
+# so it names the CA alone. The others *replace* the default root store for the stacks that
+# read them (OpenSSL and everything on it, rustls, Go), so they name the system bundle that
+# `update-ca-certificates` just regenerated — Debian's roots **and** ours. Pointing those at
+# the bare CA instead is trust the guest does not need and a build that cannot run: these
+# variables are set for every later layer, and a profile's setup.sh installs from the real
+# internet over the host's network, outside the proxy, where nothing presents our CA.
 _BASE_LAYER = """FROM {base}
 RUN apt-get update \\
     && apt-get install -y --no-install-recommends ca-certificates \\
@@ -479,10 +484,10 @@ RUN apt-get update \\
 COPY egress-ca.pem /usr/local/share/ca-certificates/egress.crt
 RUN update-ca-certificates
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/egress.crt \\
-    REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/egress.crt \\
-    GIT_SSL_CAINFO=/usr/local/share/ca-certificates/egress.crt \\
-    SSL_CERT_FILE=/usr/local/share/ca-certificates/egress.crt \\
-    PIP_CERT=/usr/local/share/ca-certificates/egress.crt \\
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \\
+    GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt \\
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \\
+    PIP_CERT=/etc/ssl/certs/ca-certificates.crt \\
     PATH=/root/.local/bin:$PATH
 WORKDIR /workspace
 """

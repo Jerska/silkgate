@@ -171,17 +171,35 @@ class TestImageRef(CliCase):
 
 
 class TestGuestCaEnv(CliCase):
-    """Every TLS stack that reads only SSL_CERT_FILE (uv, anything rustls or Go) failed
-    with UnknownIssuer in the guest until it was set by hand; ARCHITECTURE.md promises
-    all five vars."""
+    """Every TLS stack that reads only SSL_CERT_FILE (uv, anything rustls or Go) failed with
+    UnknownIssuer in the guest until it was set; ARCHITECTURE.md promises all five vars.
 
-    CA_VARS = ("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "GIT_SSL_CAINFO",
-               "SSL_CERT_FILE", "PIP_CERT")
+    Which file each one names matters as much as that it is set. NODE_EXTRA_CA_CERTS is
+    additive, so it names the CA alone. The rest replace the default roots, so they must name
+    the bundle `update-ca-certificates` regenerates, which holds the distro's roots as well as
+    ours: aimed at the bare CA they produce an image whose every later layer distrusts the real
+    internet, and a profile's setup.sh installs from the real internet, over the host's
+    network, outside the proxy. That combination broke every image build until it was caught.
+    """
+
+    CERT = "/usr/local/share/ca-certificates/egress.crt"
+    BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+    CA_VARS = {"NODE_EXTRA_CA_CERTS": CERT,       # additive: the CA on its own
+               "REQUESTS_CA_BUNDLE": BUNDLE,      # the rest replace the default roots
+               "GIT_SSL_CAINFO": BUNDLE,
+               "SSL_CERT_FILE": BUNDLE,
+               "PIP_CERT": BUNDLE}
+
+    def assert_ca_env(self, text):
+        for var, path in self.CA_VARS.items():
+            self.assertIn(f"{var}={path}", text)
+            if path == self.BUNDLE:
+                self.assertNotIn(f"{var}={self.CERT}", text,
+                                 f"{var} replaces the default roots; aiming it at the CA "
+                                 f"alone leaves the build unable to reach the internet")
 
     def test_base_layer_sets_every_promised_var(self):
-        for var in self.CA_VARS:
-            self.assertIn(f"{var}=/usr/local/share/ca-certificates/egress.crt",
-                          sg._BASE_LAYER)
+        self.assert_ca_env(sg._BASE_LAYER)
 
     def test_written_dockerfile_carries_them(self):
         cert = self.tmp / "egress-ca.pem"
@@ -192,8 +210,7 @@ class TestGuestCaEnv(CliCase):
             sg.write_build_context(context, [], "debian:bookworm-slim")
         dockerfile = (context / "Dockerfile").read_text()
         self.assertTrue(dockerfile.startswith("FROM debian:bookworm-slim\n"))
-        for var in self.CA_VARS:
-            self.assertIn(f"{var}=/usr/local/share/ca-certificates/egress.crt", dockerfile)
+        self.assert_ca_env(dockerfile)
 
 
 class TestSessionNames(CliCase):
