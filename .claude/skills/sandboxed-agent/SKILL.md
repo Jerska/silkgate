@@ -36,8 +36,8 @@ hang; later runs with the same profiles reuse it and start in under a second.
   is in the guest's trust store — that combination is what makes the interception work. Check it
   yourself with `run --with claude -- printenv ANTHROPIC_API_KEY`. If a run dies on a TLS or auth
   error rather than a 403, suspect that layer.
-- The audit log records only the decision, method, host and path — never headers or bodies, so
-  the injected credential does not appear in it either.
+- The audit log records the proxy's decisions about requests — never request bodies, and never
+  the injected credential, which is spent upstream, not written.
 - `silkgate-claude` (below) exists in the guest only when `--with claude` is among the profiles.
 
 ## One-shot: a single task, then gone
@@ -61,8 +61,12 @@ also correct.
 
 ## What you get back
 
-- **Output streams live**, stdout and stderr kept apart. Capture it only when something will
-  *parse* it (`--output-format stream-json --verbose`, then pipe or redirect).
+- **Output streams live**, stdout and stderr kept apart — as a convenience, not a property:
+  the relay tags stderr with an in-band byte the guest can write itself, so a guest can put
+  lines on your stderr, or emit well-formed `stream-json` events that never came from the
+  harness. Capture the stream only when something will *parse* it
+  (`--output-format stream-json --verbose`, then pipe or redirect), and treat what it parses
+  as the guest's report, not as evidence.
 - **The exit code is the guest command's** — so an agent run exiting 0 means *the agent finished*,
   never that its work is right. To learn whether the tests actually pass, run them yourself in a
   fresh sandbox and read that exit code:
@@ -148,17 +152,22 @@ reported as requests instead of retried in a loop.
 
 ## Gotchas (each cost real debugging time)
 
-- **A denied request is not a crash.** The agent sees `no matching rule` and a 403, usually
-  reports it, and carries on. Read the audit log before concluding the task failed.
+- **A denied request is not a crash.** Plain HTTP gets a 403 body saying `no matching rule`;
+  a denied HTTPS destination is refused earlier, at CONNECT, so the client reports a failed
+  CONNECT naming 403 (curl calls it `CONNECT tunnel failed, response 403`). The agent usually
+  reports either one and carries on. Read the audit log before concluding the task failed.
 - **`-t` changes how the command behaves**, not just how it looks: it hands the guest a real
   terminal, so programs colorize, emit cursor control, and merge stdout into stderr — which
   corrupts a JSON stream. Leave it off for anything you intend to parse.
 - **git does not work in a mounted worktree** — its `.git` file points at a host path outside
-  the mount. Mounting the whole repo instead would hand the guest rw access to `.git`, which is
-  host code execution via hooks or `core.fsmonitor`. Mount the subdirectory that holds the work,
-  as the example does. For agents that need history, give each one a full clone and
-  `git fetch <clone> branch:branch` from the host afterwards; fetch copies objects without
-  executing anything from the remote.
+  the mount. Mounting the whole repo would hand the guest rw access to `.git` — host code
+  execution via hooks or `core.fsmonitor` the next time a human runs git there — so silkgate
+  refuses any workspace whose root holds a `.git` directory (and `/`, `$HOME`, its own checkout
+  and state); a linked worktree's `.git` file passes, with a printed note, and only the mount
+  root is examined. Mount the subdirectory that holds the work, as the example does. An agent
+  that must run git itself can `--with git` and clone inside the guest; once a guest has
+  written a `.git` anywhere in the workspace, don't run git there on the host —
+  `git fetch <dir> branch:branch` copies the objects without executing anything from them.
 - **Guest rewrites can drop the exec bit** — `chmod +x` after an agent edits a script.
 - **Nothing bounds a runaway agent** — silkgate has no timeout or cost ceiling. Wrap the
   invocation in `timeout 600 …` if that matters to you.

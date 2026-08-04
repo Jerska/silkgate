@@ -2,7 +2,7 @@
 
 > The rule language enforced by the proxy. Reference implementation:
 > [`mitmaddon/rule_engine.py`](../mitmaddon/rule_engine.py) (dependency-free;
-> `python3 mitmaddon/rule_engine.py` self-tests, 54/54). Design rationale:
+> `python3 mitmaddon/rule_engine.py` self-tests, 69/69). Design rationale:
 > [THREAT-MODEL.md](./THREAT-MODEL.md).
 >
 > Rules live in `profiles/<name>/rules.txt`, one profile per capability; a session's ruleset is
@@ -13,6 +13,10 @@
 
 One **allow**-rule per line. **Default-deny**: anything not matched is blocked. First match
 wins (allowlist, so order is irrelevant until deny-rules are added).
+
+An **empty ruleset is legal**, and is the tightest policy there is: default-deny with nothing
+exempted. `run`/`up` with no `--with` and no `--rule` compose exactly that — a guest that can
+reach nothing. (Only the standalone `silkgate proxy` insists on at least one rule.)
 
 ```
 <host>[:<port>][/<path>]   [METHOD ...]   [option ...]

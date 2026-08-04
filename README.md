@@ -2,7 +2,9 @@
 
 Run an untrusted coding agent — or any untrusted command — in a microVM whose **only** route to
 the network is a TLS-terminating proxy that allowlists per request. Verified live on **macOS
-(Apple Silicon)** and **Linux (x86_64/KVM)**. Two enforcement layers, both outside the guest:
+(Apple Silicon)**; **Linux (x86_64/KVM)** was last verified before the current round of fixes
+(see [Verifying containment](#verifying-containment)). Two enforcement layers, both outside
+the guest:
 
 - **Tier 1 — force all egress to the proxy:** microsandbox's own host-side network policy. No
   nft, no pf, no nested VM.
@@ -26,6 +28,9 @@ That single `--with claude` decides two things: the **image** (built on first us
 and the **egress policy** (only `api.anthropic.com` and the Console probe, with the real key
 injected at the proxy). The audit log path is printed at startup — `tail -f` it, or use
 `silkgate logs`, to watch allow/deny decisions.
+
+No `--with` and no `--rule` is legal too: the policy is then empty — the tightest sandbox
+silkgate can express — and the guest can reach nothing at all.
 
 ## Profiles
 
@@ -111,7 +116,9 @@ listener, and that makes the port spoof-proof session identity. Audit lines carr
 that produced them.
 
 A guest command's output arrives **live**, with stdout and stderr on separate streams, so a
-parent can supervise a task and still parse a captured `stream-json`. `-t` instead gives the
+parent can supervise a task and still parse a captured `stream-json` — though the separation
+is a convenience, not a property: it rides an in-band tag the guest can write itself, and
+everything on both streams is the guest's own report. `-t` instead gives the
 command a real terminal, which changes how it behaves (colors, cursor control, both streams
 merged), so keep it for a TUI and leave it off for anything you intend to parse. To watch a
 session you did not start in the foreground, or to see only its egress decisions:
@@ -198,7 +205,9 @@ docker run --rm --device /dev/kvm -v "$PWD:/silkgate" silkgate-verify \
 - Every `up` and `run` re-checks all of this from inside the guest before handing it over, and
   refuses the session if a host outside the allowlist turns out to be reachable. `verify` is the
   full seven-check version of that one assertion.
-- **Verified 7/7 on macOS (Apple Silicon) and on Linux (x86_64/KVM, via `test/linux/`).**
+- **Verified 7/7 on macOS (Apple Silicon), re-run after the current round of fixes. Linux
+  (x86_64/KVM, via `test/linux/`) last passed 7/7 before them and has not been re-verified
+  since — the flags are unchanged, but treat the Linux claim as dated until it is re-run.**
 
 ## Using the proxy on its own
 
@@ -218,5 +227,10 @@ unable to reach the network any other way — otherwise the proxy is advisory.
   nothing in silkgate hands a guest more than the certificate. Don't reuse that CA elsewhere.
 - Allowlisted destinations remain exfil carriers — keep each profile's rules minimal, never
   allowlist a header- or body-reflecting endpoint, and prefer download-only (GET).
-- The `probe` profile exists for `verify` only; it opens the Debian mirrors, so don't compose it
-  into a real task.
+- `--workspace` is refused where the mount itself would hand over the host: `/`, your home
+  directory, silkgate's own checkout and state, and any directory whose root holds a `.git`
+  **directory** — hooks and `core.fsmonitor` there are host code execution the next time you
+  run git in it. A linked worktree's `.git` **file** is allowed, with a printed note. Only the
+  mount root is examined; a repository nested deeper inside is the operator's call.
+- The `probe` profile exists for `verify` only: it opens the Debian mirrors, so every other
+  command refuses to compose it.

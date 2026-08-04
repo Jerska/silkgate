@@ -12,7 +12,9 @@ is a potential exfil carrier. Two distinct axes, often conflated:
 
 - **Exfil bandwidth** is bounded only by (a) whether the destination stores/echoes
   attacker-readable data, (b) request volume/rate, (c) content length caps + inspection.
-  **Never by glob breadth.**
+  **Never by glob breadth.** (Of (c), this design ships the size half only, and per request —
+  a rule's `max_body` caps the request body; nothing inspects content, nothing caps responses,
+  and nothing rate-limits.)
 - **Capability / blast radius** *is* bounded by path+method scoping.
 
 > **Correction worth recording:** `*` (one segment) is *not* meaningfully safer than `**` for
@@ -52,10 +54,11 @@ guest `HTTPS_PROXY=host.microsandbox.internal:<proxyport>`. DNS: microsandbox in
 UDP/53 at its gateway but applies the egress policy per query, so with no DNS allow rule the
 default-deny yields NXDOMAIN — no explicit DNS deny needed; the proxy alias resolves via
 `/etc/hosts`, so nothing breaks. Native on
-HVF and KVM — no nested VM, no `pf`, no `nft`. *(Verified live 7/7 on macOS/Apple Silicon
-(HVF, msb 0.5.4/0.5.7) **and** Linux/x86_64 (KVM, msb 0.6.8, from the `test/linux/` container
-on a glibc-2.35 host): a root guest had no direct TCP/DNS/IPv6/ICMP egress and couldn't escape
-by re-routing. Pin your `msb --version`; scope names drift pre-1.0.)*
+HVF and KVM — no nested VM, no `pf`, no `nft`. *(Verified live 7/7: a root guest had no direct
+TCP/DNS/IPv6/ICMP egress and couldn't escape by re-routing. On macOS/Apple Silicon (HVF, msb
+0.5.4/0.5.7) re-verified after the latest fixes; on Linux/x86_64 (KVM, msb 0.6.8, from the
+`test/linux/` container on a glibc-2.35 host) last run before them, not since. Pin your
+`msb --version`; scope names drift pre-1.0.)*
 
 **Linux nft fallback:** microVM tap device + an `nft` ruleset in the `inet` family on that
 interface — allow `ct state established,related`, allow new TCP to `proxy_ip . proxy_port`
@@ -108,8 +111,8 @@ races Apple daemons — defense-in-depth only).
 
 - **Exfil through a legitimately-allowed path/body.** `registry.npmjs.org/**` with unbounded
   `**` is an open channel; the LLM API body is attacker-influenced by definition. You can't
-  both use these and prove nothing leaves. Levers: **minimize the allowlist**, and prefer
-  destinations that don't store/relay attacker-readable data (`api.anthropic.com` is low-risk
+  both use these and prove nothing leaves. Levers: **minimize the allowlist**, cap request
+  bodies (`max_body`), and prefer destinations that don't store/relay attacker-readable data (`api.anthropic.com` is low-risk
   because the response comes from Anthropic, not the attacker; **never allowlist a
   header/body-reflecting endpoint** like an `httpbin`-style service).
 - **Injected-credential abuse.** The agent can't *read* the injected key but can *use* it (run
@@ -127,6 +130,6 @@ races Apple daemons — defense-in-depth only).
 
 | Tier | Owner | In this design |
 |---|---|---|
-| 1 — network-layer prerequisites | Host/VMM (outside guest) | **Implemented & verified** (macOS & Linux via microsandbox, `verify_guest.sh` 7/7 on both; nft as Linux fallback) |
+| 1 — network-layer prerequisites | Host/VMM (outside guest) | **Implemented & verified** (`verify_guest.sh` 7/7 — macOS re-verified after the latest fixes, Linux last run before them; nft as Linux fallback) |
 | 2 — request-level enforcement | The proxy + rule engine | **Implemented** |
 | 3 — irreducible residual | Rule discipline + operations | **Accepted & documented**, not code |

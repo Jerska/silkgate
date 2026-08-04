@@ -38,7 +38,7 @@ make the network the only thing it can do — under inspection.
 │  │  mount (virtiofs):  /workspace ⇄ ~/projects/foo   (rw, the ONLY host path)    │ │
 │  │                     ✗ no ~/.ssh  ✗ no ~/.aws  ✗ no dotfiles  ✗ no host creds  │ │
 │  └──────────────────────────────┬─────────────────────────────────────────────┘  │
-│      all egress default-DROP ────┘  except TCP→ proxy port ; DNS→ host resolver    │
+│      all egress default-DROP ────┘  except TCP→ proxy port ; DNS intercepted in VMM│
 │                                  ▼                                                 │
 │   ┌──────────────────────────────────────────────────┐   ┌──────────────────────┐│
 │   │  TLS-terminating egress proxy (mitmproxy)          │◀──│ host secrets vault   ││
@@ -46,7 +46,7 @@ make the network the only thing it can do — under inspection.
 │   │   • SNI == Host enforcement  → kills domain front  │   └──────────────────────┘│
 │   │   • allowlist + per-request method/path/size       │                          │
 │   │   • injects Authorization for LLM / API upstreams  │                          │
-│   │   • DLP regex · upload-size cap · full audit log   │                          │
+│   │   • request-body cap (max_body) · audit log        │                          │
 │   └───────────────────────────┬────────────────────────┘                          │
 └───────────────────────────────┼────────────────────────────────────────────────────┘
                                  ▼  only allowlisted + inspected requests leave
@@ -71,7 +71,11 @@ make the network the only thing it can do — under inspection.
 - **Ephemeral microVM per task** — only for code-interpreter semantics (fresh VM per run);
   worse DX for iterative coding.
 
-**Mounts:** exactly one — the project dir, read-write, via virtiofs. Nothing else.
+**Mounts:** exactly one — the project dir, read-write, via virtiofs. Nothing else. The CLI
+refuses mounts that would hand the guest the host itself: `/`, `$HOME`, silkgate's own checkout
+and state, and any directory whose root holds a `.git` **directory** — hooks and
+`core.fsmonitor` there are host code execution the next time a human runs git in it. A linked
+worktree's `.git` **file** is allowed, with a printed note; only the mount root is examined.
 
 ## Boundary B — the TLS-terminating egress proxy
 
@@ -105,8 +109,10 @@ Claude Code nor Codex ships, and the whole reason for the exercise.
    the guest did not need to steal the key, only to ask for it to be spent. `test/test_addon.py`
    is what keeps that closed; treat the destination check as the load-bearing part of this claim.
 4. **DNS is the proxy's, not the guest's.** With an explicit `HTTPS_PROXY`, the guest sends
-   hostnames and the *proxy* resolves; drop raw UDP/TCP 53 from the guest.
-5. **Logs everything (redacted)** — full audit trail for post-incident review.
+   hostnames and the *proxy* resolves; raw port 53 from the guest never leaves the VMM
+   (see Tier 1 — microsandbox intercepts UDP and TCP 53 alike).
+5. **Logs every decision** — one allow/deny line per request, for post-incident review;
+   never bodies, and never the injected credential.
 
 ## How four flows play out
 
@@ -119,15 +125,18 @@ Claude Code nor Codex ships, and the whole reason for the exercise.
   allowlisted) and to `github.com` is blocked (size/method/SNI≠Host). Two independent
   failures required.
 - **Git push:** safest default — agent commits to a branch *inside the VM*; the **human
-  pushes from the host** after reviewing the diff. For autonomy, allow push to one repo only
-  with the PAT injected by the proxy and upload-size capped. No SSH keys in the guest.
+  pushes from the host** after reviewing the diff. For autonomy, allow push to one repo only,
+  with the PAT injected by the proxy and the request body capped (`max_body`). No SSH keys in
+  the guest.
 
 ## Driving the agent — interactive vs programmatic
 
 The guest process's **stdio is the channel** back to the parent — a process pipe, not network
 egress, so it never touches the proxy boundary. The CLI relays that channel line by line as the
 guest writes it, keeping stdout and stderr apart and leaving the command non-interactive, so a
-parent can supervise a run and parse its output at the same time:
+parent can supervise a run and parse its output at the same time. The split is a convenience,
+not a property: the relay tags stderr lines in-band with a byte the guest can write itself, so
+everything on either stream — stderr included — is the guest's own report:
 - **Human (interactive TUI):** `silkgate attach <name>` (`msb exec -t … -- claude`) attaches
   Claude Code's TUI to the terminal.
 - **Parent agent (programmatic):** `silkgate exec <name> -- claude -p --output-format stream-json`
@@ -149,8 +158,10 @@ additionally probes `platform.claude.com/v1/oauth/hello` at startup and fails on
 ## The shared-proxy session model
 
 Sessions share **one** mitmproxy process — not one proxy per VM. A single `mitmdump` listens on a
-**pool of ports** (base `8090`, 16 consecutive, `8090..8105`) via repeated `--mode regular@<port>`
-args, and each session claims one port from the pool. `silkgate up` starts this proxy the first
+**pool of ports** (base `8090`, 16 consecutive, `8090..8105`) via repeated
+`--mode regular@<addr>:<port>` args — bound to loopback only, both address families, never the
+LAN (`SILKGATE_PROXY_BIND` overrides it for a platform that routes guests through a real bridge
+address) — and each session claims one port from the pool. `silkgate up` starts this proxy the first
 time it's needed (detached, `start_new_session=True`), waits for the base port to accept, and
 records it in `~/.silkgate/proxy.json`; `silkgate down` terminates it once the last session goes
 away.
@@ -208,8 +219,8 @@ believing it holds a key it doesn't.
 
 - [ ] Agent process tree runs entirely inside the guest; host runs only control CLI + proxy.
 - [ ] Exactly one virtiofs mount (project dir, rw). No creds/dotfiles mounted.
-- [ ] Guest default route = drop; only proxy port + host DNS reachable (enforced **outside**
-      the guest — see Tier 1).
+- [ ] Guest default route = drop; only the session's proxy port reachable — DNS included:
+      port 53 is intercepted in the VMM (enforced **outside** the guest — see Tier 1).
 - [ ] Private CA: cert in guest trust store + all language env vars; **private key host-only**.
 - [ ] Proxy enforces SNI==Host, per-request method/path, header/body/query constraints, audit log.
 - [ ] LLM/git secrets injected by proxy; never written into the guest.
@@ -221,15 +232,20 @@ believing it holds a key it doesn't.
 
 - **Hypervisor escape** — a KVM/HVF/virtio CVE breaks Boundary A. Mitigate by patching +
   minimal device model; can't eliminate.
-- **Exfil within an allowed, inspected channel** — size caps + DLP + logging raise cost,
-  don't zero it. Tightening the allowlist is the strongest lever.
-- **DNS tunneling** — closed only if resolution is forced through the proxy and raw 53 dropped.
+- **Exfil within an allowed channel** — what bounds it today is per-request: a rule's
+  `max_body` caps each request body, and every decision is logged. There is **no content
+  inspection** (no DLP), no cap on response size, and no budget across requests — a guest can
+  leak through any allowed POST one capped body at a time. Tightening the allowlist is the
+  strongest lever.
+- **DNS tunneling** — closed: the guest does no external DNS (the proxy resolves), and
+  microsandbox intercepts port 53 in the VMM — UDP queries fail under default-deny, TCP/53
+  answers `REFUSED` from its stub.
 - **Workspace tampering** — malicious code can corrupt mounted project files; human reviews
   diffs before push.
 - **Shared MITM CA** — by design you can read all guest TLS. Fine (you own both ends); don't
   reuse that CA elsewhere.
 
-## Tier 1 enforcement (resolved — verified on macOS and Linux)
+## Tier 1 enforcement (resolved — verified live; see the platform note at the end)
 
 Forcing *all* egress through the proxy on macOS+microsandbox **does not need a nested Linux
 VM, `pf`, or vsock plumbing.** microsandbox does not use libkrun's default TSI mode — it
@@ -244,8 +260,9 @@ attaches a virtio-net device and terminates it in its **own host-side userspace 
 - Config: `msb run … --net-default-egress deny --net-rule "allow@host:tcp:<proxyport>"`.
   Guest `HTTPS_PROXY=host.microsandbox.internal:<proxyport>`. DNS: microsandbox's gateway
   intercepts all UDP/53, and the forwarder applies the egress policy per query, so with no DNS
-  allow rule the default-deny yields NXDOMAIN — no explicit DNS deny is needed. The proxy alias
-  resolves via the guest's `/etc/hosts`.
+  allow rule the default-deny yields NXDOMAIN — no explicit DNS deny is needed. TCP/53 is
+  intercepted too: msb's own stub answers `REFUSED` for every destination, so port 53 is not an
+  egress channel in either protocol. The proxy alias resolves via the guest's `/etc/hosts`.
 
 So on both OSes, **microsandbox's stack is Tier 1; the mitmproxy + DSL is Tier 2.** No separate
 L3 firewall is built. (Linux fallback if that ever changes: tap + `nft` — see THREAT-MODEL.md.)
@@ -257,9 +274,11 @@ containment, but needs a custom host relay (no host `AF_VSOCK` on macOS) + an in
 TCP→vsock shim; (c) host `pf` on `bridge100` keyed by VM subnet — fragile (races Apple's
 InternetSharing daemon), belt-and-suspenders only.
 
-**Verified live (macOS/Apple Silicon · Linux/x86_64):** a root guest had no direct TCP, DNS,
-IPv6, or ICMP egress — only the proxy was reachable; a root guest re-adding its default route
-still couldn't egress; and the addon allowed the allowlisted host while 403'ing an unlisted one
-(`verify_guest.sh`, 7/7 on both — macOS on HVF with msb 0.5.4/0.5.7, Linux on KVM with msb
-0.6.8 via the `test/linux/` container, same flags unchanged). Caveat: **pin your
-`msb --version`** — rule-grammar scope names drift pre-1.0.
+**Verified live:** a root guest had no direct TCP, DNS, IPv6, or ICMP egress — only the proxy
+was reachable; a root guest re-adding its default route still couldn't egress; and the addon
+allowed the allowlisted host while 403'ing an unlisted one (`verify_guest.sh`, 7/7). On macOS
+(Apple Silicon/HVF, msb 0.5.4/0.5.7) that result was re-verified after the latest round of
+fixes; on Linux (x86_64/KVM, msb 0.6.8, via the `test/linux/` container) it dates from before
+them and has not been re-run since — the `--net-*` flags are unchanged, but treat the Linux
+claim as stale until it is. Caveat: **pin your `msb --version`** — rule-grammar scope names
+drift pre-1.0.
