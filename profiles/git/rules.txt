@@ -1,5 +1,11 @@
-# Clone and fetch only. The DSL defaults to GET, so a push (which POSTs to
-# git-receive-pack) matches no rule and is denied; keep it that way.
-github.com/**                     GET
+# Smart-HTTP clone and fetch, and no more. A fetch is two phases, both listed
+# explicitly: the ref advertisement (GET info/refs — GitHub answers 403 dumb-http
+# unless ?service= survives, so the query param is pinned) and the pack
+# negotiation (POST git-upload-pack — the want/have exchange, small but not zero,
+# hence the body cap). git-protocol is pinned so protocol v2 negotiates cleanly;
+# without it git falls back to v0. Push stays denied twice over: q:service pins
+# the advertisement to upload-pack, and no rule reaches git-receive-pack.
+github.com/*/*/info/refs          GET   q:service=git-upload-pack  h:git-protocol=version=2
+github.com/*/*/git-upload-pack    POST  max_body=1m  h:content-type=application/x-git-upload-pack-request  h:accept=application/x-git-upload-pack-result  h:git-protocol=version=2
 raw.githubusercontent.com/**      GET
 codeload.github.com/**            GET
