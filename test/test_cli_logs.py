@@ -99,10 +99,14 @@ class _ControlSock(threading.Thread):
                 conn, _ = self.srv.accept()
             except OSError:
                 return
-            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
 
+    # Not `_handle`: Thread carries an instance attribute of that name from 3.13 on, which
+    # shadows a method of the same name on a subclass. The thread then starts with a
+    # _thread._ThreadHandle as its target, nothing answers the socket, and every caller of
+    # _proxy_ident times out and reads "no proxy" — three failures with no visible cause.
     @staticmethod
-    def _handle(conn):
+    def _serve(conn):
         with conn:
             f = conn.makefile("rw")
             for _ in f:
