@@ -258,7 +258,7 @@ def check_secrets(ruleset, fatal):
            + ", ".join(f'EGRESS_SECRET_{n.upper()}="<header>: <value>"' for n in missing))
     if fatal:
         die(msg)
-    say(f"warning: {msg} — inject_auth requests will 500")
+    say(f"warning: {msg} — inject_auth requests will be denied")
 
 
 # --- host processes ----------------------------------------------------------
@@ -688,6 +688,14 @@ def session_context(profiles, ruleset, *, workspace, persistent):
         ]
     lines += [
         "",
+        "Every refusal the proxy itself issues carries the response header `X-Silkgate: deny` —",
+        "on those 403s, on a refused https CONNECT (`curl -v` shows the tunnel response's headers",
+        "even though its body is discarded), and on the 500 the proxy answers when it cannot",
+        "decide. An error *without* that header came from the destination: your request reached",
+        "it and it said no — a wrong path, a bad token, its own rate limit — so what needs fixing",
+        "is the request, not the allowlist. The header is a diagnostic the proxy adds, not a",
+        "guarantee; a destination could imitate it, so treat it as a strong hint.",
+        "",
         "If you need a destination that is not listed above, say so in your answer to whoever set",
         "your task, naming the host, path and method you want and why. Nobody inside this machine",
         "can widen the list, so that report is the only thing that can.",
@@ -1098,14 +1106,19 @@ def _wait_control_sock(timeout):
     die("shared proxy control socket did not become ready")
 
 
-def _push_secrets(ruleset):
-    """Push every inject_auth secret we hold in the env, then fail on any still missing."""
+def _push_secrets(ruleset, session):
+    """Push every inject_auth secret we hold in the env, scoped to `session`, then fail on
+    any still missing. The proxy keeps one store per session, so this environment — the one
+    that asked for the session — is the only place its secrets can come from: a name another
+    session pushed earlier is not visible here and does not count."""
     names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
     for n in names:
         value = os.environ.get(f"EGRESS_SECRET_{n.upper()}")
         if value:                                       # value goes over the socket only
-            _sock_call({"op": "set_secret", "name": n.lower(), "value": value})
-    have = {x.lower() for x in _sock_call({"op": "list_secrets"}).get("names", [])}
+            _sock_call({"op": "set_secret", "name": n.lower(), "value": value,
+                        "session": session})
+    have = {x.lower() for x in
+            _sock_call({"op": "list_secrets", "session": session}).get("names", [])}
     missing = [n for n in names if n.lower() not in have]
     if missing:
         die("missing secret(s): "
@@ -1428,7 +1441,7 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
             owned = True
         except OSError:
             die(f"session already exists: {sdir}")
-        _push_secrets(ruleset)
+        _push_secrets(ruleset, name)
         # The context goes into the rootfs, never the workspace: it must not appear in the
         # user's project, and a guest rewriting it changes nothing that matters.
         copies = [(sdir / "context.md", dst) for dst in context_paths] if context else []
@@ -1911,21 +1924,34 @@ def cmd_logs(args):
 
 
 def cmd_secret_set(args):
+    """Secrets are scoped per session in the proxy, so a set names the one it is for."""
     name = args.name
     value = os.environ.get(f"EGRESS_SECRET_{name.upper()}")
     if not value:
         die(f'missing secret: EGRESS_SECRET_{name.upper()}="<header>: <value>"')
+    if not read_meta(args.session):
+        die(f"no such session: {args.session!r} (silkgate ls)")
     if not _proxy_running():
         die("shared proxy not running — start a session first (silkgate up)")
-    _sock_call({"op": "set_secret", "name": name.lower(), "value": value})
-    say(f"secret {name.lower()} set")            # value never printed
+    _sock_call({"op": "set_secret", "name": name.lower(), "value": value,
+                "session": args.session})
+    say(f"secret {name.lower()} set for session {args.session}")   # value never printed
 
 
 def cmd_secret_ls(args):
     if not _proxy_running():
         die("shared proxy not running — start a session first (silkgate up)")
-    for n in sorted(_sock_call({"op": "list_secrets"}).get("names", [])):
-        print(n)
+    if args.session:
+        if not read_meta(args.session):
+            die(f"no such session: {args.session!r} (silkgate ls)")
+        for n in sorted(_sock_call({"op": "list_secrets",
+                                    "session": args.session}).get("names", [])):
+            print(n)
+        return
+    by_session = _sock_call({"op": "list_secrets"}).get("sessions", {})
+    for s in sorted(by_session):                 # names only, one per line, session-qualified
+        for n in sorted(by_session[s]):
+            print(f"{s}/{n}")
 
 
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
@@ -2162,10 +2188,15 @@ def main():
 
     p = sub.add_parser("secret", help="manage host-held secrets in the shared proxy")
     ssub = p.add_subparsers(dest="secret_cmd", required=True)
-    q = ssub.add_parser("set", help="push EGRESS_SECRET_<NAME> to the proxy (value never on argv)")
+    q = ssub.add_parser("set", help="push EGRESS_SECRET_<NAME> to the proxy, scoped to one "
+                                    "session (value never on argv)")
     q.add_argument("name", metavar="NAME", help="secret name (reads EGRESS_SECRET_<NAME>)")
+    q.add_argument("--session", required=True, metavar="SESSION",
+                   help="session the secret belongs to — only its guest can spend it")
     q.set_defaults(fn=cmd_secret_set)
     q = ssub.add_parser("ls", help="list secret names held by the proxy (names only)")
+    q.add_argument("--session", metavar="SESSION",
+                   help="one session's names (default: every session, session-qualified)")
     q.set_defaults(fn=cmd_secret_ls)
 
     # SIGTERM must run the finally-blocks that stop mitmdump/msb, not kill us outright.

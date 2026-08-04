@@ -21,10 +21,13 @@ import json
 import logging
 import os
 import pathlib
+import shutil
 import socket
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
+from typing import Optional
 
 SENTINEL_VALUE = "SENTINEL-NOT-A-REAL-KEY"
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -51,7 +54,9 @@ os.environ.pop("EGRESS_CONTROL_SOCK", None)
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 import proxy_addon                                             # noqa: E402
-from mitmproxy.test import tflow, tutils                       # noqa: E402
+from mitmproxy import exceptions                               # noqa: E402
+from mitmproxy.flow import Error                               # noqa: E402
+from mitmproxy.test import taddons, tflow, tutils              # noqa: E402
 
 LISTEN_PORT = 8090
 
@@ -82,7 +87,7 @@ class AddonCase(unittest.TestCase):
 
     # --- building flows ------------------------------------------------------
     def flow(self, *, host, port=443, method="GET", path="/v1/messages", claimed=None,
-             sni=None, body=b"", headers=(), connect=False):
+             sni=None, body=b"", headers=(), connect=False, listen_port=LISTEN_PORT):
         """A flow as the addon sees it.
 
         `host`/`port` are the destination mitmproxy will dial; `claimed` is the `Host:` header.
@@ -103,7 +108,7 @@ class AddonCase(unittest.TestCase):
             req = tutils.treq(host=host, port=port, method=method.encode(),
                               path=path.encode(), headers=tuple(fields), content=body)
         f = tflow.tflow(req=req)
-        f.client_conn.sockname = ("127.0.0.1", LISTEN_PORT)
+        f.client_conn.sockname = ("127.0.0.1", listen_port)
         f.client_conn.sni = sni                    # None = the guest spoke plaintext to us
         return f
 
@@ -137,8 +142,12 @@ class AddonCase(unittest.TestCase):
     def assertDenied(self, flow, *, code=403, host=None, port=None, reason=None):
         self.assertIsNotNone(flow.response, "expected a deny, the request was forwarded")
         self.assertEqual(flow.response.status_code, code)
+        # Every refusal the addon issues is marked as its own, so a guest can tell a policy
+        # denial from a destination's error — asserting it here covers them all.
+        self.assertEqual(flow.response.headers.get("X-Silkgate"), "deny")
         rec = self.record()
         self.assertEqual(rec["decision"], "deny")
+        self.assertEqual(rec["status"], code, "the deny line records the code we answered")
         if host is not None:
             self.assertEqual(rec["host"], host, "the audit must name the host actually dialled")
         if port is not None:
@@ -397,6 +406,119 @@ class Enforcement(AddonCase):
         self.assertDenied(f, reason="no session for port")
 
 
+# --- the audit record: dated, joined by flow id, concluded with what moved ----
+class AuditRecord(AddonCase):
+    """A request tells its story in at most two lines joined by `id`: the decision when it is
+    made, and — for an allow — a "response" record once the flow concludes, carrying the
+    destination's status and the byte counts. A deny is the whole story in one line: nothing
+    went upstream, and `status` records the code this addon answered."""
+
+    def conclude_via_stream(self, f, chunks, status=200):
+        """Attach an upstream response and play mitmproxy's streaming: responseheaders picks
+        the counter, each chunk passes through it (b"" marks end of message), and response()
+        fires once everything has been forwarded."""
+        f.response = tutils.tresp(status_code=status)
+        proxy_addon.responseheaders(f)
+        self.assertTrue(callable(f.response.stream),
+                        "an allowed response must stream through the counting callable")
+        for chunk in chunks:
+            self.assertEqual(f.response.stream(chunk), chunk, "chunks pass through unchanged")
+        f.response.stream(b"")
+        proxy_addon.response(f)
+
+    def test_records_carry_a_dated_timestamp_and_the_flow_id(self):
+        """mitmdump's own line prefix is a bare time of day; the date lives in the record."""
+        f = self.run_request(host="registry.npmjs.org", claimed="registry.npmjs.org",
+                             path="/lodash")
+        rec = self.assertAllowed(f, host="registry.npmjs.org")
+        self.assertEqual(rec["id"], f.id)
+        ts = datetime.fromisoformat(rec["ts"])         # full date required, or this raises
+        self.assertIsNotNone(ts.tzinfo, "an offset keeps the stamp unambiguous across DST")
+        self.assertLess(abs(datetime.now().astimezone() - ts), timedelta(minutes=10))
+
+    def test_an_allow_concludes_with_status_and_byte_counts(self):
+        f = self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
+                             method="POST", body=b"prompt",
+                             headers=[(b"x-api-key", b"guest-dummy")])
+        allow = self.assertAllowed(f, host="api.anthropic.com")
+        self.audit.lines.clear()
+        self.conclude_via_stream(f, [b"x" * 100, b"y" * 42])
+        rec = self.record()
+        self.assertEqual(rec["decision"], "response")
+        self.assertEqual(rec["id"], allow["id"], "the two lines join on the flow id")
+        self.assertEqual(rec["status"], 200)
+        self.assertEqual(rec["request_bytes"], len(b"prompt"))
+        self.assertEqual(rec["response_bytes"], 142)
+        self.assertEqual((rec["host"], rec["port"]), ("api.anthropic.com", 443))
+
+    def test_a_destinations_500_is_told_apart_from_ours(self):
+        f = self.run_request(host="registry.npmjs.org", claimed="registry.npmjs.org",
+                             path="/lodash")
+        self.assertAllowed(f, host="registry.npmjs.org")
+        self.audit.lines.clear()
+        self.conclude_via_stream(f, [b"upstream broke"], status=500)
+        rec = self.record()
+        self.assertEqual((rec["decision"], rec["status"]), ("response", 500))
+
+    def test_an_early_disconnect_still_gets_its_record(self):
+        f = self.run_request(host="registry.npmjs.org", claimed="registry.npmjs.org",
+                             path="/lodash")
+        self.assertAllowed(f, host="registry.npmjs.org")
+        self.audit.lines.clear()
+        f.response = tutils.tresp()
+        proxy_addon.responseheaders(f)
+        f.response.stream(b"z" * 17)                   # ...and the client hangs up here
+        f.error = Error("client disconnected")
+        proxy_addon.error(f)
+        rec = self.record()
+        self.assertEqual(rec["decision"], "response")
+        self.assertEqual(rec["response_bytes"], 17)
+        self.assertIn("client disconnected", rec["reason"])
+        self.assertEqual(rec["status"], 200, "the headers had gone out; the break is the reason")
+
+    def test_an_upstream_failure_concludes_with_no_status(self):
+        f = self.run_request(host="registry.npmjs.org", claimed="registry.npmjs.org",
+                             path="/lodash")
+        self.assertAllowed(f, host="registry.npmjs.org")
+        self.audit.lines.clear()
+        f.response = None
+        f.error = Error("connection refused")
+        proxy_addon.error(f)
+        rec = self.record()
+        self.assertIsNone(rec["status"], "the destination never answered")
+        self.assertEqual(rec["response_bytes"], 0)
+
+    def test_a_flow_concludes_exactly_once(self):
+        f = self.run_request(host="registry.npmjs.org", claimed="registry.npmjs.org",
+                             path="/lodash")
+        self.assertAllowed(f, host="registry.npmjs.org")
+        self.audit.lines.clear()
+        self.conclude_via_stream(f, [b"data"])
+        proxy_addon.response(f)                        # a double fire must not double-log
+        proxy_addon.error(f)
+        self.assertEqual(len(self.audit.records()), 1)
+
+    def test_a_denied_flow_gets_no_response_record(self):
+        """mitmproxy routes this addon's own deny responses through responseheaders and
+        response() too; the deny line already told the whole story."""
+        f = self.run_request(host="evil.example", port=80, claimed="evil.example")
+        self.assertDenied(f, host="evil.example")
+        self.audit.lines.clear()
+        proxy_addon.responseheaders(f)
+        proxy_addon.response(f)
+        self.assertEqual(self.audit.records(), [])
+
+    def test_an_allowed_connect_has_no_conclusion_of_its_own(self):
+        """Bytes through a tunnel belong to the decrypted requests inside it, each of which
+        earns its own pair of lines; the CONNECT line records the authority decision only."""
+        f = self.run_connect(host="api.anthropic.com")
+        self.assertAllowed(f, host="api.anthropic.com")
+        self.audit.lines.clear()
+        proxy_addon.response(f)
+        proxy_addon.error(f)
+        self.assertEqual(self.audit.records(), [])
+
+
 class Secrets(AddonCase):
 
     def test_missing_secret_is_indistinguishable_from_a_policy_miss(self):
@@ -439,6 +561,107 @@ class Secrets(AddonCase):
                 self.assertIsNone(proxy_addon._parse_secret(value))
 
 
+# --- secrets are scoped by session --------------------------------------------
+class SessionSecrets(AddonCase):
+    """The store is keyed by the session the listener port resolves to, so a later session
+    naming inject_auth=<name> no longer inherits a key an earlier one pushed. The
+    process-global EGRESS_SECRET_* env — still set module-wide here — serves only the
+    session-less standalone scope, never a named session."""
+
+    def setUp(self):
+        super().setUp()
+        saved = proxy_addon.SECRETS._store
+        proxy_addon.SECRETS._store = {}
+        self.addCleanup(setattr, proxy_addon.SECRETS, "_store", saved)
+
+    def sessions_mode(self, registry):
+        """Flip the module into EGRESS_SESSIONS_DIR mode around one test."""
+        real_dir, proxy_addon._SESSIONS_DIR = proxy_addon._SESSIONS_DIR, "<in-test>"
+        real_reg, proxy_addon.REGISTRY = proxy_addon.REGISTRY, registry
+        self.addCleanup(setattr, proxy_addon, "_SESSIONS_DIR", real_dir)
+        self.addCleanup(setattr, proxy_addon, "REGISTRY", real_reg)
+
+    def registry_dir(self, sessions):
+        """A real sessions dir, one session per {name: port}, all sharing this file's RULES."""
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        for name, port in sessions.items():
+            (d / name).mkdir()
+            (d / name / "meta.json").write_text(json.dumps({"port": port}))
+            (d / name / "rules.txt").write_text(RULES)
+        return d
+
+    def set_secret(self, session, value=f"x-api-key: {SENTINEL_VALUE}"):
+        return proxy_addon._control_dispatch(json.dumps(
+            {"op": "set_secret", "name": "anthropic", "value": value, "session": session}))
+
+    def test_a_session_cannot_spend_anothers_secret(self):
+        d = self.registry_dir({"alpha": 8090, "beta": 8091})
+        self.sessions_mode(proxy_addon.SessionRegistry(str(d)))
+        self.assertTrue(self.set_secret("alpha")["ok"])
+
+        f = self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
+                             method="POST", body=b"prompt",
+                             headers=[(b"x-api-key", b"guest-dummy")])
+        rec = self.assertAllowed(f, host="api.anthropic.com")
+        self.assertEqual(rec["session"], "alpha")
+        self.assertEqual(f.request.headers["x-api-key"], SENTINEL_VALUE)
+        self.audit.lines.clear()
+
+        f = self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
+                             method="POST", body=b"prompt",
+                             headers=[(b"x-api-key", b"guest-dummy")], listen_port=8091)
+        rec = self.assertDenied(f, host="api.anthropic.com", reason="missing secret")
+        self.assertEqual(rec["session"], "beta")
+        self.assertEqual(f.request.headers["x-api-key"], "guest-dummy")
+        self.assertNoSecret(f)
+        self.assertEqual(self.body(f), "no matching rule",
+                         "which secrets other sessions hold is not the guest's to learn")
+
+    def test_env_secrets_do_not_serve_named_sessions(self):
+        self.assertIsNotNone(proxy_addon.SECRETS.get(None, "anthropic"),
+                             "the standalone scope still reads EGRESS_SECRET_*")
+        self.assertIsNone(proxy_addon.SECRETS.get("alpha", "anthropic"),
+                          "one process env must not become every session's key")
+
+    def test_set_secret_must_name_a_live_session(self):
+        d = self.registry_dir({"alpha": 8090})
+        self.sessions_mode(proxy_addon.SessionRegistry(str(d)))
+        good = {"op": "set_secret", "name": "anthropic", "value": "x-t: v"}
+        for req in (good,                                          # no session named
+                    {**good, "session": "ghost"},                  # no such session
+                    {**good, "session": 42}):                      # not a name at all
+            with self.subTest(req=req):
+                self.assertFalse(proxy_addon._control_dispatch(json.dumps(req))["ok"])
+        self.assertTrue(proxy_addon._control_dispatch(
+            json.dumps({**good, "session": "alpha"}))["ok"])
+
+    def test_list_secrets_is_scoped_and_never_shows_a_value(self):
+        d = self.registry_dir({"alpha": 8090, "beta": 8091})
+        self.sessions_mode(proxy_addon.SessionRegistry(str(d)))
+        self.set_secret("alpha", "x-api-key: shh")
+        alpha = proxy_addon._control_dispatch('{"op": "list_secrets", "session": "alpha"}')
+        self.assertEqual(alpha["names"], ["anthropic"])
+        beta = proxy_addon._control_dispatch('{"op": "list_secrets", "session": "beta"}')
+        self.assertEqual(beta["names"], [], "the env's names are not a session's names")
+        every = proxy_addon._control_dispatch('{"op": "list_secrets"}')
+        self.assertEqual(every["sessions"], {"alpha": ["anthropic"]})
+        self.assertNotIn("shh", json.dumps(every) + json.dumps(alpha))
+
+    def test_a_dead_sessions_secrets_die_with_it(self):
+        """The pool recycles names and ports, so a recreated session must start empty
+        instead of holding the dead one's credentials."""
+        d = self.registry_dir({"alpha": 8090})
+        registry = proxy_addon.SessionRegistry(str(d))
+        self.sessions_mode(registry)
+        self.assertTrue(self.set_secret("alpha")["ok"])
+        self.assertIsNotNone(proxy_addon.SECRETS.get("alpha", "anthropic"))
+        shutil.rmtree(d / "alpha")
+        registry._dir_mtime = None                     # the mtime tick is not under test
+        self.assertFalse(registry.has_session("alpha"))
+        self.assertIsNone(proxy_addon.SECRETS.get("alpha", "anthropic"))
+
+
 class FailClosed(AddonCase):
     """mitmproxy logs an exception escaping a hook and then proceeds as if the hook had never
     run — forwarding the request, or opening the tunnel. Nothing may escape, and the block must
@@ -458,12 +681,15 @@ class FailClosed(AddonCase):
                              path="/lodash")
         self.assertIsNotNone(f.response, "an unloggable allow must not be forwarded")
         self.assertEqual(f.response.status_code, 500)
+        self.assertEqual(f.response.headers.get("X-Silkgate"), "deny",
+                         "the fail-closed block is a refusal of ours and must say so")
 
     def test_broken_audit_blocks_a_connect(self):
         self.explode()
         f = self.run_connect(host="api.anthropic.com")
         self.assertIsNotNone(f.response, "an unloggable CONNECT must not open a tunnel")
         self.assertEqual(f.response.status_code, 500)
+        self.assertEqual(f.response.headers.get("X-Silkgate"), "deny")
 
     def test_an_exception_before_any_decision_still_blocks(self):
         class Stub:
@@ -502,10 +728,12 @@ class Control(AddonCase):
                 self.assertFalse(proxy_addon._control_dispatch(line)["ok"])
 
     def test_set_secret_round_trip(self):
+        """No session named: legal here because this module runs the addon in standalone
+        (EGRESS_RULES) mode, where the None scope is the only one there is."""
         reply = proxy_addon._control_dispatch(
             json.dumps({"op": "set_secret", "name": "demo", "value": "x-token: abc123"}))
         self.assertEqual(reply, {"ok": True})
-        self.assertEqual(proxy_addon.SECRETS.get("DEMO"), "x-token: abc123")
+        self.assertEqual(proxy_addon.SECRETS.get(None, "DEMO"), "x-token: abc123")
 
     def test_set_secret_rejects_bad_names(self):
         for name in ("", "-lead", "a b", "x" * 65, "a/b", None, 7):
@@ -521,12 +749,43 @@ class Control(AddonCase):
                 reply = proxy_addon._control_dispatch(
                     json.dumps({"op": "set_secret", "name": "probe", "value": value}))
                 self.assertFalse(reply["ok"])
-        self.assertNotIn("probe", proxy_addon.SECRETS.names())
+        self.assertNotIn("probe", proxy_addon.SECRETS.names(None))
 
     def test_list_secrets_never_echoes_a_value(self):
         reply = proxy_addon._control_dispatch('{"op": "list_secrets"}')
         self.assertIn("anthropic", reply["names"])
         self.assertNotIn(SENTINEL_VALUE, json.dumps(reply))
+
+
+class ConfigureGuard(AddonCase):
+    """stream_large_bodies sends an over-threshold request's headers upstream before the
+    request hook fires — the host match, the injection, the hygiene and max_body all skipped.
+    Nothing sets it; configure() turns that from a convention into a control. OptionsError
+    refuses startup outright and rolls back a runtime change."""
+
+    def context(self):
+        """A taddons context that does not outlive the test: its Master installs a root-logger
+        handler bound to its event loop and never removes it, so once the context closes the
+        loop, every later log call in the whole process would raise. (mitmproxy's own suite is
+        saved by a PYTEST_CURRENT_TEST filter; this one runs under unittest.)"""
+        tctx = taddons.context(loadcore=False)
+        self.addCleanup(tctx.master._legacy_log_events.uninstall)
+        return tctx
+
+    def test_stream_large_bodies_is_refused(self):
+        with self.context() as tctx:
+            # Registered by hand: the option belongs to mitmproxy's proxyserver addon, which
+            # a hookless test context does not load.
+            tctx.options.add_option("stream_large_bodies", Optional[str], None, "")
+            proxy_addon.configure({"stream_large_bodies"})     # unset: loads fine
+            tctx.options.stream_large_bodies = "1m"
+            with self.assertRaises(exceptions.OptionsError):
+                proxy_addon.configure({"stream_large_bodies"})
+
+    def test_unrelated_option_changes_pass(self):
+        with self.context():
+            proxy_addon.configure(set())
+            proxy_addon.configure({"body_size_limit"})
 
 
 class ControlSocket(AddonCase):

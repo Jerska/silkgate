@@ -18,6 +18,8 @@ Exactly one of EGRESS_RULES / EGRESS_SESSIONS_DIR must be set (die at load other
 Two hooks decide: `http_connect` gates the authority of a CONNECT before its tunnel exists,
 `request` decides every request — including the ones decrypted out of such a tunnel. Both
 match on the destination mitmproxy will actually dial, never on what the client claims.
+`response` and `error` decide nothing: they finish the audit trail, recording what an
+allowed flow actually moved.
 
 Tier 1 (forcing all guest traffic here, enforced outside the guest) is microsandbox's own
 host-side network policy — see ../README.md. This addon assumes the guest can only reach this
@@ -31,8 +33,9 @@ import os
 import re
 import socket
 import tempfile
+from datetime import datetime
 
-from mitmproxy import ctx, http
+from mitmproxy import ctx, exceptions, http
 
 from rule_engine import RuleSet, normalize_host
 
@@ -47,7 +50,25 @@ if bool(_RULES_PATH) == bool(_SESSIONS_DIR):
                        "files) or EGRESS_SESSIONS_DIR (a session per listener port)")
 
 
-# --- secrets: "<Header>: <value>", in memory (control socket) over EGRESS_SECRET_* env ---
+def configure(updates):
+    """Refuse the one mitmproxy option that would route requests around this addon.
+
+    If stream_large_bodies is ever set, mitmproxy sends any over-threshold request's headers
+    upstream *before* the request hook fires — the host match, the credential injection, the
+    header hygiene and max_body are all skipped and the request is already on the wire.
+    Nothing sets it; raising here turns that from a convention into a control: OptionsError
+    refuses startup outright, and rolls back a runtime change. body_size_limit is the
+    opposite knob — it aborts an oversized body before it is buffered — but the same number
+    caps responses too, and package downloads are legitimately huge, so requiring it would
+    deny the proxy's main use; it stays the operator's call.
+    """
+    if "stream_large_bodies" in updates and ctx.options.stream_large_bodies:
+        raise exceptions.OptionsError(
+            "stream_large_bodies bypasses egress enforcement: a request over the threshold "
+            "is sent upstream before the addon can match, strip or deny it — refusing to run")
+
+
+# --- secrets: "<Header>: <value>", in memory, scoped by session -----------------
 # A secret names the header whose value it replaces, so that name has to be a real header name
 # (RFC 9110 token) and never one that decides where the request goes or how it is framed:
 # rewriting Host would front another vhost behind an allowlisted destination — defeating the
@@ -80,35 +101,51 @@ def _parse_secret(value):
 
 
 class SecretStore:
-    """Named secrets ("<Header>: <value>") for inject_auth, socket-set over EGRESS_SECRET_* env.
+    """Named secrets ("<Header>: <value>") for inject_auth, scoped by session.
 
-    The socket store wins on the same name. Values never leave this object: they are not
-    logged, not returned by list, not echoed by any control op — only spent by injection.
+    A scope is a session name, or None for the standalone single-ruleset proxy. A session's
+    secrets arrive over the control socket, already naming their scope, from the `up` that
+    provisioned it — so a session spends only the credentials its own creator could show.
+    EGRESS_SECRET_* env vars are read for the None scope only: the process environment is
+    one bag shared by every session, and honouring it per session would be exactly the
+    cross-session grant this scoping exists to remove. Values never leave this object: they
+    are not logged, not returned by list, not echoed by any control op — only spent by
+    injection.
     """
 
     def __init__(self):
-        self._store = {}                         # lower-name -> "Header: value"
+        self._store = {}                         # session|None -> {lower-name: "Header: value"}
 
-    def get(self, name):
+    def get(self, session, name):
+        scope = self._store.get(session, {})
         key = name.lower()
-        if key in self._store:
-            return self._store[key]
-        return os.environ.get("EGRESS_SECRET_" + name.upper())
+        if key in scope:
+            return scope[key]
+        if session is None:
+            return os.environ.get("EGRESS_SECRET_" + name.upper())
+        return None
 
-    def set(self, name, value):
-        self._store[name.lower()] = value
+    def set(self, session, name, value):
+        self._store.setdefault(session, {})[name.lower()] = value
 
-    def names(self):
-        env = {k[len("EGRESS_SECRET_"):].lower()
-               for k in os.environ if k.startswith("EGRESS_SECRET_")}
-        return sorted(env | set(self._store))
+    def names(self, session):
+        env = ({k[len("EGRESS_SECRET_"):].lower()
+                for k in os.environ if k.startswith("EGRESS_SECRET_")}
+               if session is None else set())
+        return sorted(env | set(self._store.get(session, {})))
+
+    def by_session(self):
+        """Session -> its secret names (names only), for the operator's `secret ls`."""
+        return {s: sorted(scope) for s, scope in self._store.items() if s is not None}
+
+    def prune(self, live):
+        """Forget sessions no longer in `live`, so a later session reusing a name does not
+        inherit the dead one's credentials. The None scope has no session to outlive."""
+        for stale in [s for s in self._store if s is not None and s not in live]:
+            del self._store[stale]
 
 
 SECRETS = SecretStore()
-
-
-def _secret(name):
-    return SECRETS.get(name)
 
 
 # --- registries: a listener port resolves to a ruleset (and maybe a session) ---
@@ -128,6 +165,9 @@ class FixedRegistry:
 
     def resolve(self, port):
         return None, self._ruleset
+
+    def has_session(self, name):
+        return False                             # no named sessions; only the None scope
 
 
 class SessionRegistry:
@@ -169,6 +209,10 @@ class SessionRegistry:
                 continue
             ports[port] = name
         self._ports, self._dir_mtime = ports, mtime
+        # A session that a successful scan no longer shows is down for good, and the pool
+        # recycles both its name and its port — so its secrets go with it, or the next
+        # session called the same thing starts life holding the dead one's credentials.
+        SECRETS.prune(set(ports.values()))
 
     def _ruleset(self, name):
         # Parse (and cache) a session's rules.txt; invalidate on its own mtime.
@@ -204,6 +248,15 @@ class SessionRegistry:
             raise SessionError("no session for port")
         return name, self._ruleset(name)
 
+    def has_session(self, name):
+        """Whether `name` is a live session — the same rescan-once as resolve, because the
+        usual caller is a set_secret racing the session's first appearance."""
+        self._refresh_ports()
+        if name not in self._ports.values():
+            self._dir_mtime = None
+            self._refresh_ports()
+        return name in self._ports.values()
+
 
 REGISTRY = (SessionRegistry(_SESSIONS_DIR) if _SESSIONS_DIR
             else FixedRegistry(_RULES_PATH.split(":")))
@@ -225,16 +278,30 @@ def _control_dispatch(line):
     if op == "ping":
         return {"ok": True}
     if op == "set_secret":
-        name, value = req.get("name"), req.get("value")
+        name, value, session = req.get("name"), req.get("value"), req.get("session")
         if not isinstance(name, str) or not _SECRET_NAME.fullmatch(name):
             return {"ok": False, "error": "name must match [0-9A-Za-z][0-9A-Za-z._-]{0,63}"}
         if _parse_secret(value) is None:
             return {"ok": False, "error": "value must be '<Header>: <value>', printable ASCII, "
                                           f"under {_MAX_SECRET} chars, and not a routing header"}
-        SECRETS.set(name, value)
+        # The store is scoped, so the op must name a scope that can spend the secret: a live
+        # session, or — with a fixed ruleset, where sessions do not exist — no session at all.
+        if session is None:
+            if _SESSIONS_DIR:
+                return {"ok": False, "error": "set_secret needs a session: this proxy scopes "
+                                              "secrets per session"}
+        elif not isinstance(session, str) or not REGISTRY.has_session(session):
+            return {"ok": False, "error": f"unknown session: {session!r}"}
+        SECRETS.set(session, name, value)
         return {"ok": True}
     if op == "list_secrets":
-        return {"ok": True, "names": SECRETS.names()}
+        session = req.get("session")
+        if session is None and _SESSIONS_DIR:
+            return {"ok": True, "sessions": SECRETS.by_session()}
+        if session is not None and (not isinstance(session, str)
+                                    or not REGISTRY.has_session(session)):
+            return {"ok": False, "error": f"unknown session: {session!r}"}
+        return {"ok": True, "names": SECRETS.names(session)}
     return {"ok": False, "error": f"unknown op: {op!r}"}
 
 
@@ -352,9 +419,23 @@ def _blocked(code, text):
     The body is ASCII-armoured: guest-supplied text arrives decoded with surrogateescape, and
     encoding one raw would raise here — inside the deny path, which mitmproxy answers by
     logging the exception and forwarding the request unfiltered.
+
+    The X-Silkgate header marks the refusal as ours, so a cooperating guest can tell a policy
+    denial from a destination's own error — a refused CONNECT shows the guest headers but no
+    body, so the body cannot carry the mark. Every refusal this addon issues comes through
+    here, the fail-closed 500s included. The value is a constant so this stays throw-free,
+    and the mark is a diagnostic, not a boundary: a destination could imitate it, and nothing
+    may treat its presence as proof.
     """
     return http.Response.make(code, (text + "\n").encode("ascii", "backslashreplace"),
-                              {"Content-Type": "text/plain"})
+                              {"Content-Type": "text/plain", "X-Silkgate": "deny"})
+
+
+def _ts():
+    """Local wall clock with date and UTC offset. mitmdump's own line prefix is a bare time
+    of day, so the record carries its date itself — a log spanning midnight stays ordered,
+    and `logs --since` has something to parse."""
+    return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
 def _audit(decision, flow, reason="", session=None, **extra):
@@ -365,9 +446,18 @@ def _audit(decision, flow, reason="", session=None, **extra):
     one host and connecting to another is the interesting signal. `session` is what
     `silkgate logs --audit` filters on. json.dumps escapes what it cannot represent, so a
     hostile path or header cannot break the line.
+
+    A request tells its story in at most two lines, joined by `id` (mitmproxy's flow id):
+    the decision when it is made, and — for an allow — a "response" record once the flow
+    concludes, carrying what actually moved. `status` on a deny is the code this addon
+    answered, and the deny line is the whole story: nothing went upstream, so there is no
+    second line. `status` on a "response" record is the destination's answer, or null if it
+    never gave one.
     """
     logger.info(json.dumps({
+        "ts": _ts(),
         "decision": decision,
+        "id": flow.id,
         "method": flow.request.method,
         "host": flow.request.host,
         "port": flow.request.port,
@@ -385,7 +475,7 @@ def _deny(flow, reason, code=403, session=None, shown=None, **extra):
     stay uninformative — the guest reads this body — without the audit losing the detail.
     """
     flow.response = _blocked(code, reason if shown is None else shown)
-    _audit("deny", flow, reason, session, **extra)
+    _audit("deny", flow, reason, session, status=code, **extra)
 
 
 def _fail_closed(flow, session, exc):
@@ -400,7 +490,7 @@ def _fail_closed(flow, session, exc):
     except Exception:
         pass
     try:
-        _audit("deny", flow, f"internal error: {exc.__class__.__name__}", session)
+        _audit("deny", flow, f"internal error: {exc.__class__.__name__}", session, status=500)
     except Exception:
         pass
 
@@ -425,11 +515,60 @@ def responseheaders(flow: http.HTTPFlow) -> None:
     # client retries into the same wall. Enforcement is request-side only, so nothing
     # here needs the assembled response body — and failing to stream only costs latency,
     # which is why this is the one hook that swallows its error instead of blocking.
+    #
+    # For a flow request() allowed, streaming and counting are one act: mitmproxy hands a
+    # callable each chunk (and b"" at end of message) and forwards whatever it returns, so
+    # the count costs no buffering. Flows without the marker — this addon's own deny
+    # responses, mostly — just stream.
     try:
-        flow.response.stream = True
+        state = flow.metadata.get("egress")
+        if state is None:
+            flow.response.stream = True
+            return
+
+        def count(chunk, _state=state):
+            _state["response_bytes"] += len(chunk)
+            return chunk
+
+        flow.response.stream = count
     except Exception as e:
         logger.info(json.dumps({"decision": "stream", "reason":
                                 f"not streaming: {e.__class__.__name__}"}))
+
+
+def _conclude(flow, reason=""):
+    """The "response" record for a flow request() allowed: what actually moved, and how the
+    flow ended. Pops the marker, so whichever of response()/error() runs emits exactly one
+    record — and a flow this addon denied, which mitmproxy also routes through response(),
+    has no marker and already told its whole story on the deny line."""
+    state = flow.metadata.pop("egress", None)
+    if state is None:
+        return
+    _audit("response", flow, reason, state["session"],
+           status=flow.response.status_code if flow.response else None,
+           request_bytes=state["request_bytes"],
+           response_bytes=state["response_bytes"])
+
+
+def response(flow: http.HTTPFlow) -> None:
+    # Fires once the response has been fully forwarded — for a streamed body, after the
+    # last chunk went through the counter — so the byte counts are final here.
+    try:
+        _conclude(flow)
+    except Exception as e:
+        logger.info(json.dumps({"decision": "response", "reason":
+                                f"unrecorded: {e.__class__.__name__}"}))
+
+
+def error(flow: http.HTTPFlow) -> None:
+    # Fires instead of response() when the flow dies — the upstream unreachable, or the
+    # client hanging up mid-stream — so an aborted transfer still gets its record, with the
+    # bytes counted up to the break and mitmproxy's description of it as the reason.
+    try:
+        _conclude(flow, reason=_clip(flow.error.msg) if flow.error else "aborted")
+    except Exception as e:
+        logger.info(json.dumps({"decision": "response", "reason":
+                                f"unrecorded: {e.__class__.__name__}"}))
 
 
 def http_connect(flow: http.HTTPFlow) -> None:
@@ -564,7 +703,7 @@ def request(flow: http.HTTPFlow) -> None:
         #    sending it. We never force the header onto a request that didn't use it.
         secret_header = None
         if rule.inject_auth:
-            secret = _secret(rule.inject_auth)
+            secret = SECRETS.get(session, rule.inject_auth)
             parsed = _parse_secret(secret) if secret is not None else None
             if parsed is None:
                 # Deny exactly as an unmatched request is denied, status and body alike: which
@@ -589,6 +728,10 @@ def request(flow: http.HTTPFlow) -> None:
                     del req.headers[name]
 
         _audit("allow", flow, rule.raw, session=session)
+        # The allow line says what was asked; what actually moved — status and byte counts —
+        # is the "response" record _conclude emits, and this marker is what earns one.
+        flow.metadata["egress"] = {"session": session, "request_bytes": body_len,
+                                   "response_bytes": 0}
         flow.response = None                      # nothing threw — let the request through
     except Exception as e:
         _fail_closed(flow, session, e)
