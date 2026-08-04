@@ -678,18 +678,22 @@ def session_context(profiles, ruleset, *, workspace, persistent):
         lines += [
             "",
             "GET is enough to install packages from a registry that appears above. Anything not",
-            "listed gets an HTTP 403 from the proxy saying `no matching rule`. **That is policy, not",
-            "a broken network and not a crash** — DNS, TLS and routing are all fine, and retrying",
-            "cannot change the answer.",
+            "listed is refused by the proxy: over plain http as a 403 whose body says",
+            "`no matching rule`, and over https before the tunnel opens at all, which most clients",
+            "report as a failed CONNECT naming 403 rather than anything readable",
+            "(`curl: (56) CONNECT tunnel failed, response 403`). **That is policy, not a broken",
+            "network and not a crash** — DNS, TLS and routing are all fine, and retrying cannot",
+            "change the answer.",
         ]
     else:
         # An empty allowlist is the strictest policy silkgate can express, and it is a normal
         # configuration rather than a broken one — so say what it means instead of a bare list.
         lines += [
-            "**Nothing.** The allowlist for this machine is empty, so every request gets an HTTP 403",
-            "from the proxy saying `no matching rule` — there is no host, port or protocol that",
-            "works, and no DNS either. **That is policy, not a broken network and not a crash**, and",
-            "retrying cannot change the answer. Work from what is already on this machine.",
+            "**Nothing.** The allowlist for this machine is empty, so every request is refused — a",
+            "403 saying `no matching rule` over plain http, a failed CONNECT naming 403 over https.",
+            "There is no host, port or protocol that works, and no DNS either. **That is policy, not",
+            "a broken network and not a crash**, and retrying cannot change the answer. Work from",
+            "what is already on this machine.",
         ]
     lines += [
         "",
