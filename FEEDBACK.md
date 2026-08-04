@@ -389,3 +389,32 @@ Still open, in the order they matter:
    the destination issues should not look alike.
 7. The remaining §8 robustness items and the §9 documentation and structure list, including
    splitting `cli/silkgate`, which is now ~1,900 lines.
+
+### Wanted, beyond the findings
+
+Not review findings — work the project owner asked for, recorded here so it sits beside the rest.
+
+- **One test suite.** Five test files, the engine's in-file self-tests, `test/repro/` and the in-guest
+  `verify_guest.sh` are four genres with four entry points. One command should run everything runnable
+  on the host, skipping rather than failing when mitmproxy is absent, and saying what it skipped. The
+  engine's self-tests stay in the module — that is why the engine was the one component with tests and
+  the one that worked.
+- **Does `verify` check enough?** Seven checks plus a control. Not covered: TCP/53 (check 4 tests
+  UDP-based *resolution*, so the interception this document records in *Found while fixing these* is
+  itself unasserted), UDP egress other than 53, host ports other than the session's proxy port
+  (§1 named host loopback services specifically), a LAN address on the proxy port now that the bind is
+  loopback, the address family the guest actually picks, and msb's DNS-rebind protection. Cross-session
+  isolation cannot be checked from a standalone guest and wants a session-level test instead.
+- **`run` should be the documented default.** The skill presents `run` and sessions as peers. Boot is
+  ~0.3s, so a warm VM buys little; `run` is one command rather than three and cannot leave a session
+  behind. Two batches of parallel agents were run as sessions and neither used `--resume` or
+  `silkgate logs`, so the machinery cost teardown and returned nothing.
+- **A two-way conversation with the guest**, over `--input-format stream-json`, so a host agent can
+  answer a guest mid-task rather than only reading its last message. One-off `run` stays the default.
+  The blocking unknown is stdin, not the JSON: the relay deliberately runs the guest command with
+  `</dev/null` (no isatty, no 3s stall, clean stream), and whether `msb exec` forwards stdin at all is
+  unestablished — `silkgate logs` exists because `msb exec` does not stream *output* live either. The
+  security framing needs settling first: the guest's output is already an injection channel and the
+  relay's `\x1e` tag is guest-forgeable, so a conversational channel makes forgeable protocol
+  structural. Either the framing resists forgery, or every event is untrusted data and never an
+  instruction — and the skill has to say which.
