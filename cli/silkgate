@@ -64,6 +64,8 @@ PROXY_ALIAS = "host.microsandbox.internal"   # resolves via the guest's /etc/hos
 PROXY_ENV_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
 BASE_IMAGE = "debian:bookworm-slim"   # profiles layer on top of this
 IMAGE_NS = "silkgate"                # generated images: silkgate/<slug>:<hash12>
+TIER1_PROBE_TARGET = "1.1.1.1:443"   # must be a live public service: the probe passes only
+                                     # when a connect that WOULD succeed is denied (tier1_fault)
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet
@@ -1047,6 +1049,100 @@ def msb_exec_argv(sandbox, cmd, *, tty=False, env=()):
     return argv + [sandbox, "--"] + list(cmd)
 
 
+# --- Tier-1 probe -------------------------------------------------------------
+# Everything here rests on one external assumption: that msb's --net-default-egress /
+# --net-rule flags still mean what they meant when this design was verified. That grammar
+# is pre-1.0 and unpinned, and nothing else checks it at runtime — an msb that parses the
+# flags but enforces less would leave every session wide open while silkgate reports
+# success. So no session is handed over until a probe inside the just-created guest has
+# shown the deny is real. It is a canary against a silently-lax msb, not a boundary: a
+# hostile --image controls the shell that prints the verdict, but the image is the caller's
+# choice, and at probe time the guest has run nothing else.
+
+def tier1_probe_cmd(port):
+    """The in-guest probe command: two bounded connects, one verdict token on stdout.
+
+    Both connects use bash's /dev/tcp (every silkgate-built image has bash and coreutils
+    from the debian base; verify_guest.sh leans on the same pair) and neither involves
+    DNS — an IP literal and an /etc/hosts alias — so `timeout` bounds the only slow path,
+    a dropped SYN:
+
+      - TIER1_PROBE_TARGET must NOT connect. It is a live public service, so if the
+        host-side deny is missing the connect plainly succeeds -> TIER1_LEAK. A refusal
+        and a drop both count as denied.
+      - the session's own proxy port MUST connect, else TIER1_NOPROXY. This is what makes
+        the first result meaningful — the same machinery reaching the proxy shows the
+        failure above was a denial, not a broken probe — and the guest is promised a
+        working proxy, so a session that fails this was never usable anyway.
+
+    An image lacking bash or timeout reports TIER1_UNTESTABLE:<tool> instead of guessing.
+    """
+    host, _, target_port = TIER1_PROBE_TARGET.partition(":")
+    return ["sh", "-c",
+            "command -v bash >/dev/null || { echo TIER1_UNTESTABLE:bash; exit 0; }; "
+            "command -v timeout >/dev/null || { echo TIER1_UNTESTABLE:timeout; exit 0; }; "
+            f"if timeout 1 bash -c 'exec 3<>/dev/tcp/{host}/{target_port}' 2>/dev/null; "
+            "then echo TIER1_LEAK; "
+            f"elif timeout 1 bash -c 'exec 3<>/dev/tcp/{PROXY_ALIAS}/{port}' 2>/dev/null; "
+            "then echo TIER1_OK; else echo TIER1_NOPROXY; fi"]
+
+
+def tier1_verdict(stdout, port, *, error=None):
+    """Map one probe run to None (hand the session over) or the refusal message.
+
+    Only an explicit TIER1_OK from a clean run hands the session over. Everything else —
+    a leak, an unreachable proxy, a missing tool, an msb exec that failed or printed
+    something unrecognizable — refuses: the caller may be an agent that will never read
+    a warning, so "could not test" must not be allowed to look like "tested and held".
+    """
+    if error:
+        return (f"could not run the Tier-1 probe ({error}); containment is unproven, and "
+                "an unproven session is not handed over. Session torn down.")
+    token = next((ln.strip() for ln in stdout.splitlines()
+                  if ln.strip().startswith("TIER1_")), "")
+    if token == "TIER1_OK":
+        return None
+    if token == "TIER1_LEAK":
+        return ("TIER-1 CONTAINMENT IS NOT IN EFFECT: the guest connected straight to "
+                f"{TIER1_PROBE_TARGET}, around the proxy, so nothing silkgate enforces "
+                "was going to bind this session. Suspect msb itself — its --net-* flag "
+                "grammar is pre-1.0 and unpinned; re-run `silkgate verify` and pin an msb "
+                "whose deny holds (README: Installing microsandbox). Session torn down.")
+    if token == "TIER1_NOPROXY":
+        return (f"Tier-1 probe: direct egress to {TIER1_PROBE_TARGET} is denied, but the "
+                f"guest could not reach its own proxy at {PROXY_ALIAS}:{port}. A denial "
+                "cannot be told from a dead guest network, and a session whose proxy is "
+                "unreachable could not carry traffic anyway. Session torn down.")
+    if token.startswith("TIER1_UNTESTABLE:"):
+        return ("cannot test Tier-1 containment: the guest image has no "
+                f"{token.partition(':')[2]!r}, which the probe needs (silkgate-built "
+                "images carry bash + coreutils; a custom --image must too). An untestable "
+                "session is not handed over. Session torn down.")
+    return (f"the Tier-1 probe printed {stdout.strip()!r} instead of a verdict; "
+            "containment is unproven, and an unproven session is not handed over. "
+            "Session torn down.")
+
+
+def tier1_fault(sandbox, port):
+    """Probe a just-created guest; return None if Tier 1 holds, else why it must refuse.
+
+    Callers run this between create and first use and tear the session down on anything
+    but None — a hard stop, never a warning above a working prompt, because a silent loss
+    of containment is the exact failure mode this exists to close.
+    """
+    argv = msb_exec_argv(sandbox, tier1_probe_cmd(port))
+    try:   # in-guest waits are bounded at 1s each; 15s covers msb exec itself stalling
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        return tier1_verdict("", port, error="msb exec did not return within 15s")
+    if proc.returncode:
+        detail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
+        return tier1_verdict(proc.stdout, port,
+                             error=f"msb exec exited {proc.returncode}"
+                                   + (f": {detail[-1]}" if detail else ""))
+    return tier1_verdict(proc.stdout, port)
+
+
 # A PTY makes programs emit terminal control: colors, cursor moves, and a reset burst on
 # exit. Downstream of the relay stdout is a pipe or a file, so those bytes are never drawn —
 # they just corrupt logs and break JSON parsers. Strip them and keep the text.
@@ -1347,6 +1443,9 @@ def cmd_run(args):
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
                            _session_meta(profiles, cmd), ctx, ctx_paths)
         provisioned = True
+        fault = tier1_fault(sandbox_name(name), port)
+        if fault:
+            die(fault)                      # the finally below tears the session down
         say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
         rc = run_guest(lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
                        cmd, tty=tty)
@@ -1407,6 +1506,11 @@ def cmd_up(args):
     ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=True)
     _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
                        _session_meta(profiles, profile_command(profiles)), ctx, ctx_paths)
+    fault = tier1_fault(sandbox_name(name), port)
+    if fault:
+        _teardown_session(read_meta(name) or {"name": name, "sandbox": sandbox_name(name)})
+        _maybe_stop_proxy()
+        die(fault)
     say(f"session {name} up · proxy :{port} · audit: tail -f {proxy['log']}")
     print(name)
 
