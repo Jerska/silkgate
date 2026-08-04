@@ -3,16 +3,20 @@ r"""Egress allowlist rule engine — dependency-free.
 
 Default-deny. One allow-rule per line:
 
-    <host>[/<path>]   [METHOD ...]   [option ...]
+    <host>[:<port>][/<path>]   [METHOD ...]   [option ...]
 
 Host globs (before the first '/'):   *  -> [^.]+   **  -> .*   **. -> (?:.*\.)?  (apex)
 Path globs (after the first '/'):    *  -> [^/]+   **  -> .*
-A pattern with no '/' matches any path.
+A pattern with no '/' matches any path. No ':<port>' means 80 and 443 only;
+':*' means any port; ':N[,M...]' means exactly those ports.
 
 Options (space-separated, after the pattern):
     GET POST ...        allowed methods                    (default: GET only)
     max_body=<size>     permit a request body up to <size> (default: none; bytes, k/m suffix)
-    query               permit a query string              (default: forbidden)
+    q:*                 allow all query params             (default: stripped)
+    q:<name>=<value>    keep query param only if value == <value>;  others stripped
+    q:<name>~<regex>    keep query param only if regex fullmatches; others stripped
+    h:*                 allow all request headers          (default: baseline only)
     h:<name>=<value>    forward header only if value == <value>   (exact)
     h:<name>~<regex>    forward header only if regex fullmatches  (no spaces; use \s)
     inject_auth=<name>  set auth header from EGRESS_SECRET_<NAME>
@@ -27,11 +31,16 @@ Security model:
     and a passing header must also satisfy a value constraint. Everything else is
     dropped by the proxy. Baseline values are capped/regex'd but remain a residual
     low-bandwidth channel; pin exact per rule for a stricter posture.
+  * Malformed rules (negative sizes, out-of-range or doubled ports) raise
+    ValueError at parse time — an unmatchable rule reads as a granted permission
+    in a ruleset a human reviews. A host pattern that is all wildcards is legal
+    but warned about on stderr: it matches every destination.
 """
 
 import ipaddress
 import posixpath
 import re
+import sys
 from urllib.parse import unquote
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
@@ -52,9 +61,9 @@ def normalize_host(raw, allow_glob=False):
     """
     if raw is None:
         return None
-    h = raw.strip()
-    if any(c in h for c in _HOST_BAD_CHARS):
-        return None
+    h = raw
+    if any(c in h for c in _HOST_BAD_CHARS):   # on the input as received: stripping
+        return None                            # first would launder 'github.com\n'
     if ":" in h:                                   # strip + validate optional port
         h, _, port = h.rpartition(":")
         if not port.isdigit():
@@ -95,7 +104,8 @@ def _compile_host(glob):
             out.append(r"[^.]+"); i += 1
         else:
             out.append(re.escape(glob[i])); i += 1
-    return re.compile("^" + "".join(out) + "$", re.IGNORECASE)
+    # \Z, not $: '$' also matches just before a trailing newline
+    return re.compile("^" + "".join(out) + r"\Z", re.IGNORECASE)
 
 
 def _compile_path(glob):
@@ -107,16 +117,19 @@ def _compile_path(glob):
             out.append(r"[^/]+"); i += 1
         else:
             out.append(re.escape(glob[i])); i += 1
-    return re.compile("^" + "".join(out) + "$")
+    return re.compile("^" + "".join(out) + r"\Z")
 
 
 def _parse_size(s):
-    s = s.strip().lower()
-    if s.endswith("k"):
-        return int(s[:-1]) * 1024
-    if s.endswith("m"):
-        return int(s[:-1]) * 1024 * 1024
-    return int(s)
+    t = s.strip().lower()
+    mult = 1
+    if t.endswith("k"):
+        t, mult = t[:-1], 1024
+    elif t.endswith("m"):
+        t, mult = t[:-1], 1024 * 1024
+    if not re.fullmatch(r"[0-9]+", t):         # digits only: no sign, no '', no '1_0'
+        raise ValueError(f"bad size: {s!r}")
+    return int(t) * mult
 
 
 def _parse_ports(spec):
@@ -125,10 +138,12 @@ def _parse_ports(spec):
         return frozenset((80, 443))
     if spec == "*":
         return None
-    try:
-        return frozenset(int(p) for p in spec.split(","))
-    except ValueError:
-        raise ValueError(f"bad port spec: {spec!r}") from None
+    ports = set()
+    for p in spec.split(","):
+        if not re.fullmatch(r"[0-9]+", p) or not 1 <= int(p) <= 65535:
+            raise ValueError(f"bad port spec: {spec!r}")
+        ports.add(int(p))
+    return frozenset(ports)
 
 
 # Default header policy: name -> constraint. ("any",) | ("exact", v) | ("re", compiled)
@@ -165,21 +180,25 @@ def _constraint_ok(constraint, value):
 
 class Rule:
     __slots__ = ("raw", "host_re", "ports", "path_re", "methods", "max_body",
-                 "allow_query", "query_params", "allow_all_headers", "headers", "inject_auth")
+                 "allow_query", "query_params", "allow_all_headers", "headers", "inject_auth",
+                 "wildcard_only_host")
 
     def __init__(self, raw):
         tokens = raw.split()
         if not tokens:
             raise ValueError("empty rule")
         host, slash, path = tokens[0].partition("/")
-        port_spec = ""
-        if ":" in host:
-            host, _, port_spec = host.rpartition(":")
+        # Split host:port at the FIRST colon so the whole port spec is validated in
+        # one place; a second stripper downstream would let 'foo.com:443:8080' pass.
+        host, _, port_spec = host.partition(":")
         norm = normalize_host(host, allow_glob=True)
         if norm is None:
             raise ValueError(f"invalid host pattern: {host!r}")
         self.raw = raw
         self.host_re = _compile_host(norm)
+        # A host glob with no literal character ('**', '*', '*.*') names no
+        # destination at all; RuleSet.parse warns about it on stderr.
+        self.wildcard_only_host = set(norm) <= {"*", "."}
         self.ports = _parse_ports(port_spec)                    # frozenset, or None for any
         self.path_re = _compile_path(path) if slash else None  # None => any path
         self.methods = set()
@@ -234,14 +253,32 @@ class Rule:
     def matches(self, host, path, method, port=443):
         return (method in self.methods
                 and (self.ports is None or port in self.ports)
-                and self.host_re.match(host) is not None
-                and (self.path_re is None or self.path_re.match(path) is not None))
+                and self.host_re.fullmatch(host) is not None
+                and (self.path_re is None or self.path_re.fullmatch(path) is not None))
 
     def header_ok(self, name, value):
         return self.allow_all_headers or _constraint_ok(self.headers.get(name.lower()), value)
 
     def query_ok(self, name, value):
         return self.allow_query or _constraint_ok(self.query_params.get(name), value)
+
+
+# A wildcard-only host warns rather than erroring: it is a deliberate opt-out an
+# operator may want, but one they must see. stderr reaches both the CLI operator at
+# compose time and mitmdump's log. q:*/h:* on a *named* host stay silent — they widen
+# an already-chosen destination (an accepted Tier-3 residual, and the claude profile
+# carries them on every session; warning there would train operators to ignore this
+# channel). Warned once per rule text per process: the CLI parses the same ruleset
+# more than once per command.
+_WARNED_WILDCARD = set()
+
+
+def _warn_wildcard_host(line, n):
+    if line in _WARNED_WILDCARD:
+        return
+    _WARNED_WILDCARD.add(line)
+    print(f"silkgate rules: WARNING: line {n}: {line!r} — the host pattern is all "
+          "wildcards, so this rule matches every destination", file=sys.stderr)
 
 
 class RuleSet:
@@ -256,9 +293,12 @@ class RuleSet:
             if not line:
                 continue
             try:
-                rules.append(Rule(line))
+                rule = Rule(line)
             except (ValueError, re.error) as e:
                 raise ValueError(f"rules:{n}: {e}") from None
+            if rule.wildcard_only_host:
+                _warn_wildcard_host(line, n)
+            rules.append(rule)
         return cls(rules)
 
     def match(self, host, path, method, port=443):
@@ -298,6 +338,10 @@ _MATCH_CASES = [
     ("github.com/your-org/** GET", "github.com", "/your-org/repo",          "GET", True),
     ("github.com/your-org/** GET", "github.com", "/your-org/x/../../other", "GET", False),
     ("github.com/your-org/** GET", "github.com", "/your-org/%2e%2e/other",  "GET", False),
+    # \Z anchoring: a smuggled trailing newline cannot satisfy an exact path rule
+    ("github.com/your-org/repo GET", "github.com", "/your-org/repo\n", "GET", False),
+    # an empty ruleset is legal and matches nothing (reach-nothing is a valid policy)
+    ("", "evil.com", "/x", "GET", False),
 ]
 
 _HOST_CASES = [
@@ -312,6 +356,8 @@ _HOST_CASES = [
     ("under_score.com",       None),   # underscore excluded by default
     ("-bad.com",              None),
     ("ok-host.example.com",   "ok-host.example.com"),
+    ("github.com\n",          None),   # trailing CR/LF rejected, not stripped
+    (" github.com",           None),   # leading whitespace rejected, not stripped
 ]
 
 _HEADER_RULE = ("api.anthropic.com/v1/messages POST "
@@ -350,10 +396,32 @@ _PORT_CASES = [
     ("foo.com:8080/** GET", "foo.com", 8080, True),    # explicit port
     ("foo.com:8080/** GET", "foo.com", 443,  False),   # explicit port replaces the default
     ("foo.com:*/** GET",    "foo.com", 8080, True),    # :* = any port
+    ("foo.com:65535/** GET", "foo.com", 65535, True),  # top of the valid range
+]
+
+# Malformed rules fail at parse time: an unmatchable rule would read as a granted
+# permission in a ruleset a human reviews.
+_PARSE_ERROR_CASES = [
+    "a.com/** GET max_body=-5",     # negative size would deny every request
+    "a.com:0/** GET",               # below the port range
+    "a.com:65536/** GET",           # above the port range
+    "a.com:99999999/** GET",        # far outside: an unmatchable rule
+    "foo.com:443:8080/** GET",      # doubled port must not parse as ports={8080}
+]
+
+# A wildcard-only host pattern warns on stderr; q:*/h:* on a named host does not.
+_WARN_CASES = [
+    ("**/** GET POST h:* q:* max_body=100m", True),    # total allow-all
+    ("**:* GET",                             True),    # any host, any port
+    ("*.* GET",                              True),    # names no destination either
+    ("**.github.com/** GET",                 False),   # broad, but bounded to a name
+    ("api.anthropic.com/** GET POST q:* h:* max_body=10m inject_auth=anthropic", False),
 ]
 
 
 def _selftest():
+    import contextlib
+    import io
     fails = 0
     for line, host, path, method, expected in _MATCH_CASES:
         got = RuleSet.parse(line).match(host, path, method) is not None
@@ -380,8 +448,24 @@ def _selftest():
         if got != expected:
             fails += 1
             print(f"PORT  FAIL: {line!r}  {host}:{port}  want {expected} got {got}")
+    for line in _PARSE_ERROR_CASES:
+        try:
+            RuleSet.parse(line)
+            fails += 1
+            print(f"PARSE FAIL: {line!r}  want ValueError, got a rule")
+        except ValueError:
+            pass
+    for line, expected in _WARN_CASES:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            RuleSet.parse(line)
+        got = "WARNING" in err.getvalue()
+        if got != expected:
+            fails += 1
+            print(f"WARN  FAIL: {line!r}  want {expected} got {got}")
     total = (len(_MATCH_CASES) + len(_HOST_CASES) + len(_HEADER_CASES)
-             + len(_QUERY_CASES) + len(_PORT_CASES))
+             + len(_QUERY_CASES) + len(_PORT_CASES) + len(_PARSE_ERROR_CASES)
+             + len(_WARN_CASES))
     print(f"{total - fails}/{total} passed")
     raise SystemExit(1 if fails else 0)
 
