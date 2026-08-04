@@ -180,16 +180,24 @@ docker run --rm --device /dev/kvm -v "$PWD:/silkgate" silkgate-verify \
 ./cli/silkgate verify --full    # also installs probe tools *through* the proxy, then trusts the CA
 ```
 
-- **Pass = the proxy-path checks succeed when run, and every direct-egress check is blocked**
-  (`RESULT: N passed, 0 failed`). The quick form reports 2 passed and skips what a bare image
-  can't probe; `--full` reports 7.
+- **Pass = the expected checks ran, the proxy-path ones succeeded, and every direct-egress check
+  was blocked.** A count is not enough — five skipped checks and two passes is not containment — so
+  `--full` asserts that all seven ran, and a skip fails it. Which checks ran is reported on the
+  guest's `CHECKS:` line beside `RESULT: N passed, 0 failed`.
+- Check 0 is a control for the probe mechanism itself: it requires the proxy's own refusal of a
+  request no rule allows. A bare TCP connect would not do, because microsandbox's guest→host NAT
+  completes the handshake inside the VMM and so reports success with nothing listening at all.
 - Check 3 runs as root with no direct egress; check 7 re-adds a default route as root and is
   *still* blocked, which is the point — enforcement sits in the host stack below the guest NIC.
   If any of 3–7 succeed, the boundary leaks.
 - DNS is denied without any extra rule: `--net-default-egress deny` grants no UDP/53, and
   microsandbox intercepts UDP/53 at its gateway, so external names can't resolve; the proxy's
   alias resolves via the guest's `/etc/hosts`. Do **not** add `allow@host:udp:53` — it would
-  re-open DNS.
+  re-open DNS. TCP/53 is intercepted too: every destination on that port answers `REFUSED` from
+  msb's own stub, so it is not a way out either.
+- Every `up` and `run` re-checks all of this from inside the guest before handing it over, and
+  refuses the session if a host outside the allowlist turns out to be reachable. `verify` is the
+  full seven-check version of that one assertion.
 - **Verified 7/7 on macOS (Apple Silicon) and on Linux (x86_64/KVM, via `test/linux/`).**
 
 ## Using the proxy on its own

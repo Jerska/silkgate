@@ -94,6 +94,12 @@ races Apple daemons — defense-in-depth only).
 - **Fail-closed on anything undecryptable.** Cert-pinned tools, non-HTTP-over-TLS, raw CONNECT
   tunnels — if the proxy ever *passes through* what it can't inspect, that's the exfil
   channel. Pinned tools should break, not get an exception.
+  Enforced by the `http_connect` hook, which matches the tunnel's authority before the tunnel
+  exists, plus `--set rawtcp=false`, which removes the passthrough a CONNECT would otherwise fall
+  back to. Neither half is sufficient alone: the hook bounds *which* authority a tunnel may address,
+  and only `rawtcp=false` keeps what flows through an allowed one from escaping inspection. One
+  visible consequence: a denied HTTPS destination is refused before the tunnel exists, so a guest
+  sees a rejected CONNECT naming 403 rather than a 403 response body.
 - **Non-standard ports.** A host allowlist that ignores port lets `allowed.com:1234` reach an
   attacker service on a co-opted host/port. Gate it: default to 80/443, require explicit
   `:port`/`:*` otherwise.

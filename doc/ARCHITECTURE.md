@@ -99,6 +99,11 @@ Claude Code nor Codex ships, and the whole reason for the exercise.
    proxy with a *dummy* key; the proxy attaches the real `Authorization`/`x-api-key` from the
    host vault for the allowlisted route. **Full code execution in the guest cannot steal the
    API key — it isn't there.**
+   That guarantee rests entirely on the proxy deciding the route from the address it will dial,
+   never from anything the guest writes into the request. It once did the latter, and a request to
+   any host carrying an allowlisted `Host:` header was answered with the credential attached — so
+   the guest did not need to steal the key, only to ask for it to be spent. `test/test_addon.py`
+   is what keeps that closed; treat the destination check as the load-bearing part of this claim.
 4. **DNS is the proxy's, not the guest's.** With an explicit `HTTPS_PROXY`, the guest sends
    hostnames and the *proxy* resolves; drop raw UDP/TCP 53 from the guest.
 5. **Logs everything (redacted)** — full audit trail for post-incident review.

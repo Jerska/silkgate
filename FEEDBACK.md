@@ -249,6 +249,12 @@ loudly when a composed ruleset contains a bare-glob host, `h:*`, or `q:*`.
   grants the Files and Batches APIs and anything added to that host later. Enumerate the headers
   the harness needs (`anthropic-version`, `anthropic-beta`, `content-type`, `accept`) and the paths
   it uses. Note deliberately that `platform.claude.com` receives the same injected key.
+- **An empty allowlist is refused, though it is the safest policy silkgate can express.** `run` with
+  no `--with` and no `--rule` dies with `no egress rules`, so the most locked-down guest the tool can
+  offer — reach nothing — is the one configuration it will not start. Anyone wanting an offline guest
+  has to invent a rule that matches nothing (`--rule 'example.invalid/** GET'`), and that artifact is
+  strictly worse than an empty ruleset: it survives in shell history and README snippets reading like
+  an allowance. Compose the empty ruleset and let default-deny do its job.
 - **`probe` is quarantined by a comment only.** It opens the Debian mirrors; make `cmd_*` refuse it
   outside `verify`.
 - **`cmd_verify` accepts any `passed > 0` with `failed == 0`**, so a run where five of seven checks
@@ -285,27 +291,101 @@ loudly when a composed ruleset contains a bare-glob host, `h:*`, or `q:*`.
 
 Recorded so they are not re-investigated:
 
-- **"`connection_strategy` defaults to eager, so mitmproxy resolves and connects the CONNECT target
-  before any hook — a DNS side channel."** There is no `connection_strategy` option in mitmproxy
-  12.2.3 (`AttributeError: No such option`). The claim does not apply to the pinned version, and no
-  upstream connection was observed at CONNECT time.
-- **"`body_size_limit` and `stream_large_bodies` are unset, so a guest can OOM the shared proxy."**
-  Neither option exists in 12.2.3 either. The underlying concern — `max_body` is checked at
-  `proxy_addon.py:309` after mitmproxy has already assembled `req.raw_content` — may well hold, but
-  the mechanism cited is wrong and it needs its own reproduction before anyone acts on it.
 - **"The audit record has no timestamp."** The record has no timestamp *field*, but mitmdump
   prefixes every line with one. The real gap is narrower: time of day without a date.
 
+### Withdrawn: two entries that were dismissed for a bad reason
+
+Both of the mitmproxy-option entries that used to sit here were wrong, and wrong the same way. They
+were dismissed on the grounds that the options "do not exist in 12.2.3", which came from
+interrogating a bare `options.Options()`. Options are registered by the addons, so a bare `Options`
+knows almost none of them; on a running `DumpMaster` all three are present:
+
+```
+rawtcp              = True
+connection_strategy = 'eager'
+body_size_limit     = None
+stream_large_bodies = None
+```
+
+The lesson is about method, not mitmproxy: a claim of absence needs the interface the product
+actually uses. What survives of each:
+
+- **`connection_strategy` is `eager`,** but `HttpConnectHook` fires *before* the upstream connection
+  is opened, so it was never true that the connection precedes every hook. The accurate statement is
+  that with no `http_connect` hook, every CONNECT — allowed or not — reached an eager upstream
+  connect and resolve. Denied CONNECTs now answer 403 without one (observed as 403 rather than 502).
+- **`stream_large_bodies` is a live footgun, not an OOM concern.** If it is ever set,
+  `check_body_size` sets `flow.request.stream = True` and `start_request_stream` sends the request
+  headers upstream *before* `HttpRequestHook` — so for any body over the threshold, the host match,
+  the credential injection, the header stripping and `max_body` are all bypassed and the request is
+  already on the wire. Nothing sets it today and nothing should; a `configure` hook refusing to load
+  when it is set would make that a control rather than a convention. `body_size_limit` is the
+  opposite: it aborts with a protocol error, and is the knob that would enforce `max_body` before the
+  bytes are buffered in the shared proxy.
+
 ---
 
-## What to do first
+## Found while fixing these
 
-1. **Fix finding 1** and commit `test/test_addon.py` from `test/repro/addon_host_spoof.py` in the
-   same change. Nothing else on this list matters while policy is decided from a spoofable field.
-2. **Add the in-guest Tier-1 probe** (§9), because it converts the one assumption the whole design
-   rests on into something checked at runtime.
-3. **Bind the proxy explicitly** (finding 3) and **validate `--with` versions and `--base`**
-   (finding 5) — both are small and both are currently exploitable from outside the guest.
-4. **Implement `http_connect`** and set `rawtcp=false` (finding 2), even though its severity is
-   unproven.
-5. Then the engine defects (§7) and the race conditions (§8), each with a test.
+Discovered on the host while reconciling the fixes; each was observed, not reasoned.
+
+- **A guest's TCP connect to the host proves nothing.** microsandbox's guest→host NAT completes the
+  handshake inside the VMM, so `exec 3<>/dev/tcp/host.microsandbox.internal/8090` reports success
+  with **no listener on the host at all** — the failure only appears once data flows (`curl` exit 56,
+  connection reset). Any probe that concludes "the proxy is reachable" from a connect is unsound,
+  which is how a new positive control in `verify_guest.sh` came to pass while the proxy was
+  unreachable. Prove reachability with an answer, not a handshake.
+- **The guest resolves the host alias to IPv6 first.** `/etc/hosts` in the guest maps
+  `host.microsandbox.internal` to both `172.16.2.5` and an `fd42::` address, and `getaddrinfo`
+  returns the v6 one first, so a modern `curl` uses it. A loopback bind must therefore cover both
+  families — a `127.0.0.1`-only listener leaves guests connecting to `[::1]` on the host, where the
+  VMM's local handshake turns "nothing is listening" into what looks like a proxy refusal.
+- **msb intercepts all of TCP/53.** Every destination on port 53 — including unroutable TEST-NET
+  addresses — returns an identical 31-byte `REFUSED` from msb's own stub, so port 53 is not an egress
+  channel. It is also a trap for a containment probe: a reply arrives, and reading a reply as proof
+  of egress inverts the conclusion.
+- **Dropping `--net-default-egress deny` does not open egress**, so it is not a way to test that the
+  Tier-1 assertion refuses a leaking guest: msb denies by default once any `--net-rule` is present,
+  and the sandbox stays contained. `--net-default-egress allow` does open it, and the probe catches
+  that — verified, session refused and torn down.
+- **A denied HTTPS destination now fails at CONNECT, not in-band.** The guest sees
+  `curl: (56) CONNECT tunnel failed, response 403` instead of a 403 body, because the authority is
+  refused before a tunnel exists. Still legible — it names the 403 — but every consumer that reads
+  a policy denial out of a response body needs to know it moved, `verify_guest.sh` check 2 included.
+
+---
+
+## Status
+
+Findings 1–7, the Tier-1 assertion and the reachable parts of §8 are fixed, in six commits — one per
+area, each carrying the test that fails against the code it replaces. `git log` is the detail; what
+matters here is which claims are now closed and which are not.
+
+Closed and verified live: the host spoof (the spoof returns 403 and the credential stays on the
+host, and the audit line names the destination with the forged authority beside it), CONNECT
+evaluated and logged, the proxy off the LAN, build-argument injection, session-name traversal, the
+workspace guard, `probe` confined to `verify`, the port-claim race (five concurrent `up`s take five
+distinct ports, repeatedly), the engine's six parse defects, `--with git` cloning while a push still
+dies at phase one, an empty allowlist as a legal configuration, and the Tier-1 assertion in both
+directions — a healthy session passes silently, a guest with `--net-default-egress allow` is refused
+and torn down.
+
+Still open, in the order they matter:
+
+1. **The audit record** (§9) — no date, no response status, no byte counts. It now names the host
+   actually dialled, which was the falsehood; the gaps that make it unfit for "how much left, and
+   when" remain.
+2. **Per-session secret scoping** (§9). `SecretStore` still lives in the shared mitmdump, so any
+   later session naming `inject_auth=anthropic` gets a key an earlier one pushed.
+3. **`profiles/claude/rules.txt` still uses `h:* q:*`** (§9), so no shipped profile exercises the
+   deny-by-default header and query machinery. Tightening it needs the header set the harness
+   actually sends, which is an experiment, not a guess.
+4. **A `configure` hook refusing `stream_large_bodies`** — see the withdrawn entry above.
+5. **CI.** Linux runners have KVM, so the four new test files, the engine self-tests and
+   `silkgate verify` can all run on push. The tests exist now; nothing runs them automatically.
+6. **The misattributed 403** (§6). A guest reads GitHub's own dumb-http 403 — and now a refused
+   CONNECT — as silkgate policy, because the brief teaches it to. A denial the proxy issues and one
+   the destination issues should not look alike.
+7. The remaining §8 robustness items and the §9 documentation and structure list, including
+   splitting `cli/silkgate`, which is now ~1,900 lines.
