@@ -1452,7 +1452,7 @@ _RELAY_SH = (_EXPORT_CONTEXT
              '"$@" </dev/null >"$d/o" 2>"$d/e"; rc=$?; wait $po $pe; rm -rf "$d"; exit $rc')
 
 
-def run_guest(build_argv, cmd, *, tty):
+def run_guest(build_argv, cmd, *, tty, on_line=None):
     """Run a guest command and return its exit code.
 
     Default (`--no-tty`): the command runs non-interactively with pipes for stdout/stderr,
@@ -1468,11 +1468,12 @@ def run_guest(build_argv, cmd, *, tty):
         if sys.stdout.isatty():
             # Inheriting a real terminal is what keeps a TUI fully interactive.
             return wait_foreground(subprocess.Popen(build_argv(cmd)))
-        return _pty_relay(build_argv(cmd), demux=False)
-    return _pty_relay(build_argv(["sh", "-c", _RELAY_SH, "_"] + list(cmd)), demux=True)
+        return _pty_relay(build_argv(cmd), demux=False, on_line=on_line)
+    return _pty_relay(build_argv(["sh", "-c", _RELAY_SH, "_"] + list(cmd)), demux=True,
+                      on_line=on_line)
 
 
-def _pty_relay(argv, *, demux):
+def _pty_relay(argv, *, demux, on_line=None):
     """Run argv with a PTY for its stdio and copy what it writes to our own streams.
 
     `demux` splits the tagged lines back out (and drops terminal control bytes, insurance
@@ -1504,26 +1505,31 @@ def _pty_relay(argv, *, demux):
             buf += chunk
             while b"\n" in buf:                         # a line is the unit for both the
                 line, buf = buf.split(b"\n", 1)         # stderr tag and ANSI stripping
-                _relay(line, newline=True)
+                _relay(line, newline=True, on_line=on_line)
         if buf:
-            _relay(buf, newline=False)
+            _relay(buf, newline=False, on_line=on_line)
         return wait_foreground(proc)
     finally:
         os.close(ptm)
 
 
-def _relay(line, *, newline):
+def _relay(line, *, newline, on_line=None):
     """Write one relayed line to our stdout, or to stderr if the wrapper tagged it so.
 
     Only the leading byte routes; RS or US anywhere else is guest content and _plain
     drops it. Untagged lines — msb's own noise, a wrapper that died before its loops
     started — go to stdout, the stream that carries no claim of being silkgate's.
+
+    `on_line` sees the same cleaned text a reader does, so a caller that must parse the
+    stream reads what it shows rather than a second, differently-buffered copy of it.
     """
     tag = line[:1]
     stream = sys.stderr.buffer if tag == _ERR_TAG else sys.stdout.buffer
     text = _plain(line[1:] if tag in (_ERR_TAG, _OUT_TAG) else line)
     stream.write(text + b"\n" if newline else text)
     stream.flush()
+    if on_line is not None:
+        on_line(text.decode(errors="replace"))
 
 
 # The mount is the only host path a guest can write, and it is rw, so what it must never be
@@ -2231,34 +2237,32 @@ def cmd_verify(args):
         script = FULL_SETUP + script
     proxy, log_path = start_proxy(rules_text, args.port)
     say(f"proxy :{args.port} · audit: tail -f {log_path}")
-    argv = msb_argv("debian", ["bash", "-c", script], args.port,
-                    pull_never=False, mounts=mounts)
-    result = checks = guest = None
+
+    # The same relay every other guest command uses, for the same two reasons and one more.
+    # msb forwards output as it happens only when it has a terminal of its own, and it decides
+    # what to give the guest the same way — so reading msb through a plain pipe means the whole
+    # run arrives at once, while handing it this terminal means everything inside formats for a
+    # screen (apt's progress meter, msb's cursor moves) and leaves the terminal in raw mode
+    # afterwards. The relay resolves both: msb gets a PTY, the command inside gets pipes and
+    # /dev/null. The third reason is ours — the parse below then reads exactly the cleaned text
+    # a human sees, rather than a separately buffered copy of it.
+    found = {}
+
+    def note(text):
+        m = re.search(r"RESULT: (\d+) passed, (\d+) failed", text)
+        if m:
+            found["result"] = (int(m[1]), int(m[2]))
+        if "CHECKS: ran=" in text:
+            found["checks"] = _parse_checks(text)
+
     try:
-        # stdin is /dev/null, as for any run whose output we read rather than watch: msb hands
-        # the guest a terminal when it has one itself, and then everything in there formats for
-        # a screen nobody is looking at — apt draws a progress meter, msb draws its own — and
-        # leaves this terminal in raw mode on the way out, which outlives the command. Reading
-        # bytes rather than text keeps \r a \r: universal newlines would turn every in-place
-        # repaint into its own line, complete with the spaces it used to erase the last one.
         with _guarded_terminal():
-            guest = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            for raw in guest.stdout:
-                # Split the newline off before cleaning, as _relay does: _plain trims a
-                # trailing \r, which is only trailing once the \n is gone.
-                line = _plain(raw.rstrip(b"\n")).decode(errors="replace")
-                print(line)
-                m = re.search(r"RESULT: (\d+) passed, (\d+) failed", line)
-                if m:
-                    result = (int(m[1]), int(m[2]))
-                if "CHECKS: ran=" in line:
-                    checks = _parse_checks(line)
-            wait_foreground(guest)
+            run_guest(lambda cmd: msb_argv("debian", cmd, args.port,
+                                           pull_never=False, mounts=mounts),
+                      ["bash", "-c", script], tty=False, on_line=note)
     finally:
-        if guest is not None:
-            stop(guest)
         stop(proxy)
+    result, checks = found.get("result"), found.get("checks")
     if result is None:
         die("no RESULT line — the guest never ran verify_guest.sh (msb server started?)")
     if checks is None:
