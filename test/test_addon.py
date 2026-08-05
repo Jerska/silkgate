@@ -571,12 +571,10 @@ class Secrets(AddonCase):
                 self.assertIsNone(proxy_addon._parse_secret(value))
 
 
-# --- secrets are scoped by session --------------------------------------------
-class SessionSecrets(AddonCase):
-    """The store is keyed by the session the listener port resolves to, so a later session
-    naming inject_auth=<name> no longer inherits a key an earlier one pushed. The
-    process-global EGRESS_SECRET_* env — still set module-wide here — serves only the
-    session-less standalone scope, never a named session."""
+# --- driving the addon against a real (temp) sessions directory ---------------
+class RegistryCase(AddonCase):
+    """Shared plumbing for EGRESS_SESSIONS_DIR mode: a real directory of sessions, the
+    module flipped to resolve against it, and a clean secret store around every test."""
 
     def setUp(self):
         super().setUp()
@@ -604,6 +602,111 @@ class SessionSecrets(AddonCase):
     def set_secret(self, session, value=f"x-api-key: {SENTINEL_VALUE}"):
         return proxy_addon._control_dispatch(json.dumps(
             {"op": "set_secret", "name": "anthropic", "value": value, "session": session}))
+
+
+# --- the registry under the conditions the CLI actually produces --------------
+class Registry(RegistryCase):
+    """SessionRegistry resolves the accepted listener port — the guest's spoof-proof
+    identity — to a session and its own ruleset. The CLI provisions by staging under a dot
+    prefix and renaming into the registry, so a session's files keep the mtimes staging
+    gave them; names and ports are recycled, and a down/up pair fits inside one filesystem
+    timestamp tick. Timestamps therefore identify nothing, and these tests replay the
+    equal-timestamp cases to pin the property the enforcement path stands on: a request is
+    policed by the ruleset of the session it belongs to *now*, or it is denied."""
+
+    def replace_session(self, d, old, new, rules_text, port=8090):
+        """Tear `old` down and provision `new` on the same port the way the CLI does —
+        stage under a dot prefix, rename into the registry — then pin the new files' and
+        the registry dir's timestamps to the values the old session had. That is what a
+        recreate inside one timestamp tick looks like to a reader of the directory;
+        forcing it keeps these tests deterministic on any filesystem."""
+        rules_stat = os.stat(d / old / "rules.txt")
+        dir_stat = os.stat(d)
+        shutil.rmtree(d / old)
+        tmp = d / f".tmp-{new}"
+        tmp.mkdir()
+        (tmp / "rules.txt").write_text(rules_text)
+        (tmp / "meta.json").write_text(json.dumps({"port": port}))
+        tmp.rename(d / new)
+        os.utime(d / new / "rules.txt", ns=(rules_stat.st_atime_ns, rules_stat.st_mtime_ns))
+        os.utime(d, ns=(dir_stat.st_atime_ns, dir_stat.st_mtime_ns))
+
+    def request_npm(self, listen_port=LISTEN_PORT):
+        return self.run_request(host="registry.npmjs.org", claimed="registry.npmjs.org",
+                                path="/lodash", listen_port=listen_port)
+
+    def test_recreated_session_gets_its_own_rules(self):
+        """FEEDBACK §9: `down foo` + `up foo` recycling name and port inside one mtime
+        tick. The second occupant's policy — here an empty, reach-nothing ruleset — is the
+        one that must be enforced; its predecessor's allowlist is replaced data."""
+        d = self.registry_dir({"alpha": 8090})
+        self.sessions_mode(proxy_addon.SessionRegistry(str(d)))
+        self.assertAllowed(self.request_npm(), host="registry.npmjs.org")
+        self.audit.lines.clear()
+        self.replace_session(d, "alpha", "alpha", "")
+        rec = self.assertDenied(self.request_npm(), host="registry.npmjs.org",
+                                reason="no matching rule")
+        self.assertEqual(rec["session"], "alpha")
+
+    def test_replacement_session_on_the_same_port_is_resolved(self):
+        """A different name recycling the port inside the same tick: the request belongs
+        to the new session, and must be neither denied as sessionless nor attributed to
+        the dead name in the audit."""
+        d = self.registry_dir({"alpha": 8090})
+        self.sessions_mode(proxy_addon.SessionRegistry(str(d)))
+        self.assertAllowed(self.request_npm(), host="registry.npmjs.org")
+        self.audit.lines.clear()
+        self.replace_session(d, "alpha", "beta", RULES)
+        rec = self.assertAllowed(self.request_npm(), host="registry.npmjs.org")
+        self.assertEqual(rec["session"], "beta")
+
+    def test_fixed_rules_are_reread_despite_an_unmoved_mtime(self):
+        """The failure side of the same coin: a session recreated with usable rules must
+        not keep answering with its predecessor's parse error."""
+        d = self.registry_dir({"alpha": 8090})
+        (d / "alpha" / "rules.txt").write_text("no such rule !!!")
+        self.sessions_mode(proxy_addon.SessionRegistry(str(d)))
+        self.assertDenied(self.request_npm(), reason="rules parse error")
+        self.audit.lines.clear()
+        self.replace_session(d, "alpha", "alpha", RULES)
+        self.assertAllowed(self.request_npm(), host="registry.npmjs.org")
+
+    def test_two_sessions_claiming_one_port_fail_closed(self):
+        """The CLI's port claims should make this state unreachable, but the registry must
+        not guess: whichever session it picked, the other's guest would be policed by it."""
+        d = self.registry_dir({"alpha": 8090, "beta": 8090})
+        self.sessions_mode(proxy_addon.SessionRegistry(str(d)))
+        self.assertDenied(self.request_npm(), reason="two sessions")
+
+    def test_staging_directories_are_not_sessions(self):
+        """The CLI stages under a dot prefix precisely so a half-written session is never
+        read; a complete-looking one must be ignored all the same."""
+        d = self.registry_dir({"alpha": 8090})
+        staged = d / ".tmp-beta"
+        staged.mkdir()
+        (staged / "meta.json").write_text(json.dumps({"port": 8091}))
+        (staged / "rules.txt").write_text(RULES)
+        self.sessions_mode(proxy_addon.SessionRegistry(str(d)))
+        self.assertDenied(self.request_npm(listen_port=8091), reason="no session for port")
+
+    def test_an_unreadable_registry_denies_but_keeps_secrets(self):
+        """A scan that fails shows nothing about which sessions are live: resolving fails
+        closed (recoverable on the next request), but pruning on it would wipe live
+        sessions' credentials, which arrive once, at provision (not recoverable)."""
+        d = self.registry_dir({"alpha": 8090})
+        self.sessions_mode(proxy_addon.SessionRegistry(str(d)))
+        self.assertTrue(self.set_secret("alpha")["ok"])
+        shutil.rmtree(d)
+        self.assertDenied(self.request_npm(), reason="no session for port")
+        self.assertIsNotNone(proxy_addon.SECRETS.get("alpha", "anthropic"))
+
+
+# --- secrets are scoped by session --------------------------------------------
+class SessionSecrets(RegistryCase):
+    """The store is keyed by the session the listener port resolves to, so a later session
+    naming inject_auth=<name> no longer inherits a key an earlier one pushed. The
+    process-global EGRESS_SECRET_* env — still set module-wide here — serves only the
+    session-less standalone scope, never a named session."""
 
     def test_a_session_cannot_spend_anothers_secret(self):
         d = self.registry_dir({"alpha": 8090, "beta": 8091})
@@ -667,7 +770,6 @@ class SessionSecrets(AddonCase):
         self.assertTrue(self.set_secret("alpha")["ok"])
         self.assertIsNotNone(proxy_addon.SECRETS.get("alpha", "anthropic"))
         shutil.rmtree(d / "alpha")
-        registry._dir_mtime = None                     # the mtime tick is not under test
         self.assertFalse(registry.has_session("alpha"))
         self.assertIsNone(proxy_addon.SECRETS.get("alpha", "anthropic"))
 

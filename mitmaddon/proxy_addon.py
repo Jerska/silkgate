@@ -174,31 +174,37 @@ class SessionRegistry:
     """Resolve a listener port to (session name, RuleSet) from EGRESS_SESSIONS_DIR.
 
     Layout: <dir>/<name>/meta.json (carries "port") and <dir>/<name>/rules.txt (the composed
-    ruleset snapshot). The proxy is long-lived and looks up per request, so both layers are
-    cached and re-read only when an mtime moves: the sessions-dir mtime for add/remove, each
-    session's rules.txt mtime for content changes. Any ambiguity fails closed (raises).
+    ruleset snapshot). Both layers are re-read from disk on every resolve: sessions appear by
+    rename out of a staging directory, so their files keep whatever mtimes staging gave them,
+    and a name-and-port recycle can land inside one filesystem timestamp tick — no timestamp
+    can tell a session from the one it replaced, so none is consulted. A scan is a listdir
+    plus a small JSON read per session (tens of µs, against a proxied request's milliseconds);
+    only the rule parse is worth avoiding (~0.2ms for a composed profile, pure Python under
+    the GIL of the one proxy every session shares), and its cache is keyed on the rule text
+    itself: byte-identical text is byte-identical policy, so the key cannot serve one
+    session's rules to another. Any ambiguity fails closed (raises).
     """
 
     def __init__(self, sessions_dir):
         self._dir = sessions_dir
-        self._dir_mtime = None
-        self._ports = {}                         # port -> name
-        self._rules = {}                         # name -> (rules_mtime, RuleSet|None, reason|None)
+        self._rules = {}                         # name -> (rules bytes, RuleSet|None, reason|None)
 
-    def _refresh_ports(self):
-        # Re-scan meta.json only when the sessions dir mtime changes (session add/remove).
-        try:
-            mtime = os.stat(self._dir).st_mtime
-        except OSError:
-            self._ports, self._dir_mtime = {}, None
-            return
-        if mtime == self._dir_mtime:
-            return
-        ports = {}
+    def _scan(self):
+        """(port -> name, live names), read fresh; empty when the dir is unreadable.
+
+        A successful scan is also the moment per-session state is dropped: a session it no
+        longer shows is down for good, and the pool recycles both its name and its port — so
+        its secrets and cached rules go with it, or the next session called the same thing
+        starts life holding the dead one's credentials. A failed scan proves nothing about
+        which sessions are live and prunes nothing: denying every port until the directory
+        is readable again is recoverable, an emptied secret store is not — secrets arrive
+        once, at provision.
+        """
         try:
             names = os.listdir(self._dir)
         except OSError:
-            names = []
+            return {}, frozenset()
+        ports, live = {}, set()
         for name in names:
             if name.startswith("."):             # CLI staging dirs are not sessions
                 continue
@@ -207,55 +213,50 @@ class SessionRegistry:
                     port = int(json.load(fh)["port"])
             except (OSError, ValueError, KeyError, TypeError):
                 continue
-            ports[port] = name
-        self._ports, self._dir_mtime = ports, mtime
-        # A session that a successful scan no longer shows is down for good, and the pool
-        # recycles both its name and its port — so its secrets go with it, or the next
-        # session called the same thing starts life holding the dead one's credentials.
-        SECRETS.prune(set(ports.values()))
+            live.add(name)
+            # A port two sessions claim is marked ambiguous, not given to whichever name
+            # listdir yielded last: the loser's guest would run under the winner's ruleset.
+            ports[port] = name if port not in ports else None
+        SECRETS.prune(live)
+        for stale in [n for n in self._rules if n not in live]:
+            del self._rules[stale]
+        return ports, live
 
     def _ruleset(self, name):
-        # Parse (and cache) a session's rules.txt; invalidate on its own mtime.
+        # Parse a session's rules.txt, re-reading the bytes every time: they are the cache
+        # key, so a recreated session is told apart from its predecessor by the only thing
+        # that matters here — what the rules say. A failure to decode or parse is cached
+        # under the same key, so a session recreated with usable rules is picked up at once.
         path = os.path.join(self._dir, name, "rules.txt")
         try:
-            mtime = os.stat(path).st_mtime
+            with open(path, "rb") as fh:
+                data = fh.read()
         except OSError:
             raise SessionError("no session for port")     # snapshot vanished under us
         cached = self._rules.get(name)
-        if cached and cached[0] == mtime:
-            if cached[1] is None:
-                raise SessionError(cached[2])
-            return cached[1]
-        try:
-            with open(path) as fh:
-                ruleset = RuleSet.parse(fh.read())
-        except (OSError, ValueError) as e:                 # cache the failure by mtime too
-            reason = f"rules parse error: {e}"
-            self._rules[name] = (mtime, None, reason)
-            raise SessionError(reason)
-        self._rules[name] = (mtime, ruleset, None)
-        return ruleset
+        if cached is None or cached[0] != data:
+            try:                                 # UnicodeDecodeError is a ValueError
+                cached = (data, RuleSet.parse(data.decode()), None)
+            except ValueError as e:
+                cached = (data, None, f"rules parse error: {e}")
+            self._rules[name] = cached
+        if cached[1] is None:
+            raise SessionError(cached[2])
+        return cached[1]
 
     def resolve(self, port):
         """Return (name, RuleSet) for a listener port, or raise SessionError (fail closed)."""
-        self._refresh_ports()
-        name = self._ports.get(port)
+        ports, _ = self._scan()
+        name = ports.get(port)
         if name is None:
-            self._dir_mtime = None               # a miss may be a scan that raced a session's
-            self._refresh_ports()                # appearance — rescan once before denying
-            name = self._ports.get(port)
-        if name is None:
-            raise SessionError("no session for port")
+            raise SessionError("two sessions claim this port" if port in ports
+                               else "no session for port")
         return name, self._ruleset(name)
 
     def has_session(self, name):
-        """Whether `name` is a live session — the same rescan-once as resolve, because the
-        usual caller is a set_secret racing the session's first appearance."""
-        self._refresh_ports()
-        if name not in self._ports.values():
-            self._dir_mtime = None
-            self._refresh_ports()
-        return name in self._ports.values()
+        """Whether `name` is a live session — the scan is fresh, so a set_secret racing the
+        session's first appearance sees it as soon as the rename lands."""
+        return name in self._scan()[1]
 
 
 REGISTRY = (SessionRegistry(_SESSIONS_DIR) if _SESSIONS_DIR
