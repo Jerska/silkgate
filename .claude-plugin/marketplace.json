@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "silkgate",
+  "description": "Marketplace for the silkgate plugin — the plugin source is this repository itself, versioned by commit SHA.",
+  "owner": {
+    "name": "Matthieu Dumont"
+  },
+  "plugins": [
+    {
+      "name": "silkgate",
+      "source": "./",
+      "description": "Run a coding agent or untrusted code in a microVM whose only egress is a TLS-terminating, allowlisting proxy.",
+      "category": "security"
+    }
+  ]
+}

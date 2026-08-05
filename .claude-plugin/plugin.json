@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "silkgate",
+  "description": "Run a coding agent or untrusted code in a microVM whose only egress is a TLS-terminating, allowlisting proxy. Ships the sandboxed-agent skill plus the silkgate CLI, proxy addon, and profiles it drives.",
+  "author": {
+    "name": "Matthieu Dumont"
+  },
+  "license": "MIT",
+  "keywords": ["sandbox", "microvm", "egress", "proxy", "security"],
+  "skills": ["./.claude/skills/"]
+}
