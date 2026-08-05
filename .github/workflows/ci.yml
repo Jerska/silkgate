@@ -1,6 +1,10 @@
 # Everything here runs on a bare runner — no VM, no docker, no KVM — so a red is
 # reproducible on any machine with python3. The containment check itself needs a
 # microVM and lives in containment.yml.
+#
+# Actions are pinned to commit SHAs, tag in the trailing comment, for the same reason
+# msb, mitmproxy, node and python are pinned everywhere else in this repo: a mutable
+# tag is an unpinned dependency with write access to the workflow.
 name: tests
 
 on: [push, pull_request]
@@ -23,39 +27,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
 
-      # the cheapest gate first: a file that does not even parse fails here, in seconds
-      - name: syntax
-        run: |
-          python3 -m py_compile cli/silkgate
-          bash -n test/verify_guest.sh
-
-      - name: rule engine self-test
-        run: python3 mitmaddon/rule_engine.py
-
-      # exits non-zero if any of the documented engine fixes regresses. It is the only
-      # file under test/repro/ that renders a verdict — the rest are demonstrations, and
-      # build_injection.py exits non-zero by design — so nothing globs that directory.
-      - name: engine findings stay fixed
-        run: python3 test/repro/engine_claims.py
-
-      # discovery, not a list: a new test/test_*.py joins CI by existing. test_addon.py
-      # is the one file with a third-party import, so it runs in the addon jobs below,
-      # against a mitmproxy this job deliberately does not have. Every file runs even
-      # after one fails, so a red run names all of the broken suites at once.
-      - name: unit tests
-        run: |
-          rc=0
-          for t in test/test_*.py; do
-            case "$t" in */test_addon.py) continue ;; esac
-            echo "=== $t"
-            python3 "$t" || rc=1
-          done
-          exit $rc
+      # The whole host suite is one discovery run, the same command a human runs
+      # locally. Discovery, not a list: a new test/test_*.py joins CI by existing.
+      # test/test_scripts.py carries the checks that are not unittest files — the
+      # engine's in-module self-tests, the asserting test/repro/ scripts (a per-file
+      # decision, never a glob), and `bash -n` on the guest script — and a syntax error
+      # in cli/silkgate fails the four modules that load it. mitmproxy is deliberately
+      # absent here, so test_addon.py must appear in this log as
+      # `skipped 'mitmproxy is not installed …'`: a silent omission or an import error
+      # is a bug in the suite, and the addon jobs below run it for real. Every test
+      # runs even after one fails, so a red run names all of the broken files at once.
+      - name: host suite, addon tests skipping for want of mitmproxy
+        run: python3 -m unittest discover -s test -v
 
   # The addon reaches into mitmproxy internals — flow.request.host_header, the
   # http_connect hook, .stream semantics — so it is tested against the exact version the
@@ -64,8 +52,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
       - name: install the pinned mitmproxy
@@ -86,8 +74,8 @@ jobs:
     timeout-minutes: 10
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
       - name: install current mitmproxy

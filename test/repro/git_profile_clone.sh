@@ -14,7 +14,8 @@
 #      dumb-http 403 (the proxy strips ?service=git-receive-pack), which the guest can
 #      misread as silkgate policy — a known documentation gap, not a leak.
 #
-#     sh test/repro/git_profile_clone.sh
+#     sh test/repro/git_profile_clone.sh            # both checks; needs the host
+#     sh test/repro/git_profile_clone.sh --static   # check 1 only; python3 is enough
 set -u
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 
@@ -75,6 +76,10 @@ check("codeload.github.com GET allowed",
 print("static rule checks:", "ok" if not fails else f"{fails} FAILED")
 sys.exit(1 if fails else 0)
 EOF
+
+# `--static` is the rule checks alone: everything below needs msb, docker and the network,
+# which is what keeps the full script out of the host test suite.
+[ "${1:-}" = "--static" ] && exit 0
 
 # Live check — host only. Clone and fetch must succeed; the push attempt must fail
 # before it can transfer anything (its ref advertisement never reaches GitHub intact).

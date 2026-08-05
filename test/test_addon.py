@@ -29,6 +29,16 @@ import unittest
 from datetime import datetime, timedelta
 from typing import Optional
 
+# Under discovery (`python3 -m unittest discover -s test`) a missing mitmproxy is a recorded
+# skip — the loader turns a module-level SkipTest into a skipped module the summary counts —
+# never a silent omission and never an import error. Standalone, the raise still exits
+# non-zero with the reason on the last line. Only absence is converted: a mitmproxy that is
+# present but broken fails the real imports below, loudly, as it should.
+try:
+    import mitmproxy  # noqa: F401
+except ModuleNotFoundError:
+    raise unittest.SkipTest("mitmproxy is not installed — the addon enforcement tests need it")
+
 SENTINEL_VALUE = "SENTINEL-NOT-A-REAL-KEY"
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
