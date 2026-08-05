@@ -431,31 +431,48 @@ class TestEmptyAllowlist(CliCase):
 
 
 class TestVerifyScoring(CliCase):
-    """Finding 9: a run where five of seven checks SKIP is not containment."""
+    """Finding 9: a run where most checks SKIP is not containment.
 
-    ALL = frozenset(range(1, 8))
+    The two sets come from the module rather than being spelled out again, so adding a check
+    to the guest script cannot leave these assertions describing a contract that moved.
+    """
+
+    ALL = frozenset(sg._VERIFY_CHECKS)
+    FREE = frozenset(sg._VERIFY_TOOL_FREE)
+    NEEDS_TOOLS = ALL - FREE
 
     def test_parse_checks(self):
-        self.assertEqual(sg._parse_checks("CHECKS: ran=1,2,3,4,5,6,7 skipped="),
+        ran = ",".join(str(i) for i in sorted(self.ALL))
+        self.assertEqual(sg._parse_checks(f"CHECKS: ran={ran} skipped="),
                          (set(self.ALL), set()))
         self.assertEqual(sg._parse_checks("[12:00:00.000] CHECKS: ran=3,7 skipped=1,2,4,5,6"),
                          ({3, 7}, {1, 2, 4, 5, 6}))
         self.assertEqual(sg._parse_checks("CHECKS: ran= skipped="), (set(), set()))
 
-    def test_full_demands_all_seven(self):
-        self.assertIsNone(sg._verify_shortfall(7, 0, set(self.ALL), set(), full=True))
+    def test_full_demands_every_check(self):
+        self.assertIsNone(
+            sg._verify_shortfall(len(self.ALL), 0, set(self.ALL), set(), full=True))
         self.assertIn("never ran",
-                      sg._verify_shortfall(2, 0, {3, 7}, {1, 2, 4, 5, 6}, full=True))
-        self.assertIn("6", sg._verify_shortfall(6, 0, self.ALL - {6}, {6}, full=True))
+                      sg._verify_shortfall(len(self.FREE), 0, set(self.FREE),
+                                           set(self.NEEDS_TOOLS), full=True))
+        one = max(self.ALL)
+        self.assertIn(str(one), sg._verify_shortfall(len(self.ALL) - 1, 0,
+                                                    self.ALL - {one}, {one}, full=True))
 
-    def test_quick_form_demands_the_tool_free_pair(self):
-        self.assertIsNone(sg._verify_shortfall(2, 0, {3, 7}, {1, 2, 4, 5, 6}, full=False))
+    def test_quick_form_demands_the_tool_free_checks(self):
+        self.assertIsNone(sg._verify_shortfall(len(self.FREE), 0, set(self.FREE),
+                                               set(self.NEEDS_TOOLS), full=False))
         self.assertIn("never ran",
-                      sg._verify_shortfall(5, 0, {1, 2, 4, 5, 6}, {3, 7}, full=False))
+                      sg._verify_shortfall(len(self.NEEDS_TOOLS), 0, set(self.NEEDS_TOOLS),
+                                           set(self.FREE), full=False))
 
     def test_a_failure_is_still_a_failure(self):
-        self.assertIn("FAILED", sg._verify_shortfall(6, 1, set(self.ALL), set(), full=True))
-        self.assertIn("disagrees", sg._verify_shortfall(3, 0, {3, 7}, set(), full=False))
+        self.assertIn("FAILED",
+                      sg._verify_shortfall(len(self.ALL) - 1, 1, set(self.ALL), set(),
+                                           full=True))
+        self.assertIn("disagrees",
+                      sg._verify_shortfall(len(self.FREE) + 1, 0, set(self.FREE), set(),
+                                           full=False))
 
     def test_verify_guest_script_reports_the_ids_the_cli_expects(self):
         script = (REPO / "test" / "verify_guest.sh").read_text()
