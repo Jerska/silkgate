@@ -72,12 +72,19 @@ from rule_engine import RuleSet
 
 
 def die(msg, code=1):
-    print(f"silkgate: {msg}", file=sys.stderr)
+    say(msg)
     sys.exit(code)
 
 
 def say(msg):
-    print(f"silkgate: {msg}", file=sys.stderr)
+    # RS opens every line silkgate speaks as itself, because it is the one byte relayed
+    # guest output cannot carry: _relay spends a leading one on routing and _plain strips
+    # the rest, so a `silkgate:` line without it is a guest's imitation. Terminals draw
+    # nothing for RS, so to a human the style stays bare `silkgate: …`; a reader that
+    # needs attribution checks the byte. (Under -t on a real terminal the guest writes to
+    # the screen directly and no mark can hold — see run_guest.)
+    mark = _ERR_TAG.decode()
+    print(mark + f"silkgate: {msg}".replace("\n", "\n" + mark), file=sys.stderr)
 
 
 def which(binary, hint):
@@ -1274,15 +1281,25 @@ def _plain(line):
     return _ANSI.sub(b"", line.rstrip(b"\r"))
 
 
-_ERR_TAG = b"\x1e"          # RS: not something line-oriented guest output produces on its own
+_ERR_TAG = b"\x1e"          # RS: a stderr line, and the mark on silkgate's own voice (say)
+_OUT_TAG = b"\x1f"          # US: a stdout line
 
 # msb forwards output as it arrives only when its own stdout is a terminal, so a live run
 # needs a PTY — but the *command* must not be the one holding it, or it would switch to
 # interactive behavior (colors, cursor control, a reset burst on exit) and its two streams
 # would merge into the terminal. So give the command plain pipes and relay: two FIFOs carry
-# its streams to loops that tag stderr and write into the PTY the shell holds. The shell
-# waits for both loops, so no trailing line is lost to the race with the command's exit, and
-# $? stays the command's own. POSIX sh + mkfifo; stdin is /dev/null, as for any captured run.
+# its streams to loops that tag every line — RS for stderr, US for stdout — and write into
+# the PTY the shell holds. Both loops tag, because the leading byte is what picks the
+# stream and the command writes into those FIFOs: forwarded bare, a stdout line the
+# command opens with RS would read as the wrapper's stderr tag. Tagged, the command's own
+# bytes can only land after column zero, where _plain strips them — its output stays data
+# on its own stream, never routing, and never the RS that marks silkgate's voice. That
+# last property is the one the host can hold alone: a guest that bypasses the wrapper (a
+# root write to sh's fd, an --image whose own /bin/sh ignores this script) can still put
+# a bare tag at column zero and pick a stream, but _plain keeps the mark out of whatever
+# it says there. The shell waits for both loops, so no trailing line is lost to the race
+# with the command's exit, and $? stays the command's own. POSIX sh + mkfifo; stdin is
+# /dev/null, as for any captured run.
 # SILKGATE_CONTEXT carries the sandbox context itself, not a path to it, so a prompt can be
 # composed inline: claude -p "$SILKGATE_CONTEXT
 #
@@ -1293,7 +1310,7 @@ _EXPORT_CONTEXT = ('[ -f %s ] && SILKGATE_CONTEXT=$(cat %s) && export SILKGATE_C
 
 _RELAY_SH = (_EXPORT_CONTEXT
              + 'd=$(mktemp -d); mkfifo "$d/o" "$d/e"; '
-             'while IFS= read -r l || [ -n "$l" ]; do printf "%s\\n" "$l"; done <"$d/o" & po=$!; '
+             f'while IFS= read -r l || [ -n "$l" ]; do printf "\\{ord(_OUT_TAG):03o}%s\\n" "$l"; done <"$d/o" & po=$!; '
              f'while IFS= read -r l || [ -n "$l" ]; do printf "\\{ord(_ERR_TAG):03o}%s\\n" "$l"; done <"$d/e" & pe=$!; '
              '"$@" </dev/null >"$d/o" 2>"$d/e"; rc=$?; wait $po $pe; rm -rf "$d"; exit $rc')
 
@@ -1303,7 +1320,10 @@ def run_guest(build_argv, cmd, *, tty):
 
     Default (`--no-tty`): the command runs non-interactively with pipes for stdout/stderr,
     and its output still arrives live, split across our own two streams — see _RELAY_SH.
-    With `-t` the command gets a real terminal instead, for a TUI.
+    With `-t` the command gets a real terminal instead, for a TUI — and with the terminal
+    the screen: nothing sits between it and the reader, so it can draw anything there,
+    including a line styled like say()'s. The voice mark only means something where the
+    guest's bytes pass through this process.
     """
     if tty:
         # A terminal run gets no relay, so the context export needs its own tiny shell.
@@ -1320,7 +1340,8 @@ def _pty_relay(argv, *, demux):
 
     `demux` splits the tagged lines back out (and drops terminal control bytes, insurance
     against a program that colors regardless of not being on a terminal); without it the
-    bytes pass through untouched, which a TUI driven from a pipe needs.
+    bytes pass through for a TUI driven from a pipe — untouched but for RS, which no
+    terminal draws and say()'s mark relies on no guest getting into a capture.
     """
     ptm, pts = os.openpty()
     try:
@@ -1340,7 +1361,7 @@ def _pty_relay(argv, *, demux):
             if not chunk:
                 break
             if not demux:
-                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.write(chunk.replace(_ERR_TAG, b""))
                 sys.stdout.buffer.flush()
                 continue
             buf += chunk
@@ -1355,10 +1376,15 @@ def _pty_relay(argv, *, demux):
 
 
 def _relay(line, *, newline):
-    """Write one relayed line to our stdout, or to stderr if the guest tagged it."""
-    tagged = line.startswith(_ERR_TAG)
-    stream = sys.stderr.buffer if tagged else sys.stdout.buffer
-    text = _plain(line[len(_ERR_TAG):] if tagged else line)
+    """Write one relayed line to our stdout, or to stderr if the wrapper tagged it so.
+
+    Only the leading byte routes; RS or US anywhere else is guest content and _plain
+    drops it. Untagged lines — msb's own noise, a wrapper that died before its loops
+    started — go to stdout, the stream that carries no claim of being silkgate's.
+    """
+    tag = line[:1]
+    stream = sys.stderr.buffer if tag == _ERR_TAG else sys.stdout.buffer
+    text = _plain(line[1:] if tag in (_ERR_TAG, _OUT_TAG) else line)
     stream.write(text + b"\n" if newline else text)
     stream.flush()
 
