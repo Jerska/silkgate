@@ -16,6 +16,7 @@ Design docs: [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) · [doc/THREAT-MODEL.md]
 ## Quickstart
 
 Prereqs: `pip install mitmproxy`, docker, and msb (see [Installing microsandbox](#installing-microsandbox)).
+`./cli/silkgate doctor` names whichever of the three are missing, and how to install each.
 
 ```sh
 ./cli/silkgate profiles                    # what capabilities are available

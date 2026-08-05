@@ -7,6 +7,7 @@ many background guests — `up`/`exec`/`attach`/`down`, one guest per session, o
 dedicated proxy port each. Host state lives under ~/.silkgate. See ../README.md.
 
     silkgate profiles              list the profiles in profiles/
+    silkgate doctor                report every missing tool and its install command
     silkgate build --with X        build the image a profile list describes, into msb
     silkgate verify [--full]       Tier-1 containment check (test/verify_guest.sh)
     silkgate proxy --with X        run one ruleset on one port, audit on stdout

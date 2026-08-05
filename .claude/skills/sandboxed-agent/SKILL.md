@@ -87,14 +87,14 @@ also correct.
 
 ## Sessions: the exception — a later turn needs the same VM
 
-A session keeps the VM warm between commands, and that matters in exactly two cases: a
-multi-turn conversation, where a later `--resume` must find the same `/root/.claude` (`run`
-destroys the VM, and that directory with it), or an interactive `attach`. Neither applies to
-a batch of one-shot tasks — parallel agents have been run as sessions before, and none of
-them used `--resume` or `silkgate logs`; the machinery returned nothing and cost a `down`
-per sandbox. The session that did earn itself was a reconciliation, where a finished agent
-could be asked a follow-up question. If you cannot name the follow-up, use `run`. When you
-can:
+A session keeps the VM warm between commands, and that matters in three cases: a multi-turn
+conversation, where a later `--resume` must find the same `/root/.claude` (`run` destroys the
+VM, and that directory with it); an interactive `attach`; or **a long batch on a machine that
+might sleep**. Neither of the first two applies to a batch of one-shot tasks — parallel agents
+have been run as sessions before, and none of them used `--resume` or `silkgate logs`; the
+machinery returned nothing and cost a `down` per sandbox. The session that did earn itself was
+a reconciliation, where a finished agent could be asked a follow-up question. If you cannot
+name the follow-up, use `run`. When you can:
 
 ```sh
 ./cli/silkgate up \
@@ -181,6 +181,14 @@ reported as requests instead of retried in a loop.
   `git fetch <dir> branch:branch` copies the objects without executing anything from them.
 - **Guest rewrites can drop the exec bit** — `chmod +x` after an agent edits a script.
 - **Nothing bounds a runaway agent** — silkgate has no timeout or cost ceiling. Wrap the
-  invocation in `timeout 600 …` if that matters to you.
+  invocation in `timeout 600 …` if that matters to you; it tears down cleanly, but its clock
+  includes the image build, so a cold profile set spends part of the budget on docker.
+- **Host sleep kills every guest at once.** Suspending the machine freezes the VMs and the
+  proxy together; on wake every upstream connection is dead, so each guest's API stream idles
+  out. Interactively that is recoverable — you resume and it retries. Under `-p` it is not:
+  the process exits and everything since its last file write is gone. Three parallel agents
+  were lost that way mid-batch, about seventeen turns each, having written nothing. For a long
+  unattended batch, prefer a machine that does not sleep, or a session whose conversation can
+  be resumed rather than a `run` whose task must be restarted.
 - **A custom `--image` needs `sh` and `mkfifo`** for the live-output relay. An image too minimal
   for those can still run under `-t`, which needs neither — at the cost of merged streams.
