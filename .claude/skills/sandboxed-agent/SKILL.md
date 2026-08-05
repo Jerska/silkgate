@@ -40,7 +40,12 @@ hang; later runs with the same profiles reuse it and start in under a second.
   the injected credential, which is spent upstream, not written.
 - `silkgate-claude` (below) exists in the guest only when `--with claude` is among the profiles.
 
-## One-shot: a single task, then gone
+## `run`: the default — a single task, then gone
+
+`run` creates a microVM, runs one command, and tears everything down. Use it unless you can
+name the session trigger below: it is one command where a session is three, there is nothing
+to `down` afterwards, and it cannot leave a session or a sandbox behind if the caller dies
+mid-task. Boot is ~0.3s, so the fresh VM per command costs almost nothing.
 
 ```sh
 EGRESS_SECRET_ANTHROPIC="x-api-key: $ANTHROPIC_SANDBOX_API_KEY" \
@@ -80,10 +85,16 @@ also correct.
 - **The audit log** path is printed at startup, and the files are `~/.silkgate/logs/proxy-*.log`
   if you lose it. It is shared across sessions; each line names the session that produced it.
 
-## Sessions: multi-turn, warm VM
+## Sessions: the exception — a later turn needs the same VM
 
-`run` creates and destroys a VM per command. Boot is ~0.3s so that stays cheap, but `--resume`
-cannot work across runs — the VM, and `/root/.claude` with it, is gone. A session keeps it warm:
+A session keeps the VM warm between commands, and that matters in exactly two cases: a
+multi-turn conversation, where a later `--resume` must find the same `/root/.claude` (`run`
+destroys the VM, and that directory with it), or an interactive `attach`. Neither applies to
+a batch of one-shot tasks — parallel agents have been run as sessions before, and none of
+them used `--resume` or `silkgate logs`; the machinery returned nothing and cost a `down`
+per sandbox. The session that did earn itself was a reconciliation, where a finished agent
+could be asked a follow-up question. If you cannot name the follow-up, use `run`. When you
+can:
 
 ```sh
 ./cli/silkgate up \
