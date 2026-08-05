@@ -303,15 +303,93 @@ def _modes(port):
     return args
 
 
-def _probe_addr(port):
-    """Where readiness checks dial: the first bind address, so probe and bind cannot
+def _probe_addrs(port):
+    """Where readiness checks dial `port`: every bind address, so probe and bind cannot
     drift apart — except a wildcard bind, which is dialed via loopback."""
-    host = (PROXY_BINDS[0] if PROXY_BINDS else "127.0.0.1")
-    if host == "0.0.0.0":
-        host = "127.0.0.1"
-    elif host == "::":
-        host = "::1"
-    return (host, port)
+    addrs = []
+    for host in (PROXY_BINDS or ("127.0.0.1",)):
+        if host == "0.0.0.0":
+            host = "127.0.0.1"
+        elif host == "::":
+            host = "::1"
+        addrs.append((host, port))
+    return addrs
+
+
+def _probe_addr(port):
+    """The first probe address — for a check that needs one dialable place, not all."""
+    return _probe_addrs(port)[0]
+
+
+def _port_free(port):
+    """Whether `port` can still be bound on every bind address — asked by binding, the
+    exact claim mitmdump is about to make. This runs before a proxy is spawned because
+    the readiness probe cannot ask it: a connect says only that someone answers, and a
+    proxy already squatting the port answers in the milliseconds before a fresh mitmdump
+    gets anywhere near its own bind (SO_REUSEADDR so a closed connection's TIME_WAIT
+    does not read as a squatter)."""
+    for host in PROXY_BINDS:
+        try:
+            with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def _port_in_use_error(port):
+    """Why `port` cannot be taken, naming the holder when identity can be read for it.
+    The shared proxy is that one holder — whoever answers its control socket is named
+    by the kernel — and the usual one: orphaned, it keeps all sixteen pool ports. The
+    name is worth more than any downstream symptom; unnamed, this collision surfaced
+    as session-mode 403s inside a verify guest, three layers from the cause."""
+    ident = _proxy_ident()
+    pool = (read_proxy() or {}).get("ports") or []
+    if ident is not None and (not pool or port in pool):
+        return (f"port {port} is already in use by pid {ident or 'unknown'} "
+                f"(the shared proxy) — silkgate ls")
+    return (f"port {port} is already in use — "
+            f"lsof -nP -iTCP:{port} -sTCP:LISTEN names the holder")
+
+
+# How long a spawned mitmdump gets to answer on every advertised address.
+PROXY_READY_TIMEOUT = 15
+
+# What a lost bind looks like in mitmdump's log: EADDRINUSE's strerror, one casing on
+# Linux, another on macOS, matched case-folded.
+_BIND_FAILURE = b"address already in use"
+
+
+def _wait_proxy_ready(proc, ports, log_path):
+    """Block until the mitmdump just spawned answers on every advertised address, and
+    die — stopping it — when it cannot. Both of its output streams point at the log
+    file, so its bind errors go nowhere else: the loop reads the log and fails the
+    moment the EADDRINUSE appears, with the log's tail, rather than as a bare timeout
+    fifteen seconds later; a child that exits instead is caught by poll() the same
+    way. The ports are only probed, never treated as identity — the caller checked
+    them free before the spawn, which is what lets a listener stand for our own."""
+    deadline = time.monotonic() + PROXY_READY_TIMEOUT
+    addr = _probe_addr(ports[0])
+    while True:
+        if proc.poll() is not None:
+            die(f"proxy exited at startup — {log_path}:\n{tail(log_path)}")
+        if _BIND_FAILURE in log_path.read_bytes().lower():
+            stop(proc)
+            die(f"proxy failed to bind — {log_path}:\n{tail(log_path)}")
+        try:
+            for port in ports:
+                for addr in _probe_addrs(port):
+                    with socket.create_connection(addr, timeout=0.5):
+                        pass
+            return
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            stop(proc)
+            die(f"proxy did not answer at {addr[0]}:{addr[1]} within "
+                f"{PROXY_READY_TIMEOUT}s — {log_path}:\n{tail(log_path)}")
+        time.sleep(0.2)
 
 
 # Retention for ~/.silkgate/logs. Every proxy start writes a fresh proxy-<stamp>.log —
@@ -366,8 +444,16 @@ def _prune_logs():
 
 
 def start_proxy(rules_text, port):
-    """Start a single-ruleset mitmdump in the background; return (proc, audit log path)."""
+    """Start a single-ruleset mitmdump in the background; return (proc, audit log path).
+
+    The port is checked free before the spawn and the child watched after it — see
+    _port_free and _wait_proxy_ready — because a bare connect cannot tell this proxy
+    from a squatter: an orphaned shared proxy on the port once answered the probe here
+    while the mitmdump it vouched for died unread in its log, and the verify guest ran
+    against the wrong proxy's ruleset."""
     mitmdump = which("mitmdump", "pip install mitmproxy")
+    if not _port_free(port):
+        die(_port_in_use_error(port))
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
@@ -381,17 +467,8 @@ def start_proxy(rules_text, port):
     argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"] + _modes(port)
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT)
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            die(f"proxy exited at startup — {log_path}:\n{tail(log_path)}")
-        try:
-            with socket.create_connection(_probe_addr(port), timeout=0.5):
-                return proc, log_path
-        except OSError:
-            time.sleep(0.2)
-    stop(proc)
-    die(f"proxy did not open port {port} within 15s — see {log_path}")
+    _wait_proxy_ready(proc, [port], log_path)
+    return proc, log_path
 
 
 def stop(proc):
@@ -886,13 +963,22 @@ def _clear_proxy_files():
 
 
 def start_shared_proxy(base_port):
-    """Start the detached multi-session mitmdump; write proxy.json; return its meta."""
+    """Start the detached multi-session mitmdump; write proxy.json; return its meta.
+
+    Every pool port is checked free before the spawn — mitmdump binds them all or
+    exits — and readiness then means every one of them answering, with the child and
+    its log watched throughout (see start_proxy for why a bare connect proves the
+    wrong thing). proxy.json appears only once that holds, so no reader ever meets
+    the record of a proxy that never came up."""
     mitmdump = which("mitmdump", "pip install mitmproxy")
+    ports = list(range(base_port, base_port + POOL_SIZE))
+    for p in ports:
+        if not _port_free(p):
+            die(_port_in_use_error(p))
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
     log_path = LOG_DIR / f"proxy-{datetime.now():%Y%m%d-%H%M%S}.log"
-    ports = list(range(base_port, base_port + POOL_SIZE))
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
     argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"]
@@ -905,21 +991,7 @@ def start_shared_proxy(base_port):
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            die(f"proxy exited at startup — {log_path}:\n{tail(log_path)}")
-        try:
-            with socket.create_connection(_probe_addr(base_port), timeout=0.5):
-                break
-        except OSError:
-            time.sleep(0.2)
-    else:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        die(f"proxy did not open port {base_port} within 15s — see {log_path}")
+    _wait_proxy_ready(proc, ports, log_path)
     meta = {"pid": proc.pid, "base_port": base_port, "ports": ports,
             "log": str(log_path), "sock": str(PROXY_SOCK), "started": now_iso()}
     _write_json(PROXY_JSON, meta)
@@ -947,8 +1019,8 @@ def _ensure_proxy_locked(base_port):
     if meta:                                   # record of a proxy that no longer answers
         _clear_proxy_files()
     meta = start_shared_proxy(base_port)
-    _wait_control_sock(10)                     # base-port readiness ≠ socket readiness
-    return meta
+    _wait_control_sock(10, meta["pid"])        # port readiness ≠ socket readiness, and
+    return meta                                # the socket must answer as that very pid
 
 
 def stop_proxy(meta):
@@ -1104,20 +1176,19 @@ def _sock_call(req):
     return resp
 
 
-def _wait_control_sock(timeout):
+def _wait_control_sock(timeout, pid=None):
+    """Wait for the control socket to answer — and, given `pid`, to answer AS that
+    process: the kernel names the peer (_proxy_ident), so ports coming up says nothing
+    about who owns the socket. 0 — answered, but the kernel could not name it — is
+    accepted, as everywhere identity is read from the kernel."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                s.settimeout(0.5)
-                s.connect(str(PROXY_SOCK))
-                f = s.makefile("rw")
-                f.write('{"op": "ping"}\n')
-                f.flush()
-                if f.readline():
-                    return
-        except OSError:
-            pass
+        ident = _proxy_ident()
+        if ident is not None:
+            if pid is None or ident in (0, pid):
+                return
+            die(f"control socket {PROXY_SOCK} is answered by pid {ident}, not the "
+                f"proxy just started (pid {pid})")
         time.sleep(0.2)
     die("shared proxy control socket did not become ready")
 
@@ -1456,7 +1527,9 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
     the addon rescans on the sessions-dir mtime and must never see (and cache) a half-written
     session. Boot the guest after. On failure, undo only what is ours: the staging dir, the
     renamed dir if the rename was ours (never a racing winner's), the port claim, and — once
-    create ran — whatever sandbox msb half-registered."""
+    create ran — whatever sandbox msb half-registered; then the shared proxy, when the
+    failure leaves nothing needing it (_maybe_stop_proxy defers to other sessions and
+    live claims)."""
     sdir = session_dir(name)
     if sdir.exists():
         die(f"session already exists: {sdir}")
@@ -1489,7 +1562,8 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
         if owned:
             shutil.rmtree(sdir, ignore_errors=True)
         _release_port(name, port)
-        raise
+        _maybe_stop_proxy()                              # a failure that left the registry
+        raise                                            # empty leaves no proxy over it
 
 
 def _remove_sandbox(sandbox):
@@ -1515,7 +1589,13 @@ def _teardown_session(meta):
     order, because while a guest that can reach the port may still exist, the port must
     stay reserved, or the next session inherits a guest policed by the wrong ruleset. A
     sandbox that cannot be removed therefore keeps its session, port and all, and this
-    dies so no caller mistakes it for gone."""
+    dies so no caller mistakes it for gone.
+
+    Ends by stopping the shared proxy if the registry is now empty. Every path that
+    removes a session runs through here, so the proxy's lifetime follows the registry
+    itself rather than any caller's courtesy — the teardown that takes the last session
+    away stops it, even inside a command that found the proxy already running and never
+    considered it its own to stop."""
     name = meta.get("name")
     sandbox = meta.get("sandbox") or (sandbox_name(name) if name else None)
     if sandbox and not _remove_sandbox(sandbox):
@@ -1526,6 +1606,7 @@ def _teardown_session(meta):
         # rmtree is then what genuinely frees it.
         _release_port(name, meta.get("port"))
         shutil.rmtree(session_dir(name), ignore_errors=True)
+    _maybe_stop_proxy()
 
 
 def _maybe_stop_proxy():

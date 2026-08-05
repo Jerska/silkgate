@@ -18,7 +18,14 @@ What is covered:
   * `down <last>` racing an `up`: stop_proxy defers to claims; pick_port revives
   * _provision_session losing the name race without destroying the winner
   * _teardown_session keeping the session while the sandbox cannot be removed
-  * both proxy entry points binding each loopback family explicitly, with rawtcp off
+  * the proxy's lifetime following the session registry (#29): the teardown or
+    provision failure that leaves the registry empty stops the proxy, however many
+    teardowns race and whoever started it — while other sessions or in-flight claims
+    still keep it up
+  * proxy startup refusing a port something else already holds, naming the holder
+    (#30), and reading its own child's log for the bind failure a port probe cannot
+    see — a bare connect answers in milliseconds against a squatter, long before the
+    spawned mitmdump gets anywhere near its own bind
 """
 import importlib.util
 import json
@@ -139,6 +146,25 @@ while True:
     time.sleep(3600)
 """
 
+# Fake mitmdump that lost its bind race but stays up, the failure reported only on its
+# stdout/stderr — which start_proxy points at the log file. mitmproxy 12 exits instead,
+# but only after a startup's worth of imports; this is the worst case either way: the
+# port never answers and the log is the only witness. The message is the one a real
+# mitmdump 12.2.3 writes (observed), so the log scan is held to the real format.
+FAKE_MITMDUMP_BINDLESS_SRC = r"""
+import sys, time
+port = "?"
+for i, a in enumerate(sys.argv):
+    if a == "--mode" and i + 1 < len(sys.argv):
+        port = sys.argv[i + 1].rsplit(":", 1)[1]
+        break
+print(f"[Errno 98] HTTP(S) proxy failed to listen on 127.0.0.1:{port} with [Errno 98] "
+      f"error while attempting to bind on address ('127.0.0.1', {port}): "
+      f"[errno 98] address already in use", flush=True)
+while True:
+    time.sleep(3600)
+"""
+
 # Fake msb: logs every invocation; `rm`/`create` succeed per a JSON config file, and
 # `list` shows whatever sandboxes the config says exist.
 FAKE_MSB_SRC = r"""
@@ -236,6 +262,22 @@ def _race_worker(barrier, q, proxy, name):
         MOD._write_json(sdir / "meta.json",
                         {"name": name, "sandbox": "sg-" + name, "port": port})
         q.put((name, port))
+    except SystemExit as e:
+        q.put((name, f"die: {e}"))
+    except BaseException as e:
+        q.put((name, f"error: {e!r}"))
+
+
+def _teardown_worker(barrier, q, name, down_style):
+    """One concurrent session teardown. down_style=False is what `run`'s finally block
+    does for a proxy it did not start — _teardown_session and nothing else; True adds
+    the _maybe_stop_proxy that `down` follows up with."""
+    try:
+        barrier.wait(timeout=20)
+        MOD._teardown_session(MOD.read_meta(name))
+        if down_style:
+            MOD._maybe_stop_proxy()
+        q.put((name, "ok"))
     except SystemExit as e:
         q.put((name, f"die: {e}"))
     except BaseException as e:
@@ -344,8 +386,62 @@ class LifecycleTest(unittest.TestCase):
             pass
 
     @staticmethod
+    def _settle(proc, timeout=5):
+        """Give proc time to stop; it staying up is the caller's assertion, not an error."""
+        try:
+            proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            pass
+
+    @staticmethod
     def _flag_pairs(argv):
         return list(zip(argv, argv[1:]))
+
+    def install_mitmdump(self, src):
+        """Swap the fake mitmdump for a variant with a different failure mode."""
+        exe = Path(self._tmp.name) / "bin" / "mitmdump"
+        exe.write_text(f"#!{sys.executable}\n{src}")
+        exe.chmod(0o755)
+
+    def expect_die(self, fn, *args):
+        """Run fn expecting die(); return everything it said. If it succeeds instead —
+        the pre-fix behavior the port-collision tests demonstrate — kill whatever proxy
+        it started, then fail."""
+        msgs = []
+        with mock.patch.object(MOD, "say", msgs.append):
+            try:
+                result = fn(*args)
+            except SystemExit:
+                return "\n".join(str(m) for m in msgs)
+        if isinstance(result, tuple):                     # start_proxy's (proc, log)
+            self._kill(result[0])
+        elif isinstance(result, dict) and result.get("pid"):   # start_shared_proxy's meta
+            self._kill_pid(result["pid"])
+        self.fail(f"{getattr(fn, '__name__', fn)} did not die")
+
+    def squat(self, port, host="127.0.0.1"):
+        """A live foreign listener on `port` — what an orphaned proxy looks like."""
+        s = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, port))
+        s.listen(8)
+        self.addCleanup(s.close)
+        return s
+
+    def run_teardown_race(self, names, *, down_style):
+        """Fork one _teardown_worker per session name and wait for all of them."""
+        ctx = multiprocessing.get_context("fork")
+        barrier = ctx.Barrier(len(names))
+        q = ctx.Queue()
+        procs = [ctx.Process(target=_teardown_worker, args=(barrier, q, n, down_style))
+                 for n in names]
+        for p in procs:
+            p.start()
+        results = [q.get(timeout=30) for _ in names]
+        for p in procs:
+            p.join(10)
+        self.assertEqual([r for r in results if r[1] != "ok"], [],
+                         f"teardown workers failed: {results}")
 
     # -- pick_port: the port claim ----------------------------------------------
 
@@ -497,6 +593,7 @@ class LifecycleTest(unittest.TestCase):
         """§8: a failed `msb create` must release the port claim and remove whatever
         sandbox msb half-registered, or the next `up` with that name collides."""
         stub = self.start_stub_sock()
+        _autoreap(stub.pid)
         proxy = self.proxy_meta(pid=stub.pid)
         self.msb_cfg({"create_ok": False, "rm_ok": True})
         port = MOD.pick_port(proxy, "prov1")
@@ -569,6 +666,151 @@ class LifecycleTest(unittest.TestCase):
         MOD._teardown_session(MOD.read_meta("t3"))
         self.assertFalse(MOD.session_dir("t3").exists())
         self.assertFalse(self.claim_path(8090).exists(), "port claim outlived its session")
+
+    # -- the proxy's lifetime follows the registry (#29) ---------------------------
+
+    def test_teardown_of_last_session_stops_the_proxy(self):
+        """#29: a `run` that found the proxy already up never offers to stop it, so the
+        stop must belong to the teardown itself — reached by every session-removing
+        path — not to each command's courtesy."""
+        stub = self.start_stub_sock()
+        _autoreap(stub.pid)
+        self.proxy_meta(pid=stub.pid)
+        self.write_session("last", 8090)
+        self.write_claim(8090, "last", os.getpid())
+        MOD._teardown_session(MOD.read_meta("last"))
+        self._settle(stub)
+        self.assertIsNotNone(stub.poll(),
+                             "the proxy outlived its last session — the #29 orphan")
+        self.assertFalse(MOD.PROXY_JSON.exists())
+
+    def test_teardown_keeps_proxy_while_other_sessions_remain(self):
+        stub = self.start_stub_sock()
+        self.proxy_meta(pid=stub.pid)
+        self.write_session("going", 8090)
+        self.write_session("staying", 8091)
+        MOD._teardown_session(MOD.read_meta("going"))
+        self.assertIsNone(stub.poll(), "proxy stopped while a session still needs it")
+        self.assertTrue(MOD.PROXY_JSON.exists())
+
+    def test_teardown_keeps_proxy_under_inflight_claim(self):
+        """`down <last>` racing an `up`: the claim of a session being born must keep
+        the proxy up through the teardown-side stop, same as through stop_proxy."""
+        stub = self.start_stub_sock()
+        self.proxy_meta(pid=stub.pid)
+        self.write_session("going", 8090)
+        self.write_claim(8091, "starting", os.getpid())
+        MOD._teardown_session(MOD.read_meta("going"))
+        self.assertIsNone(stub.poll(), "proxy killed under a starting session")
+        self.assertTrue(MOD.PROXY_JSON.exists())
+
+    def test_concurrent_run_teardowns_leave_no_orphan(self):
+        """#29 as observed: four concurrent `run`s finish, `ls` says no sessions, the
+        proxy still holds every pool port. A run that did not start the proxy tears its
+        session down and nothing more, so the last teardown out must stop the proxy."""
+        stub = self.start_stub_sock()
+        _autoreap(stub.pid)
+        self.proxy_meta(pid=stub.pid)
+        names = [f"r{i}" for i in range(4)]
+        for i, name in enumerate(names):
+            self.write_session(name, 8090 + i)
+            self.write_claim(8090 + i, name, os.getpid())
+        self.run_teardown_race(names, down_style=False)
+        self.assertEqual(MOD.list_metas(), [])
+        self._settle(stub)
+        self.assertIsNotNone(stub.poll(),
+                             "no sessions remain yet the proxy is still up — the #29 orphan")
+        self.assertFalse(MOD.PROXY_JSON.exists())
+        self.assertEqual(MOD._live_claims(), [])
+
+    def test_concurrent_down_teardowns_stop_the_proxy(self):
+        """The shape #29's sketch suspected: racing `down`s each seeing another's meta
+        or claim and all deferring. Metas are removed in some total order and each
+        worker's stop-check runs after its own removal, so the last one out always sees
+        an empty registry — this passes against the pre-fix module too, which is the
+        evidence the sketch was not the mechanism."""
+        stub = self.start_stub_sock()
+        _autoreap(stub.pid)
+        self.proxy_meta(pid=stub.pid)
+        names = [f"d{i}" for i in range(4)]
+        for i, name in enumerate(names):
+            self.write_session(name, 8090 + i)
+            self.write_claim(8090 + i, name, os.getpid())
+        self.run_teardown_race(names, down_style=True)
+        self._settle(stub)
+        self.assertIsNotNone(stub.poll(), "racing downs all deferred; proxy orphaned")
+        self.assertFalse(MOD.PROXY_JSON.exists())
+
+    def test_provision_failure_stops_proxy_left_without_sessions(self):
+        """A first `up` whose provisioning fails must not leave the proxy it caused to
+        be started running over an empty registry."""
+        stub = self.start_stub_sock()
+        _autoreap(stub.pid)
+        proxy = self.proxy_meta(pid=stub.pid)
+        self.msb_cfg({"create_ok": False, "rm_ok": True})
+        port = MOD.pick_port(proxy, "solo")
+        ruleset = MOD.RuleSet.parse(RULE)
+        with self.assertRaises(SystemExit):
+            MOD._provision_session("solo", "img", port, RULE, ruleset,
+                                   [], None, [], {"profiles": [], "command": None})
+        self._settle(stub)
+        self.assertIsNotNone(stub.poll(),
+                             "proxy left running with no session and no claim")
+        self.assertFalse(MOD.PROXY_JSON.exists())
+
+    # -- readiness is identity, not liveness (#30) ---------------------------------
+
+    def test_start_proxy_refuses_port_already_in_use(self):
+        """#30 as observed: with an orphan on the port, start_proxy's probe answered in
+        milliseconds while its own mitmdump was still importing — it then failed its
+        bind into the log alone and the guest talked to the wrong proxy. The collision
+        must be refused before the spawn, and must say so."""
+        port = _free_pool_base(1)
+        self.squat(port)
+        msg = self.expect_die(MOD.start_proxy, RULE, port)
+        self.assertIn(f"port {port} is already in use", msg)
+        self.assertFalse(self.mitm_argv.exists(),
+                         "a mitmdump was spawned against a port something else holds")
+
+    def test_port_collision_names_the_shared_proxy(self):
+        """The error message is half the fix: when the squatter is the shared proxy —
+        the one listener whose identity the control socket can vouch for — the refusal
+        names its pid and points at `silkgate ls`, instead of leaving the next person
+        to trace a 403 back through a guest's apt output."""
+        stub = self.start_stub_sock()
+        base = _free_pool_base(1)
+        self.proxy_meta(pid=stub.pid, base=base)
+        self.squat(base)
+        msg = self.expect_die(MOD.start_proxy, RULE, base)
+        self.assertIn(f"pid {stub.pid}", msg)
+        self.assertIn("silkgate ls", msg)
+
+    def test_start_shared_proxy_refuses_squatted_pool_port(self):
+        """The whole pool is checked, not just the base port: mitmdump binds all
+        sixteen or exits, so a squatter anywhere in the pool dooms it."""
+        base = _free_pool_base(MOD.POOL_SIZE)
+        self.squat(base + 3)
+        msg = self.expect_die(MOD.start_shared_proxy, base)
+        self.assertIn(f"port {base + 3} is already in use", msg)
+        self.assertFalse(MOD.PROXY_JSON.exists())
+
+    def test_bind_failure_surfaces_from_the_log(self):
+        """A mitmdump that loses its bind reports it only inside the log file (stdout
+        and stderr both point there). The readiness loop must read it and fail fast,
+        naming the failure — not wait out the timeout, and never report ready."""
+        self.install_mitmdump(FAKE_MITMDUMP_BINDLESS_SRC)
+        port = _free_pool_base(1)
+        msg = self.expect_die(MOD.start_proxy, RULE, port)
+        self.assertIn("address already in use", msg,
+                      "the bind error stayed buried in the log file")
+
+    def test_wait_control_sock_verifies_the_owner(self):
+        """Given a pid, the control-socket wait accepts only that process answering:
+        ports coming up says nothing about who owns the socket."""
+        stub = self.start_stub_sock()
+        MOD._wait_control_sock(2, stub.pid)      # the stub answering as itself: ready
+        msg = self.expect_die(MOD._wait_control_sock, 2, stub.pid + 1)
+        self.assertIn(str(stub.pid), msg)
 
     # -- proxy entry points: bind address and rawtcp (§2, §3) ----------------------
 
