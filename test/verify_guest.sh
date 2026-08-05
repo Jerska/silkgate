@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Tier 1 verification — run as ROOT INSIDE the microsandbox guest (Debian + bash).
 #
-# Containment checks (3,7) use bash /dev/tcp built-ins, so they run on a BARE debian
-# image with no installed tools and no network. The proxy-path checks (1,2) need curl +
-# a trusted MITM CA; they SKIP if curl is absent (see README "full check").
+# Containment checks 3, 7, 9, 10 and the family check 11 use bash /dev/tcp and /dev/udp
+# built-ins plus coreutils, so they run on a BARE debian image with no installed tools
+# and no network. The proxy-path checks (1,2) need curl + a trusted MITM CA, 4-6 need
+# dig/ping/ip, 8 needs dig; each SKIPs when its tool is absent (see README "full check").
 #
-# Pass = only 1 & 2 succeed (when run); every blocked check fails to connect. A blocked
-# check concludes containment from a probe that did NOT connect, which says nothing unless
-# the probe works at all — so check 0 is a positive control for the tool-free mechanism
-# (the proxy port is the one thing Tier 1 allows), and 3/7 SKIP rather than PASS without it.
+# Pass = the proxy answers its own checks (1, 2, 11) and no blocked probe reaches
+# anything REAL — where "real" carries weight: port 53 always ANSWERS, from msb's own
+# stub, so on that port only an actual resolution, or a reply that unroutable TEST-NET
+# does not mirror, counts as egress. A blocked check that concludes containment from a
+# probe that did NOT connect says nothing unless the probe works at all — so check 0 is
+# a positive control for the tool-free TCP mechanism (the proxy port is the one thing
+# Tier 1 allows) and 3/7/10/11 SKIP rather than PASS without it; check 9 carries its own
+# UDP control, msb's port-53 stub, which answers even for TEST-NET destinations.
 # The last two lines are for the caller: which checks ran, and the pass/fail totals. A
 # SKIP is neither, and `silkgate verify` asserts the set it expected to run.
 
@@ -20,6 +25,24 @@ F(){ echo "[FAIL] $1. $2"; fail=$((fail+1)); ran="$ran,$1"; }
 S(){ echo "[SKIP] $1. $2"; skipped="$skipped,$1"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 tcp(){ timeout "$T" bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; }   # exit 0 = connected
+# udp_reply KIND HOST PORT — exit 0 = something answered within $T. UDP has no handshake,
+# so sending always "succeeds"; only a reply carries information, and read -t bounds the
+# only step that can block. The payloads are requests a real server answers: a DNS query
+# for example.com (ID 0x2a2a), an NTP v3 client packet, and a 1200-byte QUIC long header
+# in an unknown version, which RFC 9000 §6.1 obliges a QUIC server to meet with a
+# Version Negotiation packet. Every write on the socket is its own datagram, so the
+# pieces go through one full-block dd — split across two writes they arrive as fragments
+# no real server would answer, and the probe would read as containment on an open network.
+udp_reply(){
+  exec 3<>"/dev/udp/$2/$3" || return 1
+  case $1 in
+    dns)  printf '\052\052\001\000\000\001\000\000\000\000\000\000\007example\003com\000\000\001\000\001' ;;
+    ntp)  printf '\033'; head -c 47 /dev/zero ;;
+    quic) printf '\300\032\052\072\112\010AAAAAAAA\010BBBBBBBB'; head -c 1177 /dev/zero ;;
+  esac | dd iflag=fullblock bs=1200 count=1 >&3 2>/dev/null || return 1
+  IFS= read -r -t "$T" -N 1 first <&3
+  rc=$?; exec 3<&-; return $rc
+}
 
 echo "PROXY=$PROXY"
 
@@ -116,6 +139,109 @@ else
   ip route del default 2>/dev/null
   ip route add default dev eth0 2>/dev/null
   tcp 1.1.1.1 443 && F 7 "escaped after root route change" || P 7 "still blocked after root route change"
+fi
+
+# 8. TCP/53 — a general-purpose tunnel if it egresses, and the one blocked port that
+#    ANSWERS: msb's stub returns an identical REFUSED for every destination, TEST-NET
+#    included, so "a reply arrived" must never be read as "it egressed". The leak is a
+#    real resolution; a reply that resolves nothing passes only once 192.0.2.1 mirrors
+#    it, because nothing routes to TEST-NET — an answer "from" there is proof the
+#    responder is local.
+if have dig; then
+  out=$(dig +tcp +short +time=3 +tries=1 @1.1.1.1 example.com 2>/dev/null); rc=$?
+  if [ $rc -eq 0 ] && [ -n "$out" ]; then
+    F 8 "TCP/53 egressed: a real resolver answered example.com -> ${out%%$'\n'*}"
+  elif [ $rc -eq 0 ]; then
+    dig +tcp +time=3 +tries=1 @192.0.2.1 example.com >/dev/null 2>&1 \
+      && P 8 "TCP/53 answers but resolves nothing — msb's stub (TEST-NET 'replies' too)" \
+      || F 8 "TCP/53: 1.1.1.1 replied, TEST-NET stayed silent — reply not shown to be local"
+  elif [ $rc -eq 9 ]; then
+    P 8 "TCP/53 blocked (no reply from 1.1.1.1)"
+  else
+    F 8 "TCP/53: dig exit $rc is not containment evidence"
+  fi
+else
+  S 8 "TCP/53 (no dig)"
+fi
+
+# 9. UDP beyond 53 — QUIC on UDP/443 bypasses an HTTP proxy entirely (THREAT-MODEL names
+#    it), so default-deny must cover every UDP port, not only the intercepted 53. Silence
+#    from a broken probe looks identical to containment, so first the control: a DNS
+#    datagram to TEST-NET on 53, whose "answer" can only be msb's stub — one exchange
+#    proving both that the send/read path works and that port-53 replies are synthesized
+#    locally (the resolution those replies deny is check 4's job). The probes then run
+#    concurrently, and a reply counts as egress only where TEST-NET does not mirror it.
+if udp_reply dns 192.0.2.1 53 2>/dev/null; then
+  UTMP="/tmp/verify-udp.$$"
+  ( udp_reply quic 1.1.1.1 443 2>/dev/null && : >"$UTMP.quic" ) &
+  ( udp_reply ntp 216.239.35.0 123 2>/dev/null && : >"$UTMP.ntp" ) &
+  wait
+  leak=""; mirrored=""
+  for probe in "quic 1.1.1.1 443" "ntp 216.239.35.0 123"; do
+    set -- $probe
+    [ -e "$UTMP.$1" ] || continue
+    if udp_reply "$1" 192.0.2.1 "$3" 2>/dev/null; then mirrored="$mirrored $1/$3"
+    else leak="$leak $1@$2:$3"; fi
+  done
+  rm -f "$UTMP.quic" "$UTMP.ntp"
+  if [ -n "$leak" ]; then
+    F 9 "UDP egressed:$leak answered where TEST-NET stayed silent"
+  elif [ -n "$mirrored" ]; then
+    P 9 "UDP beyond 53 intercepted locally ($mirrored answered, and TEST-NET mirrors it)"
+  else
+    P 9 "UDP beyond 53 blocked (quic/443 and ntp/123 both silent)"
+  fi
+else
+  S 9 "UDP beyond 53 (no reply from msb's port-53 stub, so a silent probe would prove nothing)"
+fi
+
+# 10. the host itself, off the proxy port — the Tier-1 rule is one port, not one host,
+#     so the host's other listeners (an ssh daemon, a dev server) must be as unreachable
+#     as the internet. A connect here needs no listener to succeed — the NAT completes
+#     the handshake for any host port the policy allows (see check 0) — so success IS
+#     the leak, and a denial is what a healthy host shows.
+if [ "$mech" = 1 ]; then
+  alt=$((pport + 1)); [ "$alt" -gt 65535 ] && alt=$((pport - 1))
+  hit=""
+  for hp in "$alt" 22; do tcp "$phost" "$hp" && hit="$hit $hp"; done
+  if [ -n "$hit" ]; then
+    F 10 "host port(s)$hit connected — the allow rule is wider than tcp:$pport"
+  else
+    P 10 "host unreachable off the proxy port (tried $alt and 22)"
+  fi
+else
+  S 10 "host ports beside the proxy's (control 0 failed: no working /dev/tcp probe)"
+fi
+
+echo "== the proxy must answer at every address the alias maps to =="
+# 11. real clients pick the proxy address by getaddrinfo order — /etc/hosts maps the
+#     alias to an IPv6 address too, and that one comes back first — while the NAT
+#     completes a handshake on either family with nothing listening. So a listener
+#     missing a family strands every client that picks it on a dead "connection" that
+#     reads like a policy denial, and one family answering says nothing about the other:
+#     each mapped address must produce the proxy's own refusal itself.
+addrs=""
+while IFS= read -r line; do
+  line=${line%%#*}; set -- $line
+  [ $# -ge 2 ] || continue
+  ip=$1; shift
+  for n in "$@"; do
+    [ "$n" = "$phost" ] || continue
+    case " $addrs " in *" $ip "*) ;; *) addrs="$addrs $ip" ;; esac
+  done
+done < /etc/hosts
+[ -n "$addrs" ] || addrs=" $phost"       # an IP literal or non-hosts name: probe it as-is
+ok=""; dead=""
+for a in $addrs; do
+  if timeout "$T" bash -c "$(declare -f control); control $a $pport" 2>/dev/null
+  then ok="$ok $a"; else dead="$dead $a"; fi
+done
+if [ -z "$dead" ]; then
+  P 11 "proxy answered at every alias address:$ok"
+elif [ -n "$ok" ] || [ "$mech" = 1 ]; then
+  F 11 "no proxy answer at$dead (answered:${ok:- nothing}) — clients on that family see a dead connection that reads like a denial"
+else
+  S 11 "per-family proxy answer (nothing answered and control 0 failed: probe mechanism unproven)"
 fi
 
 echo

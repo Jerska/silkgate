@@ -1999,12 +1999,13 @@ FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
               "update-ca-certificates && ")
 
 
-# verify_guest.sh scores seven numbered checks and reports which of them ran. Checks 3 and 7
-# are the containment core and need no installed tool, so a bare guest must run them; the rest
-# need tools only `--full` installs. A check that did not run proves nothing, so the set that
-# ran is asserted rather than a count of passes — five SKIPs and two PASSes is not containment.
-_VERIFY_CHECKS = frozenset(range(1, 8))
-_VERIFY_TOOL_FREE = frozenset({3, 7})
+# verify_guest.sh scores eleven numbered checks and reports which of them ran. Checks 3 and 7
+# are the containment core and 9-11 lean on the same tool-free built-ins, so a bare guest must
+# run all five; the rest need tools only `--full` installs. A check that did not run proves
+# nothing, so the set that ran is asserted rather than a count of passes — nine SKIPs and two
+# PASSes is not containment.
+_VERIFY_CHECKS = frozenset(range(1, 12))
+_VERIFY_TOOL_FREE = frozenset({3, 7, 9, 10, 11})
 
 
 def _ids(ids):
@@ -2029,8 +2030,9 @@ def _verify_shortfall(passed, failed, ran, skipped, *, full):
     if missing:
         return (f"containment unproven — check(s) {_ids(missing)} never ran"
                 + (f" (skipped: {_ids(skipped)})" if skipped else "")
-                + ("; --full installs the tools all seven need" if full
-                   else "; those two need no installed tool, so something else is wrong"))
+                + ("; --full installs the tools 1-8 need, and 9-11 skip only when an "
+                   "in-guest control failed" if full
+                   else "; those need no installed tool, so something else is wrong"))
     if passed != len(ran):
         return f"verify output disagrees with itself: {passed} passed of {len(ran)} that ran"
     return None
