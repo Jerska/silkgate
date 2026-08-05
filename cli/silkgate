@@ -87,11 +87,48 @@ def say(msg):
     print(mark + f"silkgate: {msg}".replace("\n", "\n" + mark), file=sys.stderr)
 
 
-def which(binary, hint):
+# Every binary the toolchain can require, with the remedy its absence should name. This
+# table owns the binary→hint mapping: preflight() reports from it up front and which()
+# reads it at the moment of use, so the two checks cannot name different remedies. (Call
+# sites from before the table still pass which() a hint; for a binary the table knows,
+# the table wins.)
+_TOOL_HINTS = {
+    "docker": "images are built with docker, then loaded into msb",
+    "msb": "curl -fsSL https://install.microsandbox.dev | sh",
+    "mitmdump": "pip install mitmproxy",
+}
+
+
+def which(binary, hint=None):
+    """Resolve one binary or die naming the remedy — the last line of defence, at the
+    moment of use, for a tool that vanished after preflight() let the command start."""
     path = shutil.which(binary)
     if path is None:
-        die(f"{binary} not found — {hint}")
+        die(f"{binary} not found — {_TOOL_HINTS.get(binary, hint)}")
     return path
+
+
+def preflight(*binaries):
+    """Die naming every absent tool at once, before a command does any work.
+
+    which() is lazy and per-tool, so a user missing several tools would learn each
+    install command only by failing a run — this is where a multi-tool command reports
+    the whole shortfall together. Cost is one PATH lookup per binary, never a
+    subprocess; and the question is only "is the toolchain here" — whether containment
+    actually holds is `silkgate verify`'s question, not this one's.
+    """
+    missing = [b for b in dict.fromkeys(binaries) if shutil.which(b) is None]
+    if not missing:
+        return
+    lines = "\n".join(f"  {b} — {_TOOL_HINTS[b]}" for b in missing)
+    die(f"missing {len(missing)} of the tools this command needs:\n{lines}")
+
+
+def _build_tools():
+    """What building an image dials: docker and msb (build_image), plus mitmdump while
+    the mitmproxy CA does not exist yet — write_build_context runs ensure_ca, which
+    shells out to mitmdump only to generate that CA."""
+    return ("docker", "msb") + (() if MITM_CA.is_file() else ("mitmdump",))
 
 
 def tail(path, lines=10):
@@ -1624,6 +1661,7 @@ def _maybe_stop_proxy():
 def cmd_build(args):
     profiles = resolve_profiles(args.with_ or [])
     load_ruleset(compose_rules(profiles))            # bad rules fail before a long build
+    preflight(*_build_tools())                       # every missing tool at once, pre-docker
     ref = build_image(profiles, base=args.base, platform_=args.platform)
     say(f"loaded {ref} into msb")
     print(ref)
@@ -1643,6 +1681,24 @@ def cmd_profiles(args):
         rows.append((prof.name, prof.version or "-", " ".join(installs) or "-",
                      ", ".join(hosts) or "-", desc))
     _print_table(rows)
+
+
+def cmd_doctor(args):
+    """The whole toolchain's presence in one pass — the command to run (and to name in a
+    brief) when a sandbox will not start. Presence means a PATH lookup, never a version
+    call: whether containment actually holds is `silkgate verify`'s question."""
+    rows = [("TOOL", "STATUS")]
+    missing = []
+    for binary, hint in _TOOL_HINTS.items():
+        path = shutil.which(binary)
+        rows.append((binary, path or f"missing — {hint}"))
+        if path is None:
+            missing.append(binary)
+    _print_table(rows)
+    sys.stdout.flush()                    # the verdict goes to stderr; table first, even piped
+    if missing:
+        die(f"missing {len(missing)} of {len(_TOOL_HINTS)} tools")
+    say("toolchain complete")
 
 
 def cmd_proxy(args):
@@ -1687,6 +1743,10 @@ def cmd_run(args):
     cmd = _strip_cmd_sep(args.cmd) or profile_command(profiles)
     if not cmd:
         die("nothing to run — pass a command after -- (or --with a profile that names one)")
+    # The ask is well-formed; now the whole toolchain shortfall in one report, before any
+    # host process. An explicit --image is run as-is, never built, so docker is not its
+    # business.
+    preflight(*(() if args.image else _build_tools()), "msb", "mitmdump")
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
     ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
     image = ensure_image(profiles, args.image, base=args.base)
@@ -1756,6 +1816,10 @@ def cmd_up(args):
     _validate_name(name)
     if session_dir(name).exists():
         die(f"session {name!r} already exists")
+    # The ask is well-formed; now the whole toolchain shortfall in one report, before any
+    # host process. An explicit --image is run as-is, never built, so docker is not its
+    # business.
+    preflight(*(() if args.image else _build_tools()), "msb", "mitmdump")
     ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
     image = ensure_image(profiles, args.image, base=args.base)
     proxy = ensure_proxy(args.port)
@@ -1799,6 +1863,9 @@ def cmd_down(args):
     meta = read_meta(args.name)
     if not meta:
         die(f"no such session: {args.name!r} (silkgate ls)")
+    # Teardown needs msb to stop/rm the guest; without this, its absence surfaces as
+    # "msb rm failed — session kept", which reads as a broken sandbox, not a missing tool.
+    preflight("msb")
     _teardown_session(meta)
     _maybe_stop_proxy()
     say(f"session {args.name} down")
@@ -2120,6 +2187,7 @@ def _verify_shortfall(passed, failed, ran, skipped, *, full):
 
 
 def cmd_verify(args):
+    preflight("msb", "mitmdump")
     rules_text = compose_rules(resolve_profiles(["probe"], allow_verify_only=True))
     load_ruleset(rules_text)
     script = "bash /mnt/poc/test/verify_guest.sh"
@@ -2185,9 +2253,37 @@ def _image_arg(ref):
     return ref
 
 
+class _MarkedParser(argparse.ArgumentParser):
+    """argparse whose stderr lines carry silkgate's voice mark.
+
+    say()/die() open every line silkgate speaks as itself with the byte relayed guest
+    output cannot carry (see say); argparse's `usage:` and `error:` lines go to stderr
+    too, so they are host voice and get the same mark. Scripts read the exit status (2
+    for a usage error) and the message text, so both stay exactly argparse's own — the
+    mark opens each stderr line and terminals draw nothing for it. error() and exit()
+    are argparse's documented override points, and add_subparsers() instantiates the
+    calling class, so every subcommand's parser marks its errors the same way. Help goes
+    to stdout, the stream that carries no claim of being silkgate's, and stays bare.
+    """
+
+    def exit(self, status=0, message=None):
+        # argparse passes a message here only on the error path; help and version print
+        # to stdout elsewhere and call this bare.
+        if message:
+            mark = _ERR_TAG.decode()
+            sys.stderr.write("".join(mark + ln for ln in message.splitlines(keepends=True)))
+            sys.stderr.flush()
+        sys.exit(status)
+
+    def error(self, message):
+        # Exactly what stock error() prints — usage, then "prog: error: message" — folded
+        # into one exit() message so every line passes through the marking above.
+        self.exit(2, f"{self.format_usage()}{self.prog}: error: {message}\n")
+
+
 def main():
-    ap = argparse.ArgumentParser(prog="silkgate", description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = _MarkedParser(prog="silkgate", description=__doc__,
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
 
     def profile_opts(p, *, rules_only=False):
@@ -2203,6 +2299,10 @@ def main():
 
     p = sub.add_parser("profiles", help="list the available profiles")
     p.set_defaults(fn=cmd_profiles)
+
+    p = sub.add_parser("doctor", help="report every missing tool (docker, msb, mitmdump) "
+                                      "and its install command")
+    p.set_defaults(fn=cmd_doctor)
 
     p = sub.add_parser("build", help="build the image a profile list describes, into msb")
     profile_opts(p)
