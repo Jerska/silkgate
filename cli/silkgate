@@ -518,6 +518,34 @@ def stop(proc):
             proc.kill()
 
 
+class _guarded_terminal:
+    """Restore this terminal's settings afterwards, whatever the child did to them.
+
+    A child handed a real terminal may put it in raw mode — msb does, for its own progress
+    rendering — and a child that dies, or exits without restoring, leaves the shell with no
+    echo or no output post-processing, which then outlives the command and mangles everything
+    printed after it until `stty sane`. Cheap insurance: snapshot before, put it back after.
+    Does nothing when stdout is not a terminal, which is every captured or piped run.
+    """
+
+    def __enter__(self):
+        self.saved = None
+        try:
+            if sys.stdout.isatty():
+                self.saved = termios.tcgetattr(sys.stdout)
+        except (OSError, termios.error):
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        if self.saved is not None:
+            try:
+                termios.tcsetattr(sys.stdout, termios.TCSADRAIN, self.saved)
+            except (OSError, termios.error):
+                pass
+        return False
+
+
 def wait_foreground(proc):
     """The child owns the terminal: Ctrl-C reaches it directly (same process group), so
     the parent must survive SIGINT to clean up afterwards. A Python-level handler is not
@@ -2140,9 +2168,14 @@ def cmd_secret_ls(args):
 
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
 # the https probes can complete. The CA is mounted in, since nothing is baked here.
+# -q sets apt's quiet level explicitly rather than leaving it to apt's own tty detection,
+# which asks about the *guest's* stdout, not ours: with a terminal there it draws a progress
+# meter that repaints with \r and pads with spaces, and none of that survives being read line
+# by line on this side. One -q drops the meter and keeps the Get:/Fetched lines, which are the
+# part worth reading when a probe tool fails to install.
 FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
-              "apt-get update && "
-              "apt-get install -y --no-install-recommends"
+              "apt-get -q update && "
+              "apt-get -q -o Dpkg::Use-Pty=0 install -y --no-install-recommends"
               " curl ca-certificates dnsutils iputils-ping iproute2 && "
               "cp /mnt/ca/egress-ca.pem /usr/local/share/ca-certificates/egress.crt && "
               "update-ca-certificates && ")
@@ -2202,15 +2235,26 @@ def cmd_verify(args):
                     pull_never=False, mounts=mounts)
     result = checks = guest = None
     try:
-        guest = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in guest.stdout:
-            print(line, end="")
-            m = re.search(r"RESULT: (\d+) passed, (\d+) failed", line)
-            if m:
-                result = (int(m[1]), int(m[2]))
-            if "CHECKS: ran=" in line:
-                checks = _parse_checks(line)
-        wait_foreground(guest)
+        # stdin is /dev/null, as for any run whose output we read rather than watch: msb hands
+        # the guest a terminal when it has one itself, and then everything in there formats for
+        # a screen nobody is looking at — apt draws a progress meter, msb draws its own — and
+        # leaves this terminal in raw mode on the way out, which outlives the command. Reading
+        # bytes rather than text keeps \r a \r: universal newlines would turn every in-place
+        # repaint into its own line, complete with the spaces it used to erase the last one.
+        with _guarded_terminal():
+            guest = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            for raw in guest.stdout:
+                # Split the newline off before cleaning, as _relay does: _plain trims a
+                # trailing \r, which is only trailing once the \n is gone.
+                line = _plain(raw.rstrip(b"\n")).decode(errors="replace")
+                print(line)
+                m = re.search(r"RESULT: (\d+) passed, (\d+) failed", line)
+                if m:
+                    result = (int(m[1]), int(m[2]))
+                if "CHECKS: ran=" in line:
+                    checks = _parse_checks(line)
+            wait_foreground(guest)
     finally:
         if guest is not None:
             stop(guest)
