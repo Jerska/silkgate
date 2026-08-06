@@ -2187,13 +2187,43 @@ FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
               "update-ca-certificates && ")
 
 
-# verify_guest.sh scores eleven numbered checks and reports which of them ran. Checks 3 and 7
-# are the containment core and 9-11 lean on the same tool-free built-ins, so a bare guest must
-# run all five; the rest need tools only `--full` installs. A check that did not run proves
-# nothing, so the set that ran is asserted rather than a count of passes — nine SKIPs and two
-# PASSes is not containment.
-_VERIFY_CHECKS = frozenset(range(1, 12))
-_VERIFY_TOOL_FREE = frozenset({3, 7, 9, 10, 11})
+# verify_guest.sh scores numbered checks and reports which of them ran. A check that did not
+# run proves nothing, so the set that ran is asserted rather than a count of passes — nine
+# SKIPs and two PASSes is not containment.
+#
+# Which checks exist, and which of them a BARE guest must produce, are read off the script
+# rather than restated here. Every check there opens with a declaration line naming what it
+# needs installed:
+#
+#     # CHECK 7 tools:ip — root routes around the boundary
+#     # CHECK 3 tools:none — direct TCP/443 to a raw IP
+#
+# and `tools:none` is what makes a check part of the bare run. Restating that set beside this
+# comment is what shipped a documented `silkgate verify` that could not pass: 7 was listed
+# tool-free while the script skipped it without `ip` — which `--full` installs precisely
+# because the base image lacks it — and the unit tests pinned the same wrong set from a
+# synthetic `ran` string, so nothing could notice. Deriving it means the two cannot disagree:
+# adding a `have` gate to a tool-free check moves it out of the bare set in the same commit.
+#
+# If the script cannot be read at all, both sets come out empty and _verify_shortfall refuses
+# the run rather than blessing whatever the guest reported. Nothing else in this CLI needs
+# them, so an unrelated command still works.
+_VERIFY_SCRIPT = REPO / "test" / "verify_guest.sh"
+_CHECK_DECL = re.compile(r"^#\s*CHECK\s+(\d+)\s+tools:(\S+)", re.M)
+
+
+def _declared_checks(path=None):
+    """(every check id, the ids needing no installed tool) as verify_guest.sh declares them."""
+    try:
+        text = (path or _VERIFY_SCRIPT).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return frozenset(), frozenset()
+    declared = _CHECK_DECL.findall(text)
+    return (frozenset(int(n) for n, _ in declared),
+            frozenset(int(n) for n, tools in declared if tools == "none"))
+
+
+_VERIFY_CHECKS, _VERIFY_TOOL_FREE = _declared_checks()
 
 
 def _ids(ids):
@@ -2214,13 +2244,19 @@ def _verify_shortfall(passed, failed, ran, skipped, *, full):
     """Why a verify run does not prove containment, or None if it does."""
     if failed:
         return f"containment check FAILED ({passed} passed, {failed} failed)"
-    missing = (_VERIFY_CHECKS if full else _VERIFY_TOOL_FREE) - ran
+    expected = _VERIFY_CHECKS if full else _VERIFY_TOOL_FREE
+    if not expected:
+        return (f"cannot tell which checks should have run: no '# CHECK n tools:' declarations "
+                f"in {_VERIFY_SCRIPT} — containment unproven")
+    missing = expected - ran
     if missing:
+        needs_tools = _ids(_VERIFY_CHECKS - _VERIFY_TOOL_FREE) or "none of them"
         return (f"containment unproven — check(s) {_ids(missing)} never ran"
                 + (f" (skipped: {_ids(skipped)})" if skipped else "")
-                + ("; --full installs the tools 1-8 need, and 9-11 skip only when an "
-                   "in-guest control failed" if full
-                   else "; those need no installed tool, so something else is wrong"))
+                + (f"; --full installs what {needs_tools} need, and the rest skip only when "
+                   "an in-guest control failed" if full
+                   else "; those declare tools:none, so something other than a missing tool "
+                        "is wrong"))
     if passed != len(ran):
         return f"verify output disagrees with itself: {passed} passed of {len(ran)} that ran"
     return None
