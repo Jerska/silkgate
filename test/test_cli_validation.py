@@ -458,10 +458,10 @@ class TestVerifyScoring(CliCase):
     def test_parse_checks(self):
         ran = ",".join(str(i) for i in sorted(self.ALL))
         self.assertEqual(sg._parse_checks(f"CHECKS: ran={ran} skipped="),
-                         (set(self.ALL), set()))
+                         (set(self.ALL), set(), set()))
         self.assertEqual(sg._parse_checks("[12:00:00.000] CHECKS: ran=3,7 skipped=1,2,4,5,6"),
-                         ({3, 7}, {1, 2, 4, 5, 6}))
-        self.assertEqual(sg._parse_checks("CHECKS: ran= skipped="), (set(), set()))
+                         ({3, 7}, {1, 2, 4, 5, 6}, set()))
+        self.assertEqual(sg._parse_checks("CHECKS: ran= skipped="), (set(), set(), set()))
 
     def test_full_demands_every_check(self):
         self.assertIsNone(

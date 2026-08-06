@@ -26,6 +26,16 @@
 # tool-free while this script skipped it without `ip`). `tools:none` means bash built-ins
 # plus coreutils and grep, which debian:bookworm-slim has: no `curl`, `dig`, `ip` or `ping`.
 #
+# SUBJECTS. A fourth verdict, UNAVAILABLE, is for a check whose subject does not exist on
+# this guest — a v6 probe on a platform with no v6 path has nothing to ask the boundary,
+# which is neither a pass, nor a failure, nor an inability to run something that could have
+# run. It is declared, not improvised: `subject:<capability>` on the CHECK line names the
+# one thing whose absence the check may report, and `silkgate verify` refuses the verdict
+# from any check that declares none, so an output string alone can never widen it. The
+# absence itself must be read from the guest's own tables (/proc/net/ipv6_route,
+# /proc/net/if_inet6, /etc/hosts) and never from a probe's errno alone: `dead` from a probe
+# that could have worked is a broken probe until proven otherwise, and stays a SKIP.
+#
 # PORT 53 ALWAYS ANSWERS, from msb's own stub, on TCP and UDP, for every destination
 # including unroutable ones. So on 53 a reply is never egress; the discriminator is
 # byte-identity with the reply from TEST-NET, which can only have been synthesized locally.
@@ -35,8 +45,10 @@
 # it changed, and re-proves control 0 afterwards; if the restore fails, `mech` drops to 0 so
 # nothing downstream can read the damage as containment.
 #
-# The last two lines are for the caller: which checks ran, and the pass/fail totals. A SKIP
-# is neither, and `silkgate verify` asserts the set it expected to run.
+# The last two lines are for the caller: which checks ran (with the skipped and unavailable
+# sets beside them), and the pass/fail totals. A SKIP and an UNAVAILABLE are neither, and
+# `silkgate verify` asserts the set it expected to run — accepting an absent subject only
+# from a check declared able to have one.
 
 export LC_ALL=C   # bash and curl report connect failures through strerror(3) and the checks
                   # below read that text; C keeps it English. It also pins EPOCHREALTIME's
@@ -44,10 +56,15 @@ export LC_ALL=C   # bash and curl report connect failures through strerror(3) an
 
 PROXY="${HTTPS_PROXY:-http://host.microsandbox.internal:8090}"
 T=5
-pass=0; fail=0; ran=""; skipped=""
+pass=0; fail=0; ran=""; skipped=""; unavail=""
 P(){ echo "[PASS] $1. $2"; pass=$((pass+1)); ran="$ran,$1"; }
 F(){ echo "[FAIL] $1. $2"; fail=$((fail+1)); ran="$ran,$1"; }
 S(){ echo "[SKIP] $1. $2"; skipped="$skipped,$1"; }
+# U is only for a check whose declaration carries `subject:` (see SUBJECTS above): this
+# guest observably lacks the one thing the check would probe, so there was never anything
+# here to run — which is a different fact from a SKIP, a check that could have run and
+# did not, and the host refuses it from any check not declared able to say it.
+U(){ echo "[UNAV] $1. $2"; unavail="$unavail,$1"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 
 # Microseconds since the epoch, from bash's own clock — no coreutils, no subprocess, so it
@@ -262,7 +279,16 @@ curl_why(){
 # Does this guest have a route for the family at all? Silence from a family the guest cannot
 # address is in-guest configuration, which THREAT-MODEL.md excludes from the boundary, so the
 # v6 checks gate on this rather than reading a missing route as containment.
-has_v6_default(){ grep -qE '^0{32} 00 ' /proc/net/ipv6_route 2>/dev/null; }
+#
+# And can it source a packet down that route? Scope 00 in /proc/net/if_inet6 is an address
+# connect(2) may pick for a global destination — a ULA prints scope 00 and counts, and erring
+# that way is safe: it can only keep a verdict at SKIP that might have been UNAVAILABLE,
+# never the reverse. A ::/0 route with nothing to source it from cannot emit a packet, and
+# the errno that produces (ENETUNREACH) is byte-identical to a broken probe's; this table is
+# what tells the two apart. Both functions take an alternate path so the tests can hand them
+# another guest's measured tables.
+has_v6_default(){ grep -qE '^0{32} 00 ' "${1:-/proc/net/ipv6_route}" 2>/dev/null; }
+has_v6_global(){ grep -qE '^[0-9a-f]{32} +[0-9a-f]+ +[0-9a-f]{2} +00 ' "${1:-/proc/net/if_inet6}" 2>/dev/null; }
 
 # sortnum "3 1 2" -> "1,2,3". The checks below do not run in ID order — the two that
 # reconfigure the guest run last — and the CHECKS: line is parsed by the host and grepped by
@@ -392,18 +418,31 @@ else
   S 4 "DNS (no dig/getent/python3)"
 fi
 
-# CHECK 5 tools:none — IPv6 egress, an IP literal so no DNS is involved. bash's /dev/tcp
-# takes a bare IPv6 literal, so this needs no curl and joins the bare run; curl's exit 7 used
-# to cover "refused", "no route" and "no v6 address configured" alike, and only the first is
-# containment. A guest with no ::/0 route cannot emit a v6 packet at all, which is in-guest
-# configuration and not a boundary, so that SKIPs rather than passing.
+# CHECK 5 tools:none subject:ipv6 — IPv6 egress, an IP literal so no DNS is involved. bash's
+# /dev/tcp takes a bare IPv6 literal, so this needs no curl and joins the bare run; curl's
+# exit 7 used to cover "refused", "no route" and "no v6 address configured" alike, and only
+# the first is containment. A guest with no v6 path has no subject for this check, and that
+# comes in two shapes, both read from the kernel rather than from the probe: no ::/0 route in
+# /proc/net/ipv6_route (nothing can be addressed), and a ::/0 route with no global-scope
+# source address in /proc/net/if_inet6 — Linux/KVM guests ship with the route and nothing to
+# source it from, and connect(2) then dies inside the guest with the same ENETUNREACH a
+# broken probe shows. So wherever a route exists the probe still runs — a handshake that
+# completes is a FAIL and a refusal is a PASS whatever the address table says — and only a
+# probe that DIED is read against the table: no source address means the death is this
+# guest's own addressing and the check is UNAVAILABLE; with an address it stays a SKIP,
+# because dead from a probe that could have worked is precisely the ambiguity this file
+# refuses to bless.
 if [ "$mech" != 1 ]; then
   S 5 "IPv6 egress (control 0 failed: no working /dev/tcp probe)"
 elif ! has_v6_default; then
-  S 5 "IPv6 egress: no ::/0 route in /proc/net/ipv6_route, so silence would be this guest's own configuration, not the boundary"
+  U 5 "IPv6 egress: no ::/0 route in /proc/net/ipv6_route — this guest cannot address a v6 packet to anywhere, so there is no IPv6 egress here to test"
 else
   tcp 2606:4700:4700::1111 443; grade "direct TCP to [2606:4700:4700::1111]:443"
-  case $dv in p) P 5 "$dw" ;; f) F 5 "$dw" ;; *) S 5 "$dw" ;; esac
+  if [ "$dv" = s ] && [ "$tcp_how" = dead ] && ! has_v6_global; then
+    U 5 "IPv6 egress: the probe died in this guest ($tcp_errno) and /proc/net/if_inet6 holds no global-scope address — a ::/0 route with nothing to source it from cannot emit a packet, so there is no IPv6 egress here to test"
+  else
+    case $dv in p) P 5 "$dw" ;; f) F 5 "$dw" ;; *) S 5 "$dw" ;; esac
+  fi
 fi
 
 # CHECK 6 tools:ping — ICMP, with the local positive control it lacked. Any non-zero ping exit
@@ -597,20 +636,43 @@ fi
 if [ "$mech" = 1 ]; then
   classes="10.0.0.1/80 192.168.1.1/443 172.16.0.1/80 100.64.0.1/80 169.254.169.254/80
            169.254.170.2/80 8.8.8.8/443 203.0.113.9/443"
-  has_v6_default && classes="$classes 2001:db8::1/443"
+  # The v6 documentation address joins the sweep only where this guest can source a global
+  # v6 packet at all: on a guest with a ::/0 route and no v6 source address the probe dies
+  # in-guest, lands in $sw_dead, and turned eight real refusals into a SKIP on Linux/KVM. A
+  # destination nothing could ever have probed is not coverage lost, so it is excluded — by
+  # the guest's own tables BEFORE any probe runs, never by an errno afterwards — and the
+  # exclusion is named in the verdict, whichever verdict the sweep earns. This check is NOT
+  # marked unavailable for it: its subject is the v4 classes too, and those eight denials
+  # are assertions a whole-check verdict would throw away. Check 5 still probes v6 wherever
+  # a ::/0 route exists, so a boundary that completes v6 handshakes is still caught even
+  # where this sweep is v4-only.
+  if has_v6_default && has_v6_global; then
+    classes="$classes 2001:db8::1/443"; v6note=""
+  else
+    v6note=" (2001:db8::1:443 not probed: this guest cannot source a global v6 packet, so the v6 class has no subject here — check 5 reads the same tables)"
+  fi
   sweep addr $classes
   sweep_verdict "private, CGNAT, link-local-metadata and second-public addresses"
-  case $dv in p) P 15 "$dw" ;; f) F 15 "$dw" ;; *) S 15 "$dw" ;; esac
+  case $dv in p) P 15 "$dw$v6note" ;; f) F 15 "$dw$v6note" ;; *) S 15 "$dw$v6note" ;; esac
 else
   S 15 "address classes (control 0 failed: no working /dev/tcp probe)"
 fi
 
 echo "== the proxy must answer at every address the alias maps to =="
-# CHECK 11 tools:none — real clients pick the proxy address by getaddrinfo order, and
-# /etc/hosts maps the alias to an IPv6 address too, which comes back first. The NAT completes
-# a handshake on either family with nothing listening, so a listener missing a family strands
-# every client that picks it on a dead "connection" that reads like a policy denial, and one
-# family answering says nothing about the other.
+# CHECK 11 tools:none subject:ipv6 — real clients pick the proxy address by getaddrinfo
+# order, and /etc/hosts maps the alias to an IPv6 address too, which comes back first. The
+# NAT completes a handshake on either family with nothing listening, so a listener missing a
+# family strands every client that picks it on a dead "connection" that reads like a policy
+# denial, and one family answering says nothing about the other.
+#
+# The v6 half's subject can be absent outright: on Linux/KVM the platform maps the alias to
+# v4 only AND gives the guest no global-scope v6 source address, so no client in this guest
+# could ever pick, or use, a v6 proxy address — there is nothing whose stranding this half
+# would catch, and it is UNAVAILABLE. That is decided from /etc/hosts (already parsed below)
+# and /proc/net/if_inet6, two of the guest's own tables and no errno anywhere, and only
+# after the v4 half answered with the mark. A guest that COULD source v6 while the alias
+# maps none keeps the SKIP: there the missing mapping is the platform withholding a subject
+# this guest could have used, which deserves an alarm, not a waiver.
 #
 # The address count is therefore the coverage, and it has been seen to vary between runs — so
 # it is reported rather than implied, and a run that ends up with nothing to probe on a family
@@ -647,8 +709,10 @@ elif [ -n "$unmarked" ]; then
   S 11 "something answered a 4xx at$unmarked without X-Silkgate: deny — the per-family claim cannot be attributed to this session's proxy"
 elif [ -n "$literal" ]; then
   S 11 "the proxy URL names $phost, which /etc/hosts does not map — it answered, but this run probed one endpoint and so proves nothing about per-family coverage"
+elif [ -z "$v6" ] && has_v6_default && ! has_v6_global; then
+  U 11 "the proxy answered at$v4; /etc/hosts maps the alias to no IPv6 address, and /proc/net/if_inet6 holds no global-scope address to source a v6 connect from — no client in this guest could pick or use a v6 proxy address, so the v6 half of this check has no subject here"
 elif [ -z "$v6" ] && has_v6_default; then
-  S 11 "the proxy answered at$v4, but /etc/hosts maps the alias to no IPv6 address while this guest has a ::/0 route — the v6 half of this check had nothing to probe, so a v4-only listener would not be caught"
+  S 11 "the proxy answered at$v4, but /etc/hosts maps the alias to no IPv6 address while this guest has a ::/0 route and an address to source from — the v6 half of this check had nothing to probe, so a v4-only listener would not be caught"
 elif [ -z "$v4" ]; then
   S 11 "the proxy answered at$v6, but the alias maps to no IPv4 address — the v4 half of this check had nothing to probe"
 else
@@ -810,10 +874,14 @@ else
 fi
 
 echo
-echo "CHECKS: ran=$(sortnum "${ran//,/ }") skipped=$(sortnum "${skipped//,/ }")"
+echo "CHECKS: ran=$(sortnum "${ran//,/ }") skipped=$(sortnum "${skipped//,/ }") unavailable=$(sortnum "${unavail//,/ }")"
 echo "RESULT: $pass passed, $fail failed"
-if [ "$fail" -eq 0 ] && [ -z "$skipped" ]; then
+if [ "$fail" -eq 0 ] && [ -z "$skipped" ] && [ -z "$unavail" ]; then
   echo "Containment holds: every check ran, no direct egress, the proxy the only path out."
+elif [ "$fail" -eq 0 ] && [ -z "$skipped" ]; then
+  echo "Containment holds for every check this guest gave a subject; check(s) $(sortnum "${unavail//,/ }") found"
+  echo "nothing here to test — the [UNAV] lines above say what this guest lacks, and why that"
+  echo "is read from its own tables rather than from a probe that merely failed."
 elif [ "$fail" -eq 0 ]; then
   echo "No check failed, but $(sortnum "${skipped//,/ }") did not run — this run does not prove"
   echo "containment on its own; silkgate verify decides whether the set that ran is enough."

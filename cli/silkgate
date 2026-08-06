@@ -2329,25 +2329,34 @@ FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
 # synthetic `ran` string, so nothing could notice. Deriving it means the two cannot disagree:
 # adding a `have` gate to a tool-free check moves it out of the bare set in the same commit.
 #
-# If the script cannot be read at all, both sets come out empty and _verify_shortfall refuses
+# A `subject:<capability>` field on the same line declares the one other thing a check may
+# report: UNAVAILABLE, for a guest that observably lacks what the check would probe (a v6
+# check on a platform with no v6 path has no subject, which is neither a pass nor a skip).
+# The permission is derived here for the same reason the tool sets are: _verify_shortfall
+# refuses an unavailable claim from any check whose declaration names no subject, so a
+# verdict that means "nothing to test" can never creep in as an output string alone.
+#
+# If the script cannot be read at all, the sets come out empty and _verify_shortfall refuses
 # the run rather than blessing whatever the guest reported. Nothing else in this CLI needs
 # them, so an unrelated command still works.
 _VERIFY_SCRIPT = REPO / "test" / "verify_guest.sh"
-_CHECK_DECL = re.compile(r"^#\s*CHECK\s+(\d+)\s+tools:(\S+)", re.M)
+_CHECK_DECL = re.compile(r"^#\s*CHECK\s+(\d+)\s+tools:(\S+)(?:\s+subject:(\S+))?", re.M)
 
 
 def _declared_checks(path=None):
-    """(every check id, the ids needing no installed tool) as verify_guest.sh declares them."""
+    """(every check id, the ids needing no installed tool, {id: the subject a guest may
+    lack}) as verify_guest.sh declares them."""
     try:
         text = (path or _VERIFY_SCRIPT).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return frozenset(), frozenset()
+        return frozenset(), frozenset(), {}
     declared = _CHECK_DECL.findall(text)
-    return (frozenset(int(n) for n, _ in declared),
-            frozenset(int(n) for n, tools in declared if tools == "none"))
+    return (frozenset(int(n) for n, _, _ in declared),
+            frozenset(int(n) for n, tools, _ in declared if tools == "none"),
+            {int(n): subject for n, _, subject in declared if subject})
 
 
-_VERIFY_CHECKS, _VERIFY_TOOL_FREE = _declared_checks()
+_VERIFY_CHECKS, _VERIFY_TOOL_FREE, _VERIFY_SUBJECTS = _declared_checks()
 
 
 def _ids(ids):
@@ -2355,16 +2364,17 @@ def _ids(ids):
 
 
 def _parse_checks(line):
-    """`CHECKS: ran=3,7 skipped=1,2` -> ({3, 7}, {1, 2})."""
-    fields = dict(re.findall(r"(ran|skipped)=([\d,]*)", line))
+    """`CHECKS: ran=3,7 skipped=1,2 unavailable=5` -> ({3, 7}, {1, 2}, {5}). A line from
+    before the unavailable field parses with an empty third set."""
+    fields = dict(re.findall(r"(ran|skipped|unavailable)=([\d,]*)", line))
 
     def ids(key):
         return {int(i) for i in fields.get(key, "").split(",") if i}
 
-    return ids("ran"), ids("skipped")
+    return ids("ran"), ids("skipped"), ids("unavailable")
 
 
-def _verify_shortfall(passed, failed, ran, skipped, *, full):
+def _verify_shortfall(passed, failed, ran, skipped, unavailable=frozenset(), *, full):
     """Why a verify run does not prove containment, or None if it does."""
     if failed:
         return f"containment check FAILED ({passed} passed, {failed} failed)"
@@ -2372,7 +2382,21 @@ def _verify_shortfall(passed, failed, ran, skipped, *, full):
     if not expected:
         return (f"cannot tell which checks should have run: no '# CHECK n tools:' declarations "
                 f"in {_VERIFY_SCRIPT} — containment unproven")
-    missing = expected - ran
+    # "Nothing to test" is the easiest verdict to abuse — accepted wholesale, unavailable=1..15
+    # from a guest that ran nothing would read as containment — so it is honoured only from
+    # the checks whose declarations say their subject can be absent, and never for a check
+    # that also claims to have run.
+    undeclared = unavailable - _VERIFY_SUBJECTS.keys()
+    if undeclared:
+        return (f"check(s) {_ids(undeclared)} report their subject absent, but their CHECK "
+                f"declarations name no subject: a guest may lack "
+                f"(only {_ids(_VERIFY_SUBJECTS) or 'none of them'} do) — a check that could "
+                "have run did not, so containment is unproven")
+    contradicted = unavailable & ran
+    if contradicted:
+        return (f"verify output disagrees with itself: check(s) {_ids(contradicted)} both ran "
+                "and reported nothing to test")
+    missing = expected - ran - unavailable
     if missing:
         needs_tools = _ids(_VERIFY_CHECKS - _VERIFY_TOOL_FREE) or "none of them"
         return (f"containment unproven — check(s) {_ids(missing)} never ran"
@@ -3287,8 +3311,8 @@ def cmd_verify(args):
             die("no CHECKS line — the guest did not report which checks ran, so nothing is "
                 "proven")
         passed, failed = result
-        ran, skipped = checks
-        bad = _verify_shortfall(passed, failed, ran, skipped, full=args.full)
+        ran, skipped, unavailable = checks
+        bad = _verify_shortfall(passed, failed, ran, skipped, unavailable, full=args.full)
         if bad:
             die(bad)
 
@@ -3334,7 +3358,12 @@ def cmd_verify(args):
                 f"port {args.port}. `msb stop NAME && msb rm NAME`, then re-run")
         for summary in summaries:
             say(summary)
+        # _verify_shortfall already refused any unavailable id without a declared subject,
+        # so the lookup below cannot miss; the guest's [UNAV] lines above carry the detail.
+        absent = ", ".join(sorted({_VERIFY_SUBJECTS[i] for i in unavailable}))
         say(f"containment holds ({passed} passed, 0 failed; checks {_ids(ran)} ran; "
+            + (f"checks {_ids(unavailable)} had no subject — this guest has no {absent}, "
+               "see their [UNAV] lines; " if unavailable else "")
             + ("host-side oracles agree" if oracles else "host-side oracles skipped") + ")")
     finally:
         if proxy is not None:
