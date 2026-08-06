@@ -3,9 +3,9 @@
 Run an untrusted coding agent — or any untrusted command — in a microVM whose **only** route to
 the network is a TLS-terminating proxy that allowlists per request. Verified live on **macOS
 (Apple Silicon)**, by hand, and on **Linux (x86_64/KVM, msb 0.6.8)** by CI on every push — the
-containment workflow runs the full seven-check probe inside the `test/linux/` container and fails
-if any check merely skipped (see [Verifying containment](#verifying-containment)). Two enforcement
-layers, both outside the guest:
+containment workflow runs all fifteen checks inside the `test/linux/` container, plus three
+assertions made from outside the guest, and fails if any check merely skipped (see
+[Verifying containment](#verifying-containment)). Two enforcement layers, both outside the guest:
 
 - **Tier 1 — force all egress to the proxy:** microsandbox's own host-side network policy. No
   nft, no pf, no nested VM.
@@ -191,10 +191,20 @@ docker run --rm --device /dev/kvm -v "$PWD:/silkgate" silkgate-verify \
 ./cli/silkgate verify --full    # also installs probe tools *through* the proxy, then trusts the CA
 ```
 
-- **Pass = the expected checks ran, the proxy-path ones succeeded, and every direct-egress check
-  was blocked.** A count is not enough — five skipped checks and two passes is not containment — so
-  `--full` asserts that all seven ran, and a skip fails it. Which checks ran is reported on the
-  guest's `CHECKS:` line beside `RESULT: N passed, 0 failed`.
+- **Pass = the expected checks ran, the proxy-path ones succeeded, every direct-egress check was
+  blocked, and three assertions made outside the guest agree.** A count is not enough — most checks
+  skipped and two passed is not containment — so `--full` asserts the set that ran, and a skip fails
+  it. Which checks ran is on the guest's `CHECKS:` line beside `RESULT: N passed, 0 failed`.
+- **A blocked-direction check passes on an answer, not an absence.** The errno is kept and
+  classified: a refusal means the boundary answered, an unreachable means the probe never left and
+  proves nothing, and silence is graded against a control that measures how this boundary actually
+  denies — because dropping and refusing are both plausible and neither is assumed.
+- **Three oracles sit outside the guest**, so not every verdict rests on the guest's own report: an
+  arrival observer on a port the allowlist omits (its own token must arrive, so a deaf listener
+  cannot pass by staying silent), a recording endpoint proving the proxy *replaces* a credential the
+  guest sent and never *adds* one it did not, and an assertion that this run's audit log holds the
+  decisions the checks provoked. `--negative-control` adds a second, deliberately leaking guest and
+  requires the checks to fail there — the only way to know they can.
 - Check 0 is a control for the probe mechanism itself: it requires the proxy's own refusal of a
   request no rule allows. A bare TCP connect would not do, because microsandbox's guest→host NAT
   completes the handshake inside the VMM and so reports success with nothing listening at all.
@@ -206,12 +216,13 @@ docker run --rm --device /dev/kvm -v "$PWD:/silkgate" silkgate-verify \
   alias resolves via the guest's `/etc/hosts`. Do **not** add `allow@host:udp:53` — it would
   re-open DNS. TCP/53 is intercepted too: every destination on that port answers `REFUSED` from
   msb's own stub, so it is not a way out either.
-- Every `up` and `run` re-checks all of this from inside the guest before handing it over, and
-  refuses the session if a host outside the allowlist turns out to be reachable. `verify` is the
-  full seven-check version of that one assertion.
-- **Verified 7/7 on macOS (Apple Silicon), re-run after the current round of fixes. Linux
-  (x86_64/KVM, via `test/linux/`) last passed 7/7 before them and has not been re-verified
-  since — the flags are unchanged, but treat the Linux claim as dated until it is re-run.**
+- Every `up` and `run` re-checks one thing from inside the guest before handing it over — that a
+  host outside the allowlist is unreachable — and refuses the session otherwise. Check 3 *is* that
+  assertion; the rest of `verify` is what the always-on probe deliberately does not pay for.
+- **Verified 15/15 on macOS (Apple Silicon), by hand, with all three oracles agreeing, and on
+  Linux (x86_64/KVM, msb 0.6.8) by CI on every push.** Coverage differs by platform: that Linux
+  guest has no working IPv6 and maps the proxy alias to v4 only, so the checks whose subject is a
+  v6 path report that they had nothing to probe rather than claiming to have covered it.
 
 ## Using the proxy on its own
 

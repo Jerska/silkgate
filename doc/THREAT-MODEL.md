@@ -54,10 +54,14 @@ guest `HTTPS_PROXY=host.microsandbox.internal:<proxyport>`. DNS: microsandbox in
 UDP/53 at its gateway but applies the egress policy per query, so with no DNS allow rule the
 default-deny yields NXDOMAIN — no explicit DNS deny needed; the proxy alias resolves via
 `/etc/hosts`, so nothing breaks. Native on
-HVF and KVM — no nested VM, no `pf`, no `nft`. *(Verified live 7/7: a root guest had no direct
-TCP/DNS/IPv6/ICMP egress and couldn't escape by re-routing. On macOS/Apple Silicon (HVF, msb
-0.5.4/0.5.7) by hand; on Linux/x86_64 (KVM, msb 0.6.8, in the `test/linux/` container) by CI on
-every push, which fails the run unless all seven checks report having run. Pin your
+HVF and KVM — no nested VM, no `pf`, no `nft`. *(Verified live 15/15: a root guest reached nothing
+by TCP, UDP, DNS over either transport, IPv6 or ICMP; could not escape by re-routing, by
+re-addressing, or via the host's other ports; and every denial was an answer from the boundary
+rather than a silence. Three assertions made outside the guest agree, and a deliberately leaking
+guest fails six of the checks, which is how they are known to be capable of failing. On
+macOS/Apple Silicon (HVF, msb 0.5.4/0.5.7) by hand; on Linux/x86_64 (KVM, msb 0.6.8, in the
+`test/linux/` container) by CI on every push. Coverage differs by platform — that guest has no
+working IPv6 — and a check whose subject is absent says so instead of claiming it. Pin your
 `msb --version`; scope names drift pre-1.0.)*
 
 **Linux nft fallback:** microVM tap device + an `nft` ruleset in the `inet` family on that
@@ -130,6 +134,6 @@ races Apple daemons — defense-in-depth only).
 
 | Tier | Owner | In this design |
 |---|---|---|
-| 1 — network-layer prerequisites | Host/VMM (outside guest) | **Implemented & verified** (`verify_guest.sh` 7/7 — macOS by hand, Linux in CI on every push; nft as Linux fallback) |
+| 1 — network-layer prerequisites | Host/VMM (outside guest) | **Implemented & verified** (`verify_guest.sh` 15/15 plus three host-side oracles — macOS by hand, Linux in CI on every push; nft as Linux fallback) |
 | 2 — request-level enforcement | The proxy + rule engine | **Implemented** |
 | 3 — irreducible residual | Rule discipline + operations | **Accepted & documented**, not code |

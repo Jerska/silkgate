@@ -283,11 +283,18 @@ containment, but needs a custom host relay (no host `AF_VSOCK` on macOS) + an in
 TCP→vsock shim; (c) host `pf` on `bridge100` keyed by VM subnet — fragile (races Apple's
 InternetSharing daemon), belt-and-suspenders only.
 
-**Verified live:** a root guest had no direct TCP, DNS, IPv6, or ICMP egress — only the proxy
-was reachable; a root guest re-adding its default route still couldn't egress; and the addon
-allowed the allowlisted host while 403'ing an unlisted one (`verify_guest.sh`, 7/7). On macOS
-(Apple Silicon/HVF, msb 0.5.4/0.5.7) that result was re-verified after the latest round of
-fixes; on Linux (x86_64/KVM, msb 0.6.8, via the `test/linux/` container) it dates from before
-them and has not been re-run since — the `--net-*` flags are unchanged, but treat the Linux
-claim as stale until it is. Caveat: **pin your `msb --version`** — rule-grammar scope names
-drift pre-1.0.
+**Verified live:** a root guest reached nothing by TCP, UDP, DNS over either transport, IPv6 or
+ICMP — only its own proxy port; it could not escape by re-routing, by giving itself another
+address, or through any of the host's other ports; and the addon allowed the allowlisted host
+while refusing an unlisted one (`verify_guest.sh`, 15/15). Each denial is an answer from the
+boundary rather than a silence, three assertions made *outside* the guest agree — a listener the
+allowlist omits heard nothing from it, a recording endpoint saw the proxy replace a credential
+the guest sent and never add one it did not, and this run's audit log holds the decisions the
+checks provoked — and a deliberately leaking guest fails six of the checks, which is how they are
+known to be able to fail at all.
+
+On macOS (Apple Silicon/HVF, msb 0.5.4/0.5.7) by hand; on Linux (x86_64/KVM, msb 0.6.8, via the
+`test/linux/` container) by CI on every push. Coverage is not identical: that Linux guest has no
+working IPv6 and maps the proxy alias to v4 only, so the checks whose subject is a v6 path report
+having nothing to probe instead of claiming to have covered it. Caveat: **pin your
+`msb --version`** — rule-grammar scope names drift pre-1.0.
