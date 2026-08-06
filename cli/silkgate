@@ -85,7 +85,12 @@ def say(msg):
     # needs attribution checks the byte. (Under -t on a real terminal the guest writes to
     # the screen directly and no mark can hold — see run_guest.)
     mark = _ERR_TAG.decode()
-    print(mark + f"silkgate: {msg}".replace("\n", "\n" + mark), file=sys.stderr)
+    try:
+        print(mark + f"silkgate: {msg}".replace("\n", "\n" + mark), file=sys.stderr)
+    except (OSError, ValueError):
+        # stderr can be a closed pipe or a vanished terminal by the time a teardown
+        # speaks; losing the line is fine, losing the rest of the cleanup is not.
+        pass
 
 
 # Every binary the toolchain can require, with the remedy its absence should name. This
@@ -505,7 +510,11 @@ def start_proxy(rules_text, port):
     argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"] + _modes(port)
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT)
-    _wait_proxy_ready(proc, [port], log_path)
+    try:
+        _wait_proxy_ready(proc, [port], log_path)
+    except BaseException:       # incl. a Ctrl-C mid-wait: the caller has no handle on
+        stop(proc)              # the child yet, so an exit here is the last chance to
+        raise                   # stop it (stop is a no-op where the wait already did)
     return proc, log_path
 
 
@@ -549,12 +558,57 @@ class _guarded_terminal:
 def wait_foreground(proc):
     """The child owns the terminal: Ctrl-C reaches it directly (same process group), so
     the parent must survive SIGINT to clean up afterwards. A Python-level handler is not
-    inherited across exec, so the child's own SIGINT behavior is untouched."""
+    inherited across exec, so the child's own SIGINT behavior is untouched. A child that
+    dies by a signal is reported the way a shell would report it — 128 plus the signal
+    number, 130 for Ctrl-C — because the negative code proc.wait() returns would reach
+    sys.exit, which reads it as a status byte and mangles it."""
     previous = signal.signal(signal.SIGINT, lambda *a: None)
     try:
-        return proc.wait()
+        rc = proc.wait()
+        return rc if rc >= 0 else 128 - rc
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+class _deferred_interrupts:
+    """Hold SIGINT/SIGTERM/SIGHUP while an unwind runs, restoring them after.
+
+    A second Ctrl-C landing mid-teardown would abort it halfway — a session
+    half-removed, which is worse than either fully up or fully gone. So the stop
+    signals are noted, acknowledged once on stderr, and dropped: by the time one
+    lands here, the unwind is already doing what the signal asks for. Deferral
+    without an escape hatch is safe only because everything under it is bounded —
+    the msb calls in _remove_sandbox carry a timeout and run outside the terminal's
+    process group (so the Ctrl-C being deferred cannot kill the very child doing
+    the removing), and stop_proxy escalates to SIGKILL after 5s. The note is written
+    with os.write because print into a buffer the interrupted line was mid-flush on
+    raises rather than reenters."""
+
+    _SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def __enter__(self):
+        self._noted = False
+        self._prev = []
+
+        def hold(signum, frame):
+            if not self._noted:
+                self._noted = True
+                try:
+                    os.write(2, _ERR_TAG + b"silkgate: interrupt noted "
+                                b"- finishing cleanup first (it is bounded)\n")
+                except OSError:
+                    pass
+        try:
+            for s in self._SIGNALS:
+                self._prev.append((s, signal.signal(s, hold)))
+        except ValueError:           # not the main thread: nothing can be deferred
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        for s, previous in self._prev:
+            signal.signal(s, previous)
+        return False
 
 
 def msb_argv(image, cmd, port, *, pull_never=True, mounts=()):
@@ -1057,10 +1111,14 @@ def start_shared_proxy(base_port):
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
-    _wait_proxy_ready(proc, ports, log_path)
     meta = {"pid": proc.pid, "base_port": base_port, "ports": ports,
             "log": str(log_path), "sock": str(PROXY_SOCK), "started": now_iso()}
-    _write_json(PROXY_JSON, meta)
+    try:
+        _wait_proxy_ready(proc, ports, log_path)
+        _write_json(PROXY_JSON, meta)
+    except BaseException:       # incl. a Ctrl-C mid-wait: until proxy.json lands, no
+        stop(proc)              # other command can ever find this mitmdump to stop
+        raise                   # it (stop is a no-op where the wait already did)
     return meta
 
 
@@ -1466,8 +1524,16 @@ def run_guest(build_argv, cmd, *, tty, on_line=None):
         # A terminal run gets no relay, so the context export needs its own tiny shell.
         cmd = ["sh", "-c", _EXPORT_CONTEXT + 'exec "$@"', "_"] + list(cmd)
         if sys.stdout.isatty():
-            # Inheriting a real terminal is what keeps a TUI fully interactive.
-            return wait_foreground(subprocess.Popen(build_argv(cmd)))
+            # Inheriting a real terminal is what keeps a TUI fully interactive — and
+            # what lets an interrupted TUI leave that terminal in raw mode, so the
+            # settings are guarded, and an exit mid-wait (SIGTERM, SIGHUP) stops the
+            # child instead of orphaning it against a sandbox about to be removed.
+            with _guarded_terminal():
+                proc = subprocess.Popen(build_argv(cmd))
+                try:
+                    return wait_foreground(proc)
+                finally:
+                    stop(proc)
         return _pty_relay(build_argv(cmd), demux=False, on_line=on_line)
     return _pty_relay(build_argv(["sh", "-c", _RELAY_SH, "_"] + list(cmd)), demux=True,
                       on_line=on_line)
@@ -1480,8 +1546,17 @@ def _pty_relay(argv, *, demux, on_line=None):
     against a program that colors regardless of not being on a terminal); without it the
     bytes pass through for a TUI driven from a pipe — untouched but for RS, which no
     terminal draws and say()'s mark relies on no guest getting into a capture.
+
+    SIGINT is ignored for the child's whole lifetime — wait_foreground's contract,
+    stretched to cover the relay loop: a Ctrl-C reaches the child through the terminal's
+    process group, and the parent stays to relay its dying output, reap it, and hand its
+    exit status back so the caller can clean up. A child still running on the way out —
+    an exit forced by SIGTERM, or a reader that closed our stdout mid-relay — is stopped
+    rather than orphaned against a sandbox its caller is about to remove.
     """
+    previous = signal.signal(signal.SIGINT, lambda *a: None)
     ptm, pts = os.openpty()
+    proc = None
     try:
         attrs = termios.tcgetattr(pts)                  # no echo: our EOF byte below would
         attrs[3] &= ~termios.ECHO                       # otherwise come back as "^D"
@@ -1511,6 +1586,9 @@ def _pty_relay(argv, *, demux, on_line=None):
         return wait_foreground(proc)
     finally:
         os.close(ptm)
+        if proc is not None:
+            stop(proc)                                  # reaped already on the clean path
+        signal.signal(signal.SIGINT, previous)
 
 
 def _relay(line, *, newline, on_line=None):
@@ -1609,6 +1687,7 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
     shutil.rmtree(tmp, ignore_errors=True)               # stale leftover from a crash
     tmp.mkdir(parents=True)
     owned = False                                        # whether the rename made sdir ours
+    created = False                                      # whether msb create was reached
     try:
         (tmp / "rules.txt").write_text(rules_text)
         if context:
@@ -1625,32 +1704,52 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
         # The context goes into the rootfs, never the workspace: it must not appear in the
         # user's project, and a guest rewriting it changes nothing that matters.
         copies = [(sdir / "context.md", dst) for dst in context_paths] if context else []
+        created = True
         if subprocess.run(msb_create_argv(sandbox_name(name), image, port,
                                           mounts=mounts, env=env, copies=copies)).returncode:
-            _remove_sandbox(sandbox_name(name))          # a failed create can still register it
             die(f"msb create failed for session {name!r}")
     except BaseException:                                # incl. SystemExit from die()
-        shutil.rmtree(tmp, ignore_errors=True)
-        if owned:
-            shutil.rmtree(sdir, ignore_errors=True)
-        _release_port(name, port)
-        _maybe_stop_proxy()                              # a failure that left the registry
+        with _deferred_interrupts():                     # a Ctrl-C cannot halve the unwind
+            if created:                                  # failed or cut short, a create
+                _remove_sandbox(sandbox_name(name))      # can still have registered it
+            shutil.rmtree(tmp, ignore_errors=True)
+            if owned:
+                shutil.rmtree(sdir, ignore_errors=True)
+            _release_port(name, port)
+            _maybe_stop_proxy()                          # a failure that left the registry
         raise                                            # empty leaves no proxy over it
+
+
+# What each msb call gets during a removal before it is treated as hung. Teardowns run
+# under _deferred_interrupts, and a deferral is only honest while the thing it shields
+# is bounded: three calls at 30s each is the worst wait, after which the failure is
+# reported as a sandbox that could not be confirmed gone — never waited out silently.
+_MSB_TIMEOUT = 30
 
 
 def _remove_sandbox(sandbox):
     """Best-effort `msb stop` then `msb rm`; True iff the sandbox is verifiably gone.
     An rm failure is forgiven only when `msb list` no longer shows the name — rm also
-    fails for a sandbox that never registered, which is just as gone."""
+    fails for a sandbox that never registered, which is just as gone. The msb children
+    run in their own sessions: this is cleanup, and the terminal's Ctrl-C — aimed at
+    whatever silkgate was doing, and deferred by the callers here — must not kill the
+    removal mid-flight instead."""
     msb = shutil.which("msb")
     if not msb or not sandbox:
         return False
-    subprocess.run([msb, "stop", sandbox],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if not subprocess.run([msb, "rm", sandbox],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-        return True
-    listed = subprocess.run([msb, "list"], capture_output=True, text=True)
+    quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                 start_new_session=True, timeout=_MSB_TIMEOUT)
+    try:
+        subprocess.run([msb, "stop", sandbox], **quiet)
+    except subprocess.TimeoutExpired:
+        pass                                             # stop is courtesy; rm decides
+    try:
+        if not subprocess.run([msb, "rm", sandbox], **quiet).returncode:
+            return True
+        listed = subprocess.run([msb, "list"], capture_output=True, text=True,
+                                start_new_session=True, timeout=_MSB_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False                                     # a hung msb proves nothing
     if listed.returncode:
         return False                                     # cannot prove it is gone
     return not any(line.split()[:1] == [sandbox] for line in listed.stdout.splitlines()[1:])
@@ -1787,10 +1886,10 @@ def cmd_run(args):
     image = ensure_image(profiles, args.image, base=args.base)
     name = uuid4().hex[:6]
     proxy_was_running = _proxy_running()        # --port is the base port iff WE start it
-    proxy = ensure_proxy(args.port)
-    port = pick_port(proxy, name)
-    rc, provisioned = 1, False
+    rc, provisioned, proxy = 1, False, None
     try:
+        proxy = ensure_proxy(args.port)
+        port = pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=False)
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
                            _session_meta(profiles, cmd), ctx, ctx_paths)
@@ -1802,12 +1901,18 @@ def cmd_run(args):
         rc = run_guest(lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
                        cmd, tty=tty)
     finally:
-        if provisioned:
-            _teardown_session(read_meta(name) or
-                              {"name": name, "sandbox": sandbox_name(name)})
-        # Only tear down the proxy if this command started it and nothing else needs it.
-        if not proxy_was_running and not list_metas():
-            stop_proxy(read_proxy() or proxy)
+        # One-shot means one-shot even interrupted: the unwind runs with the stop
+        # signals deferred, so a second Ctrl-C cannot leave the session half-removed.
+        with _deferred_interrupts():
+            if provisioned:
+                _teardown_session(read_meta(name) or
+                                  {"name": name, "sandbox": sandbox_name(name)})
+            else:
+                _release_port(name)     # a claim pick_port made, however far it got
+            # Only tear down the proxy if this command started it and nothing else
+            # needs it.
+            if not proxy_was_running and not list_metas():
+                stop_proxy(read_proxy() or proxy)
     sys.exit(rc)
 
 
@@ -1857,16 +1962,32 @@ def cmd_up(args):
     preflight(*(() if args.image else _build_tools()), "msb", "mitmdump")
     ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
     image = ensure_image(profiles, args.image, base=args.base)
-    proxy = ensure_proxy(args.port)
-    port = pick_port(proxy, name)
-    ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=True)
-    _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
-                       _session_meta(profiles, profile_command(profiles)), ctx, ctx_paths)
-    fault = tier1_fault(sandbox_name(name), port)
-    if fault:
-        _teardown_session(read_meta(name) or {"name": name, "sandbox": sandbox_name(name)})
-        _maybe_stop_proxy()
-        die(fault)
+    provisioned = False
+    try:
+        proxy = ensure_proxy(args.port)
+        port = pick_port(proxy, name)
+        ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=True)
+        _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
+                           _session_meta(profiles, profile_command(profiles)), ctx, ctx_paths)
+        provisioned = True
+        fault = tier1_fault(sandbox_name(name), port)
+        if fault:
+            die(fault)
+    except BaseException:
+        # A session `up` never handed over is unwound whole, interrupt included:
+        # nothing of the user's is in the guest yet — work accrues only once
+        # exec/attach run, after `up` returns, and the workspace lives on the host
+        # either way — while a session left behind would hide that the command
+        # failed. The unwind defers the stop signals so a second Ctrl-C cannot
+        # leave it half-removed.
+        with _deferred_interrupts():
+            if provisioned:
+                _teardown_session(read_meta(name) or
+                                  {"name": name, "sandbox": sandbox_name(name)})
+            else:
+                _release_port(name)     # a claim pick_port made, however far it got
+            _maybe_stop_proxy()
+        raise
     say(f"session {name} up · proxy :{port} · audit: tail -f {proxy['log']}")
     print(name)
 
@@ -1901,8 +2022,11 @@ def cmd_down(args):
     # Teardown needs msb to stop/rm the guest; without this, its absence surfaces as
     # "msb rm failed — session kept", which reads as a broken sandbox, not a missing tool.
     preflight("msb")
-    _teardown_session(meta)
-    _maybe_stop_proxy()
+    # The removal holds the stop signals: a Ctrl-C partway through would leave the
+    # session half-removed, the one state worse than up or gone.
+    with _deferred_interrupts():
+        _teardown_session(meta)
+        _maybe_stop_proxy()
     say(f"session {args.name} down")
 
 
@@ -3426,8 +3550,33 @@ def main():
 
     # SIGTERM must run the finally-blocks that stop mitmdump/msb, not kill us outright.
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))
+    # SIGHUP — the terminal going away over a live run — gets the same treatment and
+    # the same 128+signo status, or every session and proxy this process holds would
+    # outlive it. An inherited SIG_IGN (nohup) is the caller declaring hangups
+    # expected, and stays.
+    if signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
+        signal.signal(signal.SIGHUP, lambda *a: sys.exit(129))
     args = ap.parse_args()
-    args.fn(args)
+    try:
+        args.fn(args)
+    except KeyboardInterrupt:
+        # An interrupt is not an error: the finally-blocks have already unwound on the
+        # way here, so no traceback and no chatter — just the conventional status.
+        # os._exit skips interpreter shutdown, which would otherwise re-surface a
+        # pending SIGINT as a traceback on stderr; SIGINT is ignored first so a late
+        # Ctrl-C cannot land inside this handler itself.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+        os._exit(130)
+    except BrokenPipeError:
+        # The reader went away (`silkgate ... | head -3`) and the unwind has already
+        # run. 141 is how a shell reports a pipe death; os._exit skips interpreter
+        # shutdown, whose flush of the dead stream would print "Exception ignored"
+        # noise over the quiet exit.
+        os._exit(141)
 
 
 if __name__ == "__main__":

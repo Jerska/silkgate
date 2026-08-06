@@ -26,6 +26,12 @@ What is covered:
     (#30), and reading its own child's log for the bind failure a port probe cannot
     see — a bare connect answers in milliseconds against a squatter, long before the
     spawned mitmdump gets anywhere near its own bind
+  * what each entry point leaves behind under the ways a human actually stops it —
+    Ctrl-C in every phase (proxy wait, provisioning, the Tier-1 probe, the guest
+    command, teardown itself), a second Ctrl-C during the unwind, SIGHUP, SIGTERM,
+    and a reader closing the pipe — driven end to end: the real CLI as a subprocess
+    in its own process group, fake msb/mitmdump holding each phase open long enough
+    to land a signal in it (InterruptTest)
 """
 import importlib.util
 import json
@@ -36,6 +42,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 import unittest
@@ -88,8 +95,9 @@ while True:
     threading.Thread(target=handle, args=(c,), daemon=True).start()
 """
 
-# Fake mitmdump: records its argv, binds each `--mode regular@host:port` on exactly the
-# host it names (so a wildcard bind is observable as one), serves the control protocol on
+# Fake mitmdump: records its argv (and its pid, beside it, so a test can still find it
+# once it is orphaned), binds each `--mode regular@host:port` on exactly the host it
+# names (so a wildcard bind is observable as one), serves the control protocol on
 # EGRESS_CONTROL_SOCK, and runs until signalled. Mode specs split host from port at the
 # last colon, as mitmproxy's own grammar does, so an IPv6 literal arrives bare.
 FAKE_MITMDUMP_SRC = r"""
@@ -98,6 +106,8 @@ rec = os.environ.get("FAKE_MITM_ARGV")
 if rec:
     with open(rec, "w") as fh:
         json.dump(sys.argv[1:], fh)
+    with open(rec + ".pid", "w") as fh:
+        fh.write(str(os.getpid()))
 def opts(flag):
     return [sys.argv[i + 1] for i, a in enumerate(sys.argv) if a == flag and i + 1 < len(sys.argv)]
 listens = []
@@ -165,20 +175,74 @@ while True:
     time.sleep(3600)
 """
 
+# Fake mitmdump that starts and stays up but never binds or answers anything — a hung
+# startup, as the readiness loop sees it. It advertises itself with a `.live` marker it
+# removes on the SIGTERM stop() sends, so a test can tell "stopped on the way out" from
+# "orphaned" without trusting pid probes: an exited-but-unreaped child is a zombie that
+# still answers kill -0.
+FAKE_MITMDUMP_DEAF_SRC = r"""
+import os, signal, sys, time
+rec = os.environ["FAKE_MITM_ARGV"]
+with open(rec + ".pid", "w") as fh:
+    fh.write(str(os.getpid()))
+def bow_out(signum, frame):
+    try:
+        os.unlink(rec + ".live")
+    except FileNotFoundError:
+        pass
+    sys.exit(0)
+signal.signal(signal.SIGTERM, bow_out)
+open(rec + ".live", "w").close()
+while True:
+    time.sleep(0.1)
+"""
+
 # Fake msb: logs every invocation; `rm`/`create` succeed per a JSON config file, and
-# `list` shows whatever sandboxes the config says exist.
+# `list` shows whatever sandboxes the config says exist. The *_sleep keys hold one phase
+# open so a signal can land inside it, each phase announcing itself with a marker file:
+# `create`/`rm`/the Tier-1 `exec` sleep with SIGINT ignored (a group-wide Ctrl-C is aimed
+# at what silkgate was doing; how these children die is not the thing under test), while
+# a guest `exec` mimics the real one, whose in-guest command the terminal's Ctrl-C kills
+# — it exits 130, cleanly. `exec_spew` floods stdout instead, for a reader that hangs up.
 FAKE_MSB_SRC = r"""
-import json, os, sys
+import json, os, signal, sys, time
 d = os.environ["FAKE_MSB_DIR"]
 with open(os.path.join(d, "log"), "a") as fh:
     fh.write(" ".join(sys.argv[1:]) + "\n")
 with open(os.path.join(d, "cfg")) as fh:
     cfg = json.load(fh)
+def mark(name):
+    open(os.path.join(d, name), "w").close()
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 if cmd == "rm":
+    if cfg.get("rm_sleep"):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        mark("rm-live")
+        time.sleep(cfg["rm_sleep"])
     sys.exit(0 if cfg.get("rm_ok", True) else 1)
 if cmd == "create":
+    if cfg.get("create_sleep"):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        mark("create-live")
+        time.sleep(cfg["create_sleep"])
     sys.exit(0 if cfg.get("create_ok", True) else 1)
+if cmd == "exec":
+    if any("TIER1_" in a for a in sys.argv):
+        if cfg.get("tier1_sleep"):
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            mark("tier1-live")
+            time.sleep(cfg["tier1_sleep"])
+        print(cfg.get("tier1_out", "TIER1_OK"))
+        sys.exit(0)
+    mark("exec-live")
+    signal.signal(signal.SIGINT, lambda *a: sys.exit(130))
+    if cfg.get("exec_sleep"):
+        time.sleep(cfg["exec_sleep"])
+    if cfg.get("exec_spew"):
+        while True:
+            print("guest output " * 40, flush=True)
+    print(cfg.get("exec_out", ""))
+    sys.exit(cfg.get("exec_rc", 0))
 if cmd == "list":
     print("NAME IMAGE STATUS")
     for n in cfg.get("listed", []):
@@ -284,7 +348,10 @@ def _teardown_worker(barrier, q, name, down_style):
         q.put((name, f"error: {e!r}"))
 
 
-class LifecycleTest(unittest.TestCase):
+class _FakeToolsCase(unittest.TestCase):
+    """Temp state dir plus fake msb/mitmdump on PATH — the harness the in-process
+    cases run against. Test classes subclass this; it holds no tests of its own."""
+
     maxDiff = None
 
     def setUp(self):
@@ -442,6 +509,9 @@ class LifecycleTest(unittest.TestCase):
             p.join(10)
         self.assertEqual([r for r in results if r[1] != "ok"], [],
                          f"teardown workers failed: {results}")
+
+
+class LifecycleTest(_FakeToolsCase):
 
     # -- pick_port: the port claim ----------------------------------------------
 
@@ -887,6 +957,487 @@ class LifecycleTest(unittest.TestCase):
         for wildcard, dialed in (("0.0.0.0", "127.0.0.1"), ("::", "::1")):
             with mock.patch.object(MOD, "PROXY_BINDS", (wildcard,)):
                 self.assertEqual(MOD._probe_addr(8090), (dialed, 8090))
+
+
+def _start_proxy_worker(barrier, port):
+    """One start_proxy against a mitmdump that never comes up, ready to be interrupted."""
+    barrier.wait(timeout=20)
+    try:
+        MOD.start_proxy(RULE, port)
+    except BaseException:
+        pass
+
+
+class InterruptSideEffectTest(_FakeToolsCase):
+    """The in-process halves of the interrupt work: pieces whose contract is a return
+    value or a side effect on this process, not an exit status."""
+
+    def test_wait_foreground_reports_a_signal_death_like_a_shell(self):
+        """proc.wait() hands back -SIGINT for a child Ctrl-C killed; fed to sys.exit
+        that is read as a status byte and mangled, so the caller must see 130."""
+        proc = subprocess.Popen([sys.executable, "-c",
+                                 "import os, signal;"
+                                 " signal.signal(signal.SIGINT, signal.SIG_DFL);"
+                                 " os.kill(os.getpid(), signal.SIGINT)"])
+        self.assertEqual(MOD.wait_foreground(proc), 130)
+
+    def test_say_survives_a_dead_stderr(self):
+        """The unwind's own prints must not become a second failure: by teardown time
+        stderr can be a closed pipe or a vanished terminal."""
+        class Dead:
+            def write(self, *a):
+                raise BrokenPipeError()
+
+            def flush(self):
+                raise BrokenPipeError()
+        with mock.patch.object(sys, "stderr", Dead()):
+            MOD.say("teardown progress")             # must not raise
+
+    def test_deferred_interrupts_holds_sigint_and_restores(self):
+        """Inside the guard a SIGINT is noted, never raised; outside, the previous
+        handler is back. This is what keeps a second Ctrl-C out of a teardown."""
+        before = signal.getsignal(signal.SIGINT)
+        saved, devnull = os.dup(2), os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)                          # the guard acknowledges on fd 2
+        try:
+            with MOD._deferred_interrupts():
+                os.kill(os.getpid(), signal.SIGINT)  # bare, this raises KeyboardInterrupt
+                time.sleep(0.05)                     # give the handler its bytecode edge
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+            os.close(devnull)
+        self.assertIs(signal.getsignal(signal.SIGINT), before)
+
+    def test_pty_relay_stops_a_child_the_reader_hung_up_on(self):
+        """A BrokenPipeError mid-relay must not orphan the msb exec child against a
+        sandbox the caller is about to remove."""
+        stopped = Path(self._tmp.name) / "child-stopped"
+        child = ("import signal, sys, time\n"
+                 "def bye(*a):\n"
+                 f"    open({str(stopped)!r}, 'w').close()\n"
+                 "    sys.exit(0)\n"
+                 "signal.signal(signal.SIGTERM, bye)\n"
+                 "print('x', flush=True)\n"
+                 "time.sleep(30)\n")
+        real = sys.stdout
+        sys.stdout = type("Gone", (), {"buffer": property(lambda s: (_ for _ in ()).throw(
+            BrokenPipeError()))})()
+        try:
+            with self.assertRaises(BrokenPipeError):
+                MOD._pty_relay([sys.executable, "-c", child], demux=True)
+        finally:
+            sys.stdout = real
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not stopped.exists():
+            time.sleep(0.05)
+        self.assertTrue(stopped.exists(),
+                        "the relay's child outlived the dead pipe — an msb exec left "
+                        "running against a sandbox about to be removed")
+
+    def test_start_proxy_interrupted_mid_wait_stops_its_mitmdump(self):
+        """A Ctrl-C during the readiness wait lands before the caller has any handle on
+        the spawned mitmdump — start_proxy itself must stop it or nobody ever does."""
+        self.install_mitmdump(FAKE_MITMDUMP_DEAF_SRC)
+        live = Path(str(self.mitm_argv) + ".live")
+        self.addCleanup(self._kill_recorded_mitm)
+        port = _free_pool_base(1)
+        ctx = multiprocessing.get_context("fork")
+        barrier = ctx.Barrier(2)
+        worker = ctx.Process(target=_start_proxy_worker, args=(barrier, port))
+        worker.start()
+        barrier.wait(timeout=20)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not live.exists():
+            time.sleep(0.02)
+        self.assertTrue(live.exists(), "the fake mitmdump never started")
+        os.kill(worker.pid, signal.SIGINT)
+        worker.join(20)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and live.exists():
+            time.sleep(0.05)
+        self.assertFalse(live.exists(),
+                         "the mitmdump spawned before the interrupt was left running "
+                         "— an orphan proxy nothing can ever stop")
+
+    def test_run_guest_tty_restores_the_callers_terminal(self):
+        """-t with a real terminal hands the child the caller's tty directly; a child
+        that leaves it raw must not hand it back that way (the `stty sane` failure)."""
+        ptm, pts = os.openpty()
+        self.addCleanup(os.close, ptm)
+        raw = "import sys, tty; tty.setraw(sys.stdout.fileno())"
+        driver = (
+            "import importlib.util, sys\n"
+            "from importlib.machinery import SourceFileLoader\n"
+            f"loader = SourceFileLoader('sg', {str(CLI)!r})\n"
+            f"spec = importlib.util.spec_from_file_location('sg', {str(CLI)!r},"
+            " loader=loader)\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "loader.exec_module(mod)\n"
+            f"sys.exit(mod.run_guest(lambda c: [sys.executable, '-c', {raw!r}],"
+            " ['x'], tty=True))\n")
+        proc = subprocess.Popen([sys.executable, "-c", driver],
+                                stdin=pts, stdout=pts, stderr=subprocess.PIPE, text=True)
+        os.close(pts)
+        _, err = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertTrue(termios.tcgetattr(ptm)[3] & termios.ECHO,
+                        "the child left the terminal raw and nothing restored it")
+
+    def _kill_recorded_mitm(self):
+        pidfile = Path(str(self.mitm_argv) + ".pid")
+        if pidfile.exists():
+            self._kill_pid(int(pidfile.read_text()))
+
+
+class InterruptTest(unittest.TestCase):
+    """What each entry point leaves behind when a human stops it, end to end: the real
+    CLI runs as a subprocess in its own process group with HOME pointed at a scratch
+    directory (so ~/.silkgate lives there), fake msb/mitmdump on PATH hold whichever
+    phase the test targets open (see FAKE_MSB_SRC), the signal goes to the whole group
+    — what a terminal's Ctrl-C or a closing session actually does — and the assertions
+    are on what survives: session dirs, port claims, proxy listeners, the exit status,
+    and a stderr free of tracebacks. Proxy death is asserted on its listeners and
+    control socket, never kill -0: the mitmdump child is not ours to reap, and its
+    zombie would answer. SILKGATE_CLI points these tests at an older CLI the same way
+    it does the in-process ones."""
+
+    maxDiff = None
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="sgint-")
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.home = root / "home"
+        self.home.mkdir()
+        self.silk = self.home / ".silkgate"
+        fakebin = root / "bin"
+        fakebin.mkdir()
+        self.fakebin = fakebin
+        self.msb_dir = root / "msb"
+        self.msb_dir.mkdir()
+        (self.msb_dir / "log").write_text("")
+        self.cfg({})
+        self.mitm_argv = root / "mitm-argv.json"
+        for name, src in (("msb", FAKE_MSB_SRC), ("mitmdump", FAKE_MITMDUMP_SRC)):
+            exe = fakebin / name
+            exe.write_text(f"#!{sys.executable}\n{src}")
+            exe.chmod(0o755)
+        self.env = dict(os.environ, HOME=str(self.home),
+                        PATH=f"{fakebin}:{os.environ['PATH']}",
+                        FAKE_MSB_DIR=str(self.msb_dir),
+                        FAKE_MITM_ARGV=str(self.mitm_argv))
+        self.env.pop("SILKGATE_PROXY_BIND", None)
+        self.base = _free_pool_base(MOD.POOL_SIZE)
+        self.addCleanup(self._kill_recorded_mitm)
+
+    # -- plumbing ----------------------------------------------------------------
+
+    def cfg(self, cfg):
+        (self.msb_dir / "cfg").write_text(json.dumps(cfg))
+
+    def msb_log(self):
+        return (self.msb_dir / "log").read_text()
+
+    def spawn(self, *argv, preexec_fn=None):
+        proc = subprocess.Popen([sys.executable, str(CLI), *argv],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, env=self.env, text=True,
+                                start_new_session=True, preexec_fn=preexec_fn)
+        self.addCleanup(self._kill_group, proc)
+        return proc
+
+    def run_argv(self):
+        return ("run", "--image", "img", "--port", str(self.base), "--", "guestcmd")
+
+    def wait_for(self, predicate, what, timeout=20):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.02)
+        self.fail(f"timed out waiting for {what}")
+
+    def marker(self, name):
+        return (self.msb_dir / name).exists
+
+    def interrupt(self, proc, sig=signal.SIGINT):
+        os.killpg(proc.pid, sig)
+
+    def finish(self, proc, timeout=60):
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            out, err = proc.communicate()
+            self.fail(f"silkgate did not exit; stderr so far:\n{err}")
+        return out, err
+
+    def _kill_group(self, proc):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            proc.wait(5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        for stream in (proc.stdout, proc.stderr):
+            if stream:
+                stream.close()
+
+    def _kill_recorded_mitm(self):
+        pidfile = Path(str(self.mitm_argv) + ".pid")
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except OSError:
+                pass
+
+    # -- assertions --------------------------------------------------------------
+
+    def assert_quiet(self, err):
+        self.assertNotIn("Traceback", err, f"an interrupt printed a stack trace:\n{err}")
+        self.assertNotIn("Exception ignored", err,
+                         f"interpreter-shutdown noise reached the user:\n{err}")
+
+    def assert_no_leftovers(self, err):
+        sessions = self.silk / "sessions"
+        if sessions.is_dir():
+            left = [p.name for p in sessions.iterdir() if p.name != ".ports"]
+            self.assertEqual(left, [], f"session state survived: {left}\nstderr:\n{err}")
+            claims = sessions / ".ports"
+            if claims.is_dir():
+                self.assertEqual([p.name for p in claims.iterdir()], [],
+                                 "a port claim survived")
+        self.assert_proxy_stopped(err)
+
+    def assert_proxy_stopped(self, err):
+        self.assertFalse((self.silk / "proxy.json").exists(),
+                         f"proxy.json survived\nstderr:\n{err}")
+        self.assertFalse(_ping(self.silk / "proxy.sock"),
+                         "something still answers the control socket")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                socket.create_connection(("127.0.0.1", self.base), timeout=0.5).close()
+            except OSError:
+                return
+            time.sleep(0.05)
+        self.fail("the shared proxy still holds its base port — the orphan this "
+                  "brief opened with")
+
+    def write_session(self, name, port, command=None):
+        sdir = self.silk / "sessions" / name
+        sdir.mkdir(parents=True)
+        (sdir / "rules.txt").write_text(RULE)
+        meta = {"name": name, "sandbox": "sg-" + name, "port": port}
+        if command:
+            meta["command"] = command
+        (sdir / "meta.json").write_text(json.dumps(meta))
+        return sdir
+
+    # -- run ---------------------------------------------------------------------
+
+    def test_run_sigint_during_the_guest_command(self):
+        """Ctrl-C mid-command: the guest dies, the session is torn down whole, and the
+        user sees no traceback — just status 130, the shell's own convention."""
+        self.cfg({"exec_sleep": 120})
+        proc = self.spawn(*self.run_argv())
+        self.wait_for(self.marker("exec-live"), "the guest command to start")
+        self.interrupt(proc)
+        out, err = self.finish(proc)
+        self.assert_quiet(err)
+        self.assertEqual(proc.returncode, 130, err)
+        self.assert_no_leftovers(err)
+        self.assertIn("rm sg-", self.msb_log(), "the guest sandbox was never removed")
+
+    def test_run_sigint_during_provisioning(self):
+        """Ctrl-C while msb create is in flight: the half-made session is unwound —
+        staging dir, port claim, half-registered sandbox, proxy — with status 130."""
+        self.cfg({"create_sleep": 120})
+        proc = self.spawn(*self.run_argv())
+        self.wait_for(self.marker("create-live"), "msb create to start")
+        self.interrupt(proc)
+        out, err = self.finish(proc)
+        self.assert_quiet(err)
+        self.assertEqual(proc.returncode, 130, err)
+        self.assert_no_leftovers(err)
+        self.assertIn("rm sg-", self.msb_log(),
+                      "a create the interrupt cut short can still have registered "
+                      "the sandbox; nothing removed it")
+
+    def test_run_second_sigint_does_not_abort_the_teardown(self):
+        """The impatient second Ctrl-C, landing mid-unwind: it is deferred (and said
+        to be), the removal completes, and nothing is left half-removed."""
+        self.cfg({"exec_sleep": 120, "rm_sleep": 1.5})
+        proc = self.spawn(*self.run_argv())
+        self.wait_for(self.marker("exec-live"), "the guest command to start")
+        self.interrupt(proc)
+        self.wait_for(self.marker("rm-live"), "the teardown's msb rm to start")
+        time.sleep(0.1)
+        self.interrupt(proc)
+        out, err = self.finish(proc)
+        self.assert_quiet(err)
+        self.assertEqual(proc.returncode, 130, err)
+        self.assert_no_leftovers(err)
+        self.assertIn("finishing cleanup", err,
+                      "the deferred interrupt was not acknowledged — a silent pause "
+                      "reads as a hang and invites a kill -9")
+
+    def test_run_broken_pipe_tears_down_quietly(self):
+        """`silkgate run ... | head -3`: the reader hangs up mid-stream. The guest and
+        session still come down, and the exit is a pipe death (141), not a traceback —
+        the failure that left a microVM running this evening."""
+        self.cfg({"exec_spew": True})
+        proc = self.spawn(*self.run_argv())
+        self.wait_for(self.marker("exec-live"), "the guest command to start")
+        proc.stdout.readline()                       # the stream is flowing; now hang up
+        proc.stdout.close()
+        err = proc.stderr.read()
+        try:
+            rc = proc.wait(60)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            self.fail(f"silkgate did not exit after its reader hung up:\n{err}")
+        self.assert_quiet(err)
+        self.assertEqual(rc, 141, err)
+        self.assert_no_leftovers(err)
+        self.assertIn("rm sg-", self.msb_log(), "the guest sandbox was never removed")
+
+    def test_run_sighup_unwinds_like_sigterm(self):
+        """The terminal closing over a live run: SIGHUP must reach the finally blocks
+        — status 129, session and proxy gone — not kill silkgate outright."""
+        self.cfg({"exec_sleep": 120})
+        proc = self.spawn(*self.run_argv())
+        self.wait_for(self.marker("exec-live"), "the guest command to start")
+        self.interrupt(proc, signal.SIGHUP)
+        out, err = self.finish(proc)
+        self.assertEqual(proc.returncode, 129,
+                         f"SIGHUP did not run the unwind (exit {proc.returncode})")
+        self.assert_no_leftovers(err)
+
+    def test_run_sigterm_still_cleans_up(self):
+        """The behavior the brief calls already safe — `timeout N silkgate run` — held
+        as a regression: SIGTERM exits 143 through the same unwind."""
+        self.cfg({"exec_sleep": 120})
+        proc = self.spawn(*self.run_argv())
+        self.wait_for(self.marker("exec-live"), "the guest command to start")
+        self.interrupt(proc, signal.SIGTERM)
+        out, err = self.finish(proc)
+        self.assert_quiet(err)
+        self.assertEqual(proc.returncode, 143, err)
+        self.assert_no_leftovers(err)
+
+    def test_run_sigint_during_the_proxy_wait(self):
+        """Ctrl-C inside the up-to-15s readiness wait — the impatient interrupt a slow
+        proxy invites. The mitmdump just spawned has no record yet; if this exit does
+        not stop it, nothing ever can."""
+        deaf = self.fakebin / "mitmdump"
+        deaf.write_text(f"#!{sys.executable}\n{FAKE_MITMDUMP_DEAF_SRC}")
+        live = Path(str(self.mitm_argv) + ".live")
+        proc = self.spawn(*self.run_argv())
+        self.wait_for(live.exists, "the fake mitmdump to start")
+        self.interrupt(proc)
+        out, err = self.finish(proc)
+        self.assert_quiet(err)
+        self.assertEqual(proc.returncode, 130, err)
+        self.wait_for(lambda: not live.exists(), "the spawned mitmdump to be stopped",
+                      timeout=10)
+        self.assertFalse((self.silk / "proxy.json").exists())
+
+    # -- up ----------------------------------------------------------------------
+
+    def test_up_sigint_during_provisioning(self):
+        """An interrupted `up` unwinds whole: no session dir, no claim, no proxy —
+        and quietly. (What to leave behind is a judgement: nothing of the user's is
+        in the guest until exec/attach run, after `up` returns, and a session left
+        up would hide that the command failed.)"""
+        self.cfg({"create_sleep": 120})
+        proc = self.spawn("up", "--name", "s1", "--image", "img",
+                          "--port", str(self.base))
+        self.wait_for(self.marker("create-live"), "msb create to start")
+        self.interrupt(proc)
+        out, err = self.finish(proc)
+        self.assert_quiet(err)
+        self.assertEqual(proc.returncode, 130, err)
+        self.assert_no_leftovers(err)
+
+    def test_up_sigint_during_the_tier1_probe(self):
+        """The window after the guest exists and before it is handed over: an
+        interrupt here must not leave an unproven session up behind a failed
+        command — the leak `up` had, since nothing here was under a finally."""
+        self.cfg({"tier1_sleep": 120})
+        proc = self.spawn("up", "--name", "s1", "--image", "img",
+                          "--port", str(self.base))
+        self.wait_for(self.marker("tier1-live"), "the Tier-1 probe to start")
+        self.interrupt(proc)
+        out, err = self.finish(proc)
+        self.assert_quiet(err)
+        self.assertEqual(proc.returncode, 130, err)
+        self.assert_no_leftovers(err)
+        self.assertIn("rm sg-s1", self.msb_log(), "the booted guest was never removed")
+
+    def test_up_under_nohup_ignores_sighup(self):
+        """nohup's SIG_IGN is the caller declaring hangups expected; installing the
+        129 handler over it would turn every hangup into a torn-down `up`."""
+        self.cfg({"create_sleep": 120})
+        proc = self.spawn("up", "--name", "s1", "--image", "img",
+                          "--port", str(self.base),
+                          preexec_fn=lambda: signal.signal(signal.SIGHUP,
+                                                           signal.SIG_IGN))
+        self.wait_for(self.marker("create-live"), "msb create to start")
+        self.interrupt(proc, signal.SIGHUP)
+        time.sleep(0.5)
+        self.assertIsNone(proc.poll(), "SIGHUP killed a nohup'd silkgate")
+        self.interrupt(proc)                         # now end the test run for real
+        out, err = self.finish(proc)
+        self.assertEqual(proc.returncode, 130, err)
+
+    # -- exec / attach: the session is the user's; an interrupt ends only the command
+
+    def test_exec_sigint_leaves_the_session_alone(self):
+        sdir = self.write_session("s1", self.base)
+        self.cfg({"exec_sleep": 120})
+        proc = self.spawn("exec", "s1", "--", "guestcmd")
+        self.wait_for(self.marker("exec-live"), "the exec'd command to start")
+        self.interrupt(proc)
+        out, err = self.finish(proc)
+        self.assert_quiet(err)
+        self.assertEqual(proc.returncode, 130, err)
+        self.assertTrue(sdir.exists(), "Ctrl-C in an exec tore down a persistent session")
+        self.assertNotIn("rm sg-s1", self.msb_log(),
+                         "Ctrl-C in an exec removed a persistent session's sandbox")
+
+    def test_attach_sigint_leaves_the_session_alone(self):
+        sdir = self.write_session("s1", self.base, command=["guestcmd"])
+        self.cfg({"exec_sleep": 120})
+        proc = self.spawn("attach", "s1")
+        self.wait_for(self.marker("exec-live"), "the attached command to start")
+        self.interrupt(proc)
+        out, err = self.finish(proc)
+        self.assert_quiet(err)
+        self.assertEqual(proc.returncode, 130, err)
+        self.assertTrue(sdir.exists(), "Ctrl-C in an attach tore down the session")
+
+    # -- down --------------------------------------------------------------------
+
+    def test_down_sigint_mid_removal_completes_the_removal(self):
+        """Ctrl-C while `down` is mid-removal is the half-removed-session recipe: the
+        signal is deferred, the msb child (its own process group) keeps removing, and
+        the command finishes what it started — exit 0, session gone."""
+        sdir = self.write_session("s1", self.base)
+        self.cfg({"rm_sleep": 1.5})
+        proc = self.spawn("down", "s1")
+        self.wait_for(self.marker("rm-live"), "the msb rm to start")
+        time.sleep(0.1)
+        self.interrupt(proc)
+        out, err = self.finish(proc)
+        self.assert_quiet(err)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertFalse(sdir.exists(), "the session survived a completed `down`")
+        self.assertIn("session s1 down", err,
+                      "the completed removal was not reported")
 
 
 if __name__ == "__main__":
