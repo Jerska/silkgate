@@ -754,9 +754,14 @@ fi
 # needs curl for a reason other than TLS, and it reads curl's own message rather than its exit
 # code, which conflates a refused connect with a certificate it does not trust.
 #
-# The control is the allowed path from the NEW source: if the proxy stops answering once the
-# source changes, the policy is source-keyed and fails CLOSED, and a denial elsewhere proves
-# nothing about a wider rule — that SKIPs. The address is removed either way.
+# The control is the allowed path from the NEW source, and its failure is the answer rather
+# than an inconclusive run: if even the permitted destination stops answering once the source
+# changes, the policy is keyed to something this guest cannot choose and it fails closed,
+# which is exactly the property being tested. Measured on msb 0.5.4, that is what happens —
+# a self-assigned source times out against the proxy itself — so reading it as inconclusive
+# left the check unable to pass at all, and `verify --full` unable to succeed on a healthy
+# host. Only a source that CAN reach the proxy goes on to probe a denied destination. The
+# address is removed either way.
 if ! have ip || ! have curl; then
   S 14 "root re-addressing (needs ip and curl — see README 'full check')"
 elif [ "$mech" != 1 ]; then
@@ -772,12 +777,12 @@ else
     added=""
   fi
   [ -z "$why" ] && added=1
+  src_ok=0
   if [ -z "$why" ]; then
     out=$(curl -sSv --interface "$src" -o /dev/null --max-time $T -x "$PROXY" http://silkgate.invalid/ 2>&1)
-    printf '%s\n' "$out" | grep -qi '^< *x-silkgate: *deny' ||
-      why="the proxy did not answer from source $src ($(curl_why "$out")) — the allowed path does not survive the new source, so a denial elsewhere is not attributable to policy"
+    printf '%s\n' "$out" | grep -qi '^< *x-silkgate: *deny' && src_ok=1
   fi
-  if [ -z "$why" ]; then
+  if [ -z "$why" ] && [ "$src_ok" = 1 ]; then
     t0=$(_us)
     out=$(curl -sSv --interface "$src" --noproxy '*' -o /dev/null --max-time $T https://1.1.1.1/ 2>&1)
     tcp_ms=$(( ($(_us) - t0) / 1000 ))
@@ -787,6 +792,8 @@ else
     esac
     tcp_errno=$(curl_why "$out")
     grade "from a self-assigned source address ($src on $rt_dev), TCP to 1.1.1.1:443"
+  elif [ -z "$why" ]; then
+    dv=p; dw="a self-assigned source ($src on $rt_dev) reaches nothing at all, the allowed path included ($(curl_why "$out")) — so the policy is not keyed to an address this guest can choose"
   else
     dv=s; dw="root re-addressing: $why"
   fi
