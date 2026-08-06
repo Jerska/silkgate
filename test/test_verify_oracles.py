@@ -1206,9 +1206,22 @@ class VerifyWiring(unittest.TestCase):
         self.addCleanup(patch.stop)
 
     def dead_port(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.bind(("127.0.0.1", 0))
-            return probe.getsockname()[1]
+        """A port nothing holds — and specifically not one of this run's oracle ports.
+
+        `_free_port(span=3)` reserves the proxy port and the two oracle ports by binding and
+        closing them, so those three numbers are freshly released and are precisely what the
+        kernel offers next. An unguarded ephemeral pick therefore lands on the observer's own
+        port often enough to make a contained run look like a leak — on one platform and not
+        another, which is the worst way for a test to be wrong.
+        """
+        reserved = {self.port, self.port + 1, self.port + 2}
+        for _ in range(50):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            if port not in reserved:
+                return port
+        raise AssertionError("no free port outside this run's oracle ports")
 
     def test_a_contained_run_reports_what_each_oracle_proved(self):
         self.aim_probes_at(self.dead_port())
