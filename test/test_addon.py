@@ -147,6 +147,7 @@ class AddonCase(unittest.TestCase):
         rec = self.record()
         self.assertEqual(rec["decision"], "allow")
         self.assertEqual((rec["host"], rec["port"]), (host, port))
+        self.assertEqual(rec["listen_port"], flow.client_conn.sockname[1])
         return rec
 
     def assertDenied(self, flow, *, code=403, host=None, port=None, reason=None):
@@ -158,6 +159,7 @@ class AddonCase(unittest.TestCase):
         rec = self.record()
         self.assertEqual(rec["decision"], "deny")
         self.assertEqual(rec["status"], code, "the deny line records the code we answered")
+        self.assertEqual(rec["listen_port"], flow.client_conn.sockname[1])
         if host is not None:
             self.assertEqual(rec["host"], host, "the audit must name the host actually dialled")
         if port is not None:
@@ -189,6 +191,16 @@ class HostSpoof(AddonCase):
         rec = self.assertAllowed(f, host="api.anthropic.com")
         self.assertTrue(rec["reason"].startswith("api.anthropic.com/v1/**"))
         self.assertEqual(f.request.headers["x-api-key"], SENTINEL_VALUE)
+        self.assertEqual(rec["injected"], "anthropic")
+
+    def test_inject_skipped_when_header_absent(self):
+        """When the guest sends no auth header, the swap is skipped and the request is unchanged."""
+        f = self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
+                             method="POST", body=b"prompt")
+        rec = self.assertAllowed(f, host="api.anthropic.com")
+        self.assertEqual(rec["inject_skipped"], "anthropic")
+        self.assertNotIn("injected", rec)
+        self.assertNotIn("x-api-key", f.request.headers)
 
     def test_honest_deny(self):
         f = self.run_request(host="evil.example", port=80, claimed="evil.example")
@@ -367,12 +379,18 @@ class Enforcement(AddonCase):
                                       (b"x-exfil", b"stolen"),
                                       (b"user-agent", b"curl/8"),
                                       (b"x-api-key", b"guest-dummy")])
-        self.assertAllowed(f, host="api.anthropic.com")
+        rec = self.assertAllowed(f, host="api.anthropic.com")
         self.assertEqual(f.request.headers["content-type"], "application/json")
         self.assertEqual(f.request.headers["Host"], "api.anthropic.com")
         self.assertEqual(f.request.headers["x-api-key"], SENTINEL_VALUE)
         self.assertNotIn("x-exfil", f.request.headers)
         self.assertNotIn("user-agent", f.request.headers)
+        self.assertIn("x-exfil", rec["stripped_headers"])
+        self.assertIn("user-agent", rec["stripped_headers"])
+        self.assertNotIn("x-api-key", rec.get("stripped_headers", []))
+        audit_line = self.audit.lines[-1]
+        self.assertNotIn("stolen", audit_line)
+        self.assertNotIn("curl/8", audit_line)
 
     def test_chunked_framing_survives_hygiene(self):
         """A chunked upload keeps its Transfer-Encoding through header hygiene.
@@ -400,8 +418,13 @@ class Enforcement(AddonCase):
     def test_disallowed_query_params_are_stripped(self):
         f = self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
                              path="/v1/messages?beta=true&evil=data&beta=false")
-        self.assertAllowed(f, host="api.anthropic.com")
+        rec = self.assertAllowed(f, host="api.anthropic.com")
         self.assertEqual(list(f.request.query.items(multi=True)), [("beta", "true")])
+        # "beta" appears because beta=false was dropped (beta=true survived); "evil" fully dropped
+        self.assertEqual(rec["stripped_query"], ["beta", "evil"])
+        audit_line = self.audit.lines[-1]
+        self.assertNotIn("data", audit_line)    # stripped value of evil=data
+        self.assertNotIn("false", audit_line)   # stripped value of beta=false
 
     def test_upgrade_is_denied(self):
         f = self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
@@ -477,6 +500,15 @@ class AuditRecord(AddonCase):
         self.assertEqual(rec["request_bytes"], len(b"prompt"))
         self.assertEqual(rec["response_bytes"], 142)
         self.assertEqual((rec["host"], rec["port"]), ("api.anthropic.com", 443))
+        start = f.request.timestamp_start
+        if start is not None:
+            end = getattr(f.response, "timestamp_end", None)
+            if end is not None:
+                self.assertEqual(rec["duration_ms"], int(round((end - start) * 1000)))
+            else:
+                self.assertIsInstance(rec["duration_ms"], int)
+        else:
+            self.assertIsNone(rec["duration_ms"])
 
     def test_a_destinations_500_is_told_apart_from_ours(self):
         f = self.run_request(host="registry.npmjs.org", claimed="registry.npmjs.org",

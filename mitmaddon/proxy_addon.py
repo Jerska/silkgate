@@ -33,6 +33,7 @@ import os
 import re
 import socket
 import tempfile
+import time
 from datetime import datetime
 
 from mitmproxy import ctx, exceptions, http
@@ -415,6 +416,14 @@ def _ts():
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
+def _listen_port(flow):
+    """The local TCP port this flow arrived on, or None if the socket info is absent."""
+    try:
+        return flow.client_conn.sockname[1]
+    except Exception:
+        return None
+
+
 def _audit(decision, flow, reason="", session=None, **extra):
     """One JSON object per line.
 
@@ -441,6 +450,7 @@ def _audit(decision, flow, reason="", session=None, **extra):
         "path": flow.request.path,
         "reason": reason,
         "session": session,
+        "listen_port": _listen_port(flow),
         **extra,
     }))
 
@@ -521,10 +531,19 @@ def _conclude(flow, reason=""):
     state = flow.metadata.pop("egress", None)
     if state is None:
         return
+    start = getattr(flow.request, "timestamp_start", None)
+    if start is not None:
+        end = (getattr(flow.response, "timestamp_end", None)
+               or getattr(flow.error, "timestamp", None)
+               or time.time())
+        duration_ms = int(round((end - start) * 1000))
+    else:
+        duration_ms = None
     _audit("response", flow, reason, state["session"],
            status=flow.response.status_code if flow.response else None,
            request_bytes=state["request_bytes"],
-           response_bytes=state["response_bytes"])
+           response_bytes=state["response_bytes"],
+           duration_ms=duration_ms)
 
 
 def response(flow: http.HTTPFlow) -> None:
@@ -662,11 +681,21 @@ def request(flow: http.HTTPFlow) -> None:
 
         # 6. Query params: keep only those the rule allows (deny-by-default per param, like
         #    headers) and STRIP the rest — the request proceeds without them, not a 403.
+        # stripped_query names only, sorted. A name may appear here even if some of its values
+        # survived: q:beta=true keeps beta=true but drops beta=false, so "beta" appears in
+        # stripped_query while the kept pair remains in the path going upstream.
+        stripped_query = []
         if req.query:
             items = list(req.query.items(multi=True))
-            kept = [(k, v) for (k, v) in items if rule.query_ok(k, v)]
-            if len(kept) != len(items):
+            kept, dropped_names = [], set()
+            for k, v in items:
+                if rule.query_ok(k, v):
+                    kept.append((k, v))
+                else:
+                    dropped_names.add(k)
+            if dropped_names:
                 req.query = kept
+                stripped_query = sorted(dropped_names)
 
         # 7. Request body capped (default 0 = no body).
         body_len = len(req.raw_content or b"")
@@ -679,6 +708,8 @@ def request(flow: http.HTTPFlow) -> None:
         #    host) ONLY if the request already carries that header — the guest signals intent by
         #    sending it. We never force the header onto a request that didn't use it.
         secret_header = None
+        injected = None
+        inject_skipped = None
         if rule.inject_auth:
             secret = SECRETS.get(session, rule.inject_auth)
             parsed = _parse_secret(secret) if secret is not None else None
@@ -694,17 +725,33 @@ def request(flow: http.HTTPFlow) -> None:
             secret_header = hname.lower()
             if req.headers.get(hname) is not None:        # only override when the header is used
                 req.headers[hname] = hval
+                injected = rule.inject_auth
+            else:
+                inject_skipped = rule.inject_auth
 
         # 9. Header hygiene: unless the rule allows all headers (h:*), drop any header failing the
         #    value constraint (deny-by-default) — keeping the auth header we just replaced.
+        stripped_headers = []
         if not rule.allow_all_headers:
+            removed = []
             for name in {k for k in req.headers.keys()}:
                 if name.lower() == secret_header:
                     continue
                 if not rule.header_ok(name, req.headers.get(name)):
                     del req.headers[name]
+                    removed.append(name.lower())
+            stripped_headers = sorted(removed)
 
-        _audit("allow", flow, rule.raw, session=session)
+        extras = {}
+        if injected is not None:
+            extras["injected"] = injected
+        if inject_skipped is not None:
+            extras["inject_skipped"] = inject_skipped
+        if stripped_query:
+            extras["stripped_query"] = stripped_query
+        if stripped_headers:
+            extras["stripped_headers"] = stripped_headers
+        _audit("allow", flow, rule.raw, session=session, **extras)
         # The allow line says what was asked; what actually moved — status and byte counts —
         # is the "response" record _conclude emits, and this marker is what earns one.
         flow.metadata["egress"] = {"session": session, "request_bytes": body_len,
