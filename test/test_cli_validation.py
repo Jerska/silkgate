@@ -919,6 +919,23 @@ class TestBranchGuards(CliCase):
         self.assertIn(".silkgate/", exclude.read_text().splitlines())
 
     @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
+    def test_branch_spec_ignores_inherited_git_env(self):
+        # A parent process may export GIT_DIR/GIT_WORK_TREE — a silkgate --branch guest
+        # does, at the session clone. The spec must describe the repository at cwd, and
+        # the exported one must come out untouched: without _host_git_env() this based
+        # the session on the decoy and wrote its info/exclude.
+        root = self._repo()
+        decoy = self._repo(name="decoy")
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(decoy / ".git"),
+                                          "GIT_WORK_TREE": str(decoy)}), self._cwd(root):
+            spec = sg._branch_spec("agent/x", self.git_profile(), [])
+        self.assertEqual(Path(spec["git_dir"]), (root / ".git").resolve())
+        self.assertEqual(Path(spec["repo_root"]), root.resolve())
+        exclude = decoy / ".git" / "info" / "exclude"
+        self.assertNotIn(".silkgate/",
+                         exclude.read_text().splitlines() if exclude.is_file() else [])
+
+    @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
     def test_branch_spec_refuses_a_repoless_cwd_and_an_unborn_head(self):
         empty = self.tmp / "empty"
         empty.mkdir()
