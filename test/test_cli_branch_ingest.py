@@ -14,6 +14,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -49,9 +50,11 @@ def tearDownModule():
 
 
 def _git(*argv, cwd=None):
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
     proc = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t.invalid",
                            "-c", "init.defaultBranch=main", *argv],
-                          capture_output=True, text=True, cwd=cwd)
+                          capture_output=True, text=True, cwd=cwd, env=env)
     if proc.returncode:
         raise AssertionError(f"fixture git {argv} failed: {proc.stderr}")
     return proc.stdout.strip()
