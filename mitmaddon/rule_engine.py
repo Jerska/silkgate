@@ -150,11 +150,17 @@ def _parse_ports(spec):
 # fullmatch semantics for "re". Values are capped to shrink the residual channel.
 _BASELINE_SPECS = {
     # Minimal structural baseline only. `host` is the (already-allowlisted) destination, not a
-    # channel; content-type/length are needed for request bodies. accept, accept-encoding,
-    # accept-language, user-agent, range are NOT baseline — opt in per rule via `h:`.
-    "host":            ("re", r"[A-Za-z0-9.:-]{1,253}"),
-    "content-type":    ("re", r"[A-Za-z0-9.+/=; -]{1,64}"),
-    "content-length":  ("re", r"\d{1,10}"),
+    # channel; content-type/length are needed for request bodies, and transfer-encoding is the
+    # other legal body framing — stripping it narrows nothing and un-frames the body: the proxy
+    # buffers the request either way, but a chunked upload whose header was dropped goes
+    # upstream with no framing at all (a `git push` over http.postBuffer dies exactly there).
+    # Only the one value bodies actually use is baseline; anything else stays deniable. accept,
+    # accept-encoding, accept-language, user-agent, range are NOT baseline — opt in per rule
+    # via `h:`.
+    "host":              ("re", r"[A-Za-z0-9.:-]{1,253}"),
+    "content-type":      ("re", r"[A-Za-z0-9.+/=; -]{1,64}"),
+    "content-length":    ("re", r"\d{1,10}"),
+    "transfer-encoding": ("exact", "chunked"),
 }
 
 
@@ -370,6 +376,8 @@ _HEADER_CASES = [
     (_HEADER_RULE, "accept",            "application/json",  False),  # not baseline -> stripped
     (_HEADER_RULE, "content-type",      "application/json",  True),   # baseline
     (_HEADER_RULE, "content-type",      "a" * 65,            False),  # exceeds 64-char cap
+    (_HEADER_RULE, "transfer-encoding", "chunked",           True),   # baseline: body framing
+    (_HEADER_RULE, "transfer-encoding", "gzip, chunked",     False),  # only the value git sends
     (r"registry.npmjs.org/** h:accept~application/(json|vnd\.npm.*)",
                    "accept", "application/vnd.npm.install-v1+json", True),
     (r"registry.npmjs.org/** h:accept~application/(json|vnd\.npm.*)",

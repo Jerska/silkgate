@@ -374,6 +374,23 @@ class Enforcement(AddonCase):
         self.assertNotIn("x-exfil", f.request.headers)
         self.assertNotIn("user-agent", f.request.headers)
 
+    def test_chunked_framing_survives_hygiene(self):
+        """A chunked upload keeps its Transfer-Encoding through header hygiene.
+
+        The body of a chunked request is buffered and bounded like any other, but the header
+        is its only framing: hygiene stripping it sends the request upstream with no framing
+        at all — the receiver reads an empty body and the connection dies mid-transfer. That
+        is how a `git push` over http.postBuffer failed against a live proxy, so this pins
+        the baseline, not a rule-specific `h:` opt-in.
+        """
+        f = self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
+                             method="POST", body=b"prompt",
+                             headers=[(b"transfer-encoding", b"chunked"),
+                                      (b"user-agent", b"git/2.50.1")])
+        self.assertAllowed(f, host="api.anthropic.com")
+        self.assertEqual(f.request.headers["transfer-encoding"], "chunked")
+        self.assertNotIn("user-agent", f.request.headers)
+
     def test_allow_all_headers_rule_keeps_them(self):
         f = self.run_request(host="files.pythonhosted.org", claimed="files.pythonhosted.org",
                              path="/packages/x.whl", headers=[(b"x-exfil", b"stolen")])
