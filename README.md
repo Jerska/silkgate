@@ -56,7 +56,7 @@ Because one `--with` list drives both, an image cannot end up holding a tool who
 nobody allowed. Compose them freely, and pin versions where it matters:
 
 ```sh
-./cli/silkgate build --with node@22.11.0 --with claude@2.1.89
+./cli/silkgate build --with node@22.11.0 --with claude@2.1.226
 # -> silkgate/node-claude:f357122f17de
 ```
 
