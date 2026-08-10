@@ -1325,6 +1325,31 @@ class TestWorkspaceRoMount(CliCase):
         for path in [str(Path.home()), str(REPO), os.sep]:
             self.refuses("refusing to mount", sg._workspace_mount, path, read_only=True)
 
+    def test_run_and_up_wire_workspace_ro(self):
+        # The :ro suffix is the whole enforcement, so the wiring from the flag to
+        # read_only=True must be proven through main(), not just by calling
+        # _workspace_mount directly — a cmd_run/cmd_up that dropped the kwarg would
+        # mount read-write and every other test here would still pass.
+        project = self.tmp / "project"
+        project.mkdir()
+        for argv in (["run", "--workspace-ro", str(project), "--", "true"],
+                     ["up", "--name", "wire2", "--workspace-ro", str(project)]):
+            seen = {}
+
+            def spy(workspace, *, allow_git_dir=False, read_only=False):
+                seen["workspace"], seen["read_only"] = workspace, read_only
+                raise SystemExit(42)                        # stop before any proxy/msb work
+
+            with self.no_preflight(), \
+                    mock.patch.object(sg, "_workspace_mount", spy), \
+                    mock.patch.object(sys, "argv", ["silkgate"] + argv), \
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as caught:
+                sg.main()
+            self.assertEqual(caught.exception.code, 42, argv)
+            self.assertEqual(seen["workspace"], str(project), argv)
+            self.assertTrue(seen["read_only"], argv)
+
 
 if __name__ == "__main__":
     unittest.main()
