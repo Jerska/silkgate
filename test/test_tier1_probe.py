@@ -119,5 +119,66 @@ class Verdict(unittest.TestCase):
         self.assertIsNotNone(sg.tier1_verdict("TIER1_OK\n", 8093, error="msb exec exited 1"))
 
 
+class Fault(unittest.TestCase):
+    """tier1_fault's exec handling: one fresh-client retry for a swallowed exec
+    (the msb 0.5.4 relay race), and no retry for anything that is an answer."""
+
+    def setUp(self):
+        self.runs, self.notes = [], []
+        self._orig = (subprocess.run, sg._msb, sg.say)
+        sg._msb = lambda: "msb"
+        sg.say = self.notes.append
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        subprocess.run, sg._msb, sg.say = self._orig
+
+    def fault(self, outcomes):
+        """Run tier1_fault with subprocess.run scripted: each entry is either an
+        exception to raise or a CompletedProcess to return, one per call."""
+        it = iter(outcomes)
+        def run(argv, **kw):
+            self.runs.append(argv)
+            out = next(it)
+            if isinstance(out, BaseException):
+                raise out
+            return out
+        subprocess.run = run
+        return sg.tier1_fault("sb", 8093)
+
+    @staticmethod
+    def timeout():
+        return subprocess.TimeoutExpired("msb", 15)
+
+    @staticmethod
+    def done(returncode=0, stdout="TIER1_OK\n", stderr=""):
+        return subprocess.CompletedProcess("msb", returncode, stdout, stderr)
+
+    def test_timeout_then_ok_hands_over_and_notes_the_race(self):
+        self.assertIsNone(self.fault([self.timeout(), self.done()]))
+        self.assertEqual(len(self.runs), 2)
+        self.assertEqual(self.runs[0], self.runs[1])  # same probe, fresh exec client
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn("relay race", self.notes[0])
+
+    def test_two_timeouts_refuse_with_the_unchanged_message(self):
+        msg = self.fault([self.timeout(), self.timeout()])
+        self.assertEqual(msg, sg.tier1_verdict(
+            "", 8093, error="msb exec did not return within 15s"))
+        self.assertEqual(len(self.runs), 2)
+        self.assertEqual(self.notes, [])
+
+    def test_nonzero_exit_is_an_answer_not_retried(self):
+        msg = self.fault([self.done(returncode=7, stderr="boom\n")])
+        self.assertIsNotNone(msg)
+        self.assertEqual(len(self.runs), 1)
+        self.assertEqual(self.notes, [])
+
+    def test_clean_first_run_needs_no_retry_and_no_note(self):
+        self.assertIsNone(self.fault([self.done()]))
+        self.assertEqual(len(self.runs), 1)
+        self.assertEqual(self.notes, [])
+
+
 if __name__ == "__main__":
     unittest.main()

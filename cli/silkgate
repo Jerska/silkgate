@@ -1650,10 +1650,25 @@ def tier1_fault(sandbox, port):
     of containment is the exact failure mode this exists to close.
     """
     argv = msb_exec_argv(sandbox, tier1_probe_cmd(port))
-    try:   # in-guest waits are bounded at 1s each; 15s covers msb exec itself stalling
+    # In-guest waits are bounded at 1s each; 15s covers msb exec itself stalling. One
+    # stall has a known benign cause: msb 0.5.4's relay can silently swallow the FIRST
+    # exec after a sandbox create — it hands the new client slot 0 and the id range of
+    # create's own just-disconnected readiness client and never answers, so the exec CLI
+    # blocks forever while the guest is healthy (core.ready in ~170ms; waiting before the
+    # exec does not avoid it). Only that first client ever loses the race — a fresh exec
+    # client into a warm sandbox has not been seen to lose it — so a single retry with a
+    # new exec process recovers exactly the swallowed-request case. A second timeout, a
+    # nonzero exit, or a bad verdict token are answers, not swallowed requests, and are
+    # not retried.
+    try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired:
-        return tier1_verdict("", port, error="msb exec did not return within 15s")
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            return tier1_verdict("", port, error="msb exec did not return within 15s")
+        say("note: the first Tier-1 probe exec timed out — the msb relay race (msb 0.5.4 "
+            "swallows the first exec after create); a fresh exec client answered")
     if proc.returncode:
         detail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
         return tier1_verdict(proc.stdout, port,
