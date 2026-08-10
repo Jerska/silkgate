@@ -459,6 +459,13 @@ def _audit(decision, flow, reason="", session=None, **extra):
     answered, and the deny line is the whole story: nothing went upstream, so there is no
     second line. `status` on a "response" record is the destination's answer, or null if it
     never gave one.
+
+    What enforcement did on the way through rides the allow line as names, never values:
+    `injected` or `inject_skipped` (the secret's name — exclusive, by whether the guest sent
+    the header) and `stripped_query` / `stripped_headers` (sorted names that lost at least
+    one (name, value) pair). `path` is post-strip — the record describes what went upstream —
+    so a name in `stripped_query` can still appear in `path` with an allowed value:
+    q:beta=true keeps beta=true while dropping beta=false.
     """
     line = json.dumps({
         "ts": _ts(),
@@ -703,9 +710,7 @@ def request(flow: http.HTTPFlow) -> None:
 
         # 6. Query params: keep only those the rule allows (deny-by-default per param, like
         #    headers) and STRIP the rest — the request proceeds without them, not a 403.
-        # stripped_query names only, sorted. A name may appear here even if some of its values
-        # survived: q:beta=true keeps beta=true but drops beta=false, so "beta" appears in
-        # stripped_query while the kept pair remains in the path going upstream.
+        #    The audit line carries the dropped names (semantics: _audit's docstring).
         stripped_query = []
         if req.query:
             items = list(req.query.items(multi=True))
