@@ -45,6 +45,42 @@ from urllib.parse import unquote
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 
+# --- secret parser: "<Header>: <value>" ----------------------------------------
+# Shared with cli/silkgate so launch-time validation uses the exact same rules as
+# the proxy's runtime enforcement.  Kept stdlib-only so rule_engine stays importable
+# everywhere without mitmproxy.
+
+# A header name must be an RFC 9110 token: no spaces, no special chars beyond the set
+# below; max 64 chars is generous and caps the residual channel.
+_HEADER_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
+# Routing/framing headers must never be rewritten by secret injection: rewriting Host
+# would front another vhost behind an allowlisted destination; the others control
+# framing (smuggling vector) or connection lifecycle.
+_ROUTING_HEADERS = frozenset({"host", "content-length", "transfer-encoding",
+                               "connection", "upgrade"})
+_MAX_SECRET = 4096
+
+
+def _parse_secret(value):
+    """Split a "<Header>: <value>" secret into (header, value), or None if unusable.
+
+    Rejected: a header name outside the token charset or naming a routing/framing
+    header, a value that is empty or carries anything but printable ASCII (a CR/LF
+    would inject a header of the guest's choosing into the upstream request), and
+    anything over _MAX_SECRET bytes.
+    """
+    if not isinstance(value, str) or not value or len(value) > _MAX_SECRET:
+        return None
+    name, sep, val = value.partition(":")
+    if not sep:
+        return None
+    name, val = name.strip(), val.strip()
+    if not _HEADER_TOKEN.fullmatch(name) or name.lower() in _ROUTING_HEADERS:
+        return None
+    if not val or not all(0x20 <= ord(c) <= 0x7e for c in val):
+        return None
+    return name, val
+
 # Underscore is invalid in public DNS (RFC 1123); excluded by default. A
 # deployment targeting internal/service names can add it to these two patterns.
 _HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
@@ -269,6 +305,28 @@ class Rule:
         return self.allow_query or _constraint_ok(self.query_params.get(name), value)
 
 
+# --- self-test data for _parse_secret -----------------------------------------
+_SECRET_GOOD = [
+    ("x-api-key: sk-ant-123",      ("x-api-key", "sk-ant-123")),
+    ("Authorization:Bearer abc",   ("Authorization", "Bearer abc")),
+    ("X-Custom: val with spaces",  ("X-Custom", "val with spaces")),
+]
+_SECRET_BAD = [
+    "no-colon",                          # no colon → no header name
+    "x-api-key: ",                        # empty value after strip
+    "Host: evil.example",                 # routing header
+    "Content-Length: 0",                  # framing header
+    "Transfer-Encoding: chunked",         # framing header
+    "Upgrade: websocket",                 # lifecycle header
+    "x api key: v",                       # space not a token char
+    "x-api-key: a\r\nx-exfil: b",         # CRLF injection
+    "x-api-key: a\x00b",                  # NUL
+    "x-api-key: k\u00e9y",               # non-ASCII
+    "x-api-key: " + "x" * _MAX_SECRET,   # over length limit
+    None,                                 # wrong type
+    42,                                   # wrong type
+]
+
 # A wildcard-only host warns rather than erroring: it is a deliberate opt-out an
 # operator may want, but one they must see. stderr reaches both the CLI operator at
 # compose time and mitmdump's log. q:*/h:* on a *named* host stay silent — they widen
@@ -471,9 +529,19 @@ def _selftest():
         if got != expected:
             fails += 1
             print(f"WARN  FAIL: {line!r}  want {expected} got {got}")
+    for value, expected in _SECRET_GOOD:
+        got = _parse_secret(value)
+        if got != expected:
+            fails += 1
+            print(f"SECRET FAIL (good): {value!r}  want {expected!r} got {got!r}")
+    for value in _SECRET_BAD:
+        got = _parse_secret(value)
+        if got is not None:
+            fails += 1
+            print(f"SECRET FAIL (bad):  {value!r}  want None got {got!r}")
     total = (len(_MATCH_CASES) + len(_HOST_CASES) + len(_HEADER_CASES)
              + len(_QUERY_CASES) + len(_PORT_CASES) + len(_PARSE_ERROR_CASES)
-             + len(_WARN_CASES))
+             + len(_WARN_CASES) + len(_SECRET_GOOD) + len(_SECRET_BAD))
     print(f"{total - fails}/{total} passed")
     raise SystemExit(1 if fails else 0)
 

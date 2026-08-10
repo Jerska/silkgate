@@ -444,6 +444,118 @@ class TestEmptyAllowlist(CliCase):
         self.assertIn("`api.anthropic.com/v1/**`", listed)
 
 
+class TestSecretValidation(CliCase):
+    """Launch-time secret checks: check_secrets validates values, not just presence;
+    the session comes up even when secrets are missing or malformed; cmd_secret_set
+    is the one hard-error path for absent or malformed values."""
+
+    _RULE = "api.anthropic.com/v1/** POST inject_auth=anthropic max_body=10m"
+
+    def _ruleset(self):
+        return sg.load_ruleset(self._RULE)
+
+    def test_check_secrets_passes_when_valid(self):
+        ruleset = self._ruleset()
+        err = io.StringIO()
+        with mock.patch.dict(os.environ,
+                             {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: sk-ant-test"}):
+            with contextlib.redirect_stderr(err):
+                sg.check_secrets(ruleset)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_check_secrets_warns_when_absent(self):
+        ruleset = self._ruleset()
+        err = io.StringIO()
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("SILKGATE_EGRESS_SECRET_")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with contextlib.redirect_stderr(err):
+                sg.check_secrets(ruleset)
+        self.assertIn("SILKGATE_EGRESS_SECRET_ANTHROPIC", err.getvalue())
+        self.assertIn("is not set", err.getvalue())
+        self.assertIn("inject_auth=anthropic", err.getvalue())
+
+    def test_check_secrets_warns_when_malformed(self):
+        """A value like "x-api-key: " (empty after the colon) passes truthiness but is
+        rejected by _parse_secret — the proxy would deny every matching request."""
+        ruleset = self._ruleset()
+        err = io.StringIO()
+        with mock.patch.dict(os.environ,
+                             {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: "}):
+            with contextlib.redirect_stderr(err):
+                sg.check_secrets(ruleset)
+        self.assertIn("SILKGATE_EGRESS_SECRET_ANTHROPIC", err.getvalue())
+        self.assertIn('not a valid', err.getvalue())
+        self.assertIn("inject_auth=anthropic", err.getvalue())
+
+    def test_check_secrets_does_not_die_when_missing(self):
+        """Launches always warn and continue — check_secrets never dies."""
+        ruleset = self._ruleset()
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("SILKGATE_EGRESS_SECRET_")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with contextlib.redirect_stderr(io.StringIO()):
+                sg.check_secrets(ruleset)   # must not raise
+
+    def test_check_secrets_does_not_die_when_malformed(self):
+        """A malformed but set secret is a warning, not a fatal error at launch."""
+        ruleset = self._ruleset()
+        with mock.patch.dict(os.environ,
+                             {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "no-colon-here"}):
+            with contextlib.redirect_stderr(io.StringIO()):
+                sg.check_secrets(ruleset)   # must not raise
+
+    def test_cmd_secret_set_rejects_malformed_value(self):
+        """cmd_secret_set keeps a hard error so push errors are caught before the proxy."""
+        args = mock.Mock()
+        args.name = "anthropic"
+        args.session = "foo"
+        with mock.patch.dict(os.environ,
+                             {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "no-colon-here"}):
+            self.refuses("not a valid", sg.cmd_secret_set, args)
+
+    def test_cmd_secret_set_dies_when_absent(self):
+        """Absence is still a hard error for explicit set operations."""
+        args = mock.Mock()
+        args.name = "anthropic"
+        args.session = "foo"
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("SILKGATE_EGRESS_SECRET_")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.refuses("missing secret", sg.cmd_secret_set, args)
+
+    def test_session_context_lists_available_credential(self):
+        ruleset = self._ruleset()
+        with mock.patch.dict(os.environ,
+                             {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: sk-ant-test"}):
+            ctx = sg.session_context([], ruleset, workspace=None, persistent=False)
+        self.assertIn("inject_auth=anthropic", ctx)
+        self.assertIn("Available", ctx)
+
+    def test_session_context_lists_missing_credential(self):
+        ruleset = self._ruleset()
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("SILKGATE_EGRESS_SECRET_")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            ctx = sg.session_context([], ruleset, workspace=None, persistent=False)
+        self.assertIn("inject_auth=anthropic", ctx)
+        self.assertIn("Missing or malformed", ctx)
+        self.assertIn("not set", ctx)
+
+    def test_session_context_lists_malformed_credential(self):
+        ruleset = self._ruleset()
+        with mock.patch.dict(os.environ,
+                             {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: "}):
+            ctx = sg.session_context([], ruleset, workspace=None, persistent=False)
+        self.assertIn("inject_auth=anthropic", ctx)
+        self.assertIn("Missing or malformed", ctx)
+
+    def test_session_context_omits_section_when_no_inject_auth(self):
+        ruleset = sg.load_ruleset("api.anthropic.com/v1/** POST\n")
+        ctx = sg.session_context([], ruleset, workspace=None, persistent=False)
+        self.assertNotIn("Injected credentials", ctx)
+
+
 class TestVerifyScoring(CliCase):
     """Finding 9: a run where most checks SKIP is not containment.
 
@@ -1082,6 +1194,32 @@ class TestGithubGrants(CliCase):
                          "s3 storage host must not appear in gitconfig setup")
         self.assertNotIn("githubusercontent.com", sh,
                          "cdn storage host must not appear in gitconfig setup")
+
+    # --- session_context: grants surface in the Injected credentials section ---
+
+    def _github_ctx(self):
+        ruleset = sg.load_ruleset("\n".join(sg._github_rules(["a/b"], [])) + "\n")
+        return sg.session_context([], ruleset, workspace=None, persistent=False,
+                                  github_read=["a/b"])
+
+    def test_session_context_github_grant_reports_missing_secret(self):
+        """The warn-not-die contract: a launch without the github secret still hands the
+        guest a context that names the grant AND its unusable credential."""
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("SILKGATE_EGRESS_SECRET_")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            ctx = self._github_ctx()
+        self.assertIn("## GitHub access", ctx)
+        self.assertIn("inject_auth=github", ctx)
+        self.assertIn("Missing or malformed", ctx)
+
+    def test_session_context_github_grant_reports_available_secret(self):
+        with mock.patch.dict(os.environ,
+                             {"SILKGATE_EGRESS_SECRET_GITHUB": "Authorization: Basic abc"}):
+            ctx = self._github_ctx()
+        self.assertIn("## GitHub access", ctx)
+        self.assertIn("inject_auth=github", ctx)
+        self.assertIn("Available", ctx)
 
     # --- read_meta hardening ---
 

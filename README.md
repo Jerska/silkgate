@@ -162,11 +162,14 @@ substitute content. It can also read any LFS object in the store, so treat the s
 to the guest. Hooks are copied into the clone verbatim and run in the guest; a hook that
 references host paths fails there (`--no-verify`, or fix the hook).
 
-`up` pushes every `SILKGATE_EGRESS_SECRET_<NAME>` the session's `inject_auth` rules need, and refuses to
-start if one is missing from your environment. Secrets are held **per session**, so one shared
-proxy never lets a later session spend a key an earlier one pushed — which means each `up` needs
-the variable in its own environment rather than inheriting one already in the proxy. Add or rotate
-one with `silkgate secret set anthropic --session foo`, which reads `SILKGATE_EGRESS_SECRET_ANTHROPIC` from
+`up` pushes every `SILKGATE_EGRESS_SECRET_<NAME>` the session's `inject_auth` rules need. A missing
+or malformed secret is a **warning**, not a startup error — the session comes up, and the guest
+sees the credential status in `/silkgate/CONTEXT.md`. How those variables reach the environment
+(shell profile, a per-launch prefix on the command, a password-manager wrapper) is the choice of
+the operator. Secrets are held **per session**, so one shared proxy never lets a later session
+spend a key an earlier one pushed — which means each `up` needs the variable in its own
+environment rather than inheriting one already in the proxy. Add or rotate one with
+`silkgate secret set anthropic --session foo`, which reads `SILKGATE_EGRESS_SECRET_ANTHROPIC` from
 the environment; the value is **never** an argument. `silkgate secret ls` lists names only, and
 `--session` narrows it to one.
 

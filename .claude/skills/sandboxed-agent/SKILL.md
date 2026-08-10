@@ -28,10 +28,16 @@ hang; later runs with the same profiles reuse it and start in under a second.
   There is no read-only mount, so a verification run can still write to it.
 - The base image has **no language runtimes** — no node, no python, no git. A guest has exactly
   what its profiles installed, so `--with claude` alone cannot run `node --test`.
-- **Secrets:** `SILKGATE_EGRESS_SECRET_<NAME>` on the host holds the **complete header line the proxy
-  sends upstream** (`"x-api-key: sk-ant-…"`, not a bare key). `<NAME>` upper-cases the
-  `inject_auth=<name>` in a profile's `rules.txt`, which is why the Anthropic key is
-  `SILKGATE_EGRESS_SECRET_ANTHROPIC`. Missing it is a clean startup error naming the variable.
+- **Secrets:** `inject_auth=<name>` in a rules file maps to `SILKGATE_EGRESS_SECRET_<NAME>` in
+  the host environment, holding the **complete header line the proxy sends upstream**
+  (`"x-api-key: sk-ant-…"`, not a bare key). How those variables reach the environment — shell
+  profile, a per-launch prefix on the command, a password-manager wrapper — is the choice and
+  the responsibility of the operator. A missing or malformed secret is **a warning, not a startup
+  error**: the session comes up and the guest sees the credential status in `/silkgate/CONTEXT.md`.
+  An agent that sees a missing-secret or malformed-secret warning for a secret its task needs must
+  **stop and report**, not launch into a task where every matching request will be denied.
+- `/silkgate/CONTEXT.md` tells the guest which injected credentials are available at launch time
+  and which are missing or malformed.
 - The guest's own `ANTHROPIC_API_KEY` is a dummy the claude profile bakes in, and the proxy's CA
   is in the guest's trust store — that combination is what makes the interception work. Check it
   yourself with `run --with claude -- printenv ANTHROPIC_API_KEY`. If a run dies on a TLS or auth
@@ -48,7 +54,6 @@ to `down` afterwards, and it cannot leave a session or a sandbox behind if the c
 mid-task. Boot is ~0.3s, so the fresh VM per command costs almost nothing.
 
 ```sh
-SILKGATE_EGRESS_SECRET_ANTHROPIC="x-api-key: $ANTHROPIC_SANDBOX_API_KEY" \
 ./cli/silkgate run \
     --with node@22.11.0 \
     --with claude \
@@ -137,11 +142,48 @@ rules are a floor: `--with node` grants `registry.npmjs.org` even to a task with
 Prefer the smallest profile set, prefer download-only (GET), and never allowlist an endpoint that
 reflects headers or bodies back. Adding a capability means writing a profile, not editing an image.
 
+**Rule grammar** (one rule per line in a `rules.txt` or after `--rule`):
+
+```
+<host>[:<port>][/<path>]   [METHOD ...]   [option ...]
+```
+
+- **Host** globs: `*` matches one label (`api.github.com`, not `a.b.github.com`); `**` matches
+  any number of labels; `**.` matches zero or more labels (apex variant). A host pattern that is
+  all wildcards (`**`, `*.*`) is legal but warns on stderr — it matches every destination.
+- **Path** globs: `*` matches one path segment; `**` matches any path. A pattern with no `/`
+  matches any path.
+- **Port**: omitting it allows 80 and 443 only; `:*` allows any port; `:N[,M…]` pins exact ports.
+- **Defaults** (when not overridden): GET only, no request body, query params stripped, baseline
+  headers only (host, content-type, content-length, transfer-encoding).
+- **Options** (space-separated after the pattern):
+  - `GET POST …` — allowed methods
+  - `max_body=<size>` — permit a request body up to `<size>` (bytes, `k`/`m` suffix)
+  - `q:*` — allow all query params; `q:<name>=<value>` / `q:<name>~<regex>` — keep matching
+    param only, strip the rest
+  - `h:*` — allow all request headers; `h:<name>=<value>` / `h:<name>~<regex>` — forward header
+    only if it matches, drop it otherwise
+  - `inject_auth=<name>` — replace the matching header's value with `SILKGATE_EGRESS_SECRET_<NAME>`
+    from the host environment
+
+A wildcard-only read-only web grant — intended for recon guests that hold nothing worth
+exfiltrating — looks like:
+
+```
+** GET q:* h:*
+```
+
+Use it only when the guest has no credentials or sensitive workspace content.
+
+**`--port N`** (on `run` and `up`) sets the proxy's listen port (default: 8090); use it when
+8090 is already taken on the host.
+
 ## Telling the guest where it is
 
 Each session generates a description of its own sandbox — installed profiles, the allowlist, the
-mount, that the key is a dummy — at `/silkgate/CONTEXT.md` and in `$SILKGATE_CONTEXT` (the text
-itself, not a path). `silkgate-claude` passes it for you, and does not pass `--bare`.
+mount, that the key is a dummy, and the launch-time status of every injected credential — at
+`/silkgate/CONTEXT.md` and in `$SILKGATE_CONTEXT` (the text itself, not a path). `silkgate-claude`
+passes it for you, and does not pass `--bare`.
 
 If you invoke `claude` directly: the claude profile also writes the context to
 `/root/.claude/CLAUDE.md`, which a plain `claude -p` reads. Adding Claude Code's own `--bare`

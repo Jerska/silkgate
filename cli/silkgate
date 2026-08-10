@@ -69,7 +69,7 @@ TIER1_PROBE_TARGET = "1.1.1.1:443"   # must be a live public service: the probe 
                                      # when a connect that WOULD succeed is denied (tier1_fault)
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
-from rule_engine import RuleSet
+from rule_engine import RuleSet, _parse_secret
 
 
 def die(msg, code=1):
@@ -335,16 +335,26 @@ def check_env(pairs):
                 "write it to a file in the workspace instead")
 
 
-def check_secrets(ruleset, fatal):
+def check_secrets(ruleset):
+    """Warn about any inject_auth secret in the ruleset that is absent or malformed.
+
+    Each secret must be set AND pass _parse_secret (a bare env var that is set but
+    evaluates to "x-api-key: " with an empty value passes the truthiness check that
+    used to be the only guard but is rejected by the proxy at request time).  Per the
+    design contract, launches always warn and continue.
+    """
     names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
-    missing = [n for n in names if not os.environ.get(f"SILKGATE_EGRESS_SECRET_{n.upper()}")]
-    if not missing:
-        return
-    msg = ("missing secret(s): "
-           + ", ".join(f'SILKGATE_EGRESS_SECRET_{n.upper()}="<header>: <value>"' for n in missing))
-    if fatal:
-        die(msg)
-    say(f"warning: {msg} — inject_auth requests will be denied")
+    for n in names:
+        value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{n.upper()}")
+        if not value:
+            reason = "is not set"
+        elif _parse_secret(value) is None:
+            reason = 'is set but not a valid "<Header>: <value>" line'
+        else:
+            continue
+        msg = (f"SILKGATE_EGRESS_SECRET_{n.upper()} {reason} — "
+               f"requests matching inject_auth={n} will be denied")
+        say(f"warning: {msg}")
 
 
 # --- host processes ----------------------------------------------------------
@@ -979,7 +989,31 @@ def session_context(profiles, ruleset, *, workspace, persistent, branch=None,
             "Git and git-lfs operations work without any credential configuration. For `curl`",
             "calls to `api.github.com` you must pass `-H \"Authorization: Basic c2lsa2dhdGU=\"`",
             "yourself — this placeholder triggers the proxy to inject the real credential.",
+            "All of this rides the `github` credential — its launch-time status is listed under",
+            "\"Injected credentials\" below; if it is missing or malformed there, these grants",
+            "deny until the operator fixes it.",
         ]
+    inject_names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
+    if inject_names:
+        lines += [
+            "",
+            "## Injected credentials",
+            "",
+            "Rules in this sandbox use `inject_auth` to replace a header with a real credential",
+            "held on the host. The in-guest key or token is a dummy; the proxy swaps it at the",
+            "boundary. The status of each credential at launch time:",
+            "",
+        ]
+        for name in inject_names:
+            value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{name.upper()}")
+            if value and _parse_secret(value) is not None:
+                status = ("**Available** — the proxy injects it at the boundary, and the "
+                          "matching in-guest key or token is a dummy.")
+            else:
+                reason = "not set" if not value else "set but not a valid header line"
+                status = (f"**Missing or malformed** ({reason}) — requests that need it "
+                          "will be denied. Report this to your operator instead of retrying.")
+            lines.append(f"- `inject_auth={name}`: {status}")
     return "\n".join(lines) + "\n"
 
 
@@ -1403,22 +1437,27 @@ def _wait_control_sock(timeout, pid=None):
 
 
 def _push_secrets(ruleset, session):
-    """Push every inject_auth secret we hold in the env, scoped to `session`, then fail on
-    any still missing. The proxy keeps one store per session, so this environment — the one
-    that asked for the session — is the only place its secrets can come from: a name another
-    session pushed earlier is not visible here and does not count."""
+    """Push every inject_auth secret we hold in the env, scoped to `session`.
+
+    The proxy keeps one store per session, so this environment is the only place its
+    secrets can come from.  A secret that is absent or malformed is warned about and
+    skipped rather than dying: the session comes up, and the guest's CONTEXT.md lists
+    the credential status so an operator (or the agent itself) can act on the warning
+    instead of discovering missing credentials mid-task.
+    """
     names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
     for n in names:
         value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{n.upper()}")
-        if value:                                       # value goes over the socket only
-            _sock_call({"op": "set_secret", "name": n.lower(), "value": value,
-                        "session": session})
-    have = {x.lower() for x in
-            _sock_call({"op": "list_secrets", "session": session}).get("names", [])}
-    missing = [n for n in names if n.lower() not in have]
-    if missing:
-        die("missing secret(s): "
-            + ", ".join(f'SILKGATE_EGRESS_SECRET_{n.upper()}="<header>: <value>"' for n in missing))
+        if not value:
+            say(f"warning: SILKGATE_EGRESS_SECRET_{n.upper()} is not set — "
+                f"requests matching inject_auth={n} will be denied")
+            continue
+        if _parse_secret(value) is None:
+            say(f"warning: SILKGATE_EGRESS_SECRET_{n.upper()} is set but not a valid "
+                f'"<Header>: <value>" line — requests matching inject_auth={n} will be denied')
+            continue
+        _sock_call({"op": "set_secret", "name": n.lower(), "value": value,
+                    "session": session})
 
 
 # --- msb session guests -----------------------------------------------------
@@ -2219,7 +2258,7 @@ def cmd_proxy(args):
     rules_text = compose_rules(profiles, args.rule or [])
     if not rules_text.strip():
         die("no rules — pass --with PROFILE and/or --rule 'host/path GET'")
-    check_secrets(load_ruleset(rules_text), fatal=False)
+    check_secrets(load_ruleset(rules_text))
     mitmdump = which("mitmdump", "pip install mitmproxy")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
@@ -2721,6 +2760,9 @@ def cmd_secret_set(args):
     value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{name.upper()}")
     if not value:
         die(f'missing secret: SILKGATE_EGRESS_SECRET_{name.upper()}="<header>: <value>"')
+    if _parse_secret(value) is None:
+        die(f'SILKGATE_EGRESS_SECRET_{name.upper()} is not a valid "<Header>: <value>" line — '
+            "expected a printable-ASCII header name (not a routing header) and a non-empty value")
     if not read_meta(args.session):
         die(f"no such session: {args.session!r} (silkgate ls)")
     if not _proxy_running():

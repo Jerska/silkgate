@@ -37,7 +37,8 @@ from datetime import datetime
 
 from mitmproxy import ctx, exceptions, http
 
-from rule_engine import RuleSet, normalize_host
+from rule_engine import (RuleSet, normalize_host,
+                         _parse_secret, _MAX_SECRET, _HEADER_TOKEN, _ROUTING_HEADERS)
 
 logger = logging.getLogger("egress")
 
@@ -69,35 +70,10 @@ def configure(updates):
 
 
 # --- secrets: "<Header>: <value>", in memory, scoped by session -----------------
-# A secret names the header whose value it replaces, so that name has to be a real header name
-# (RFC 9110 token) and never one that decides where the request goes or how it is framed:
-# rewriting Host would front another vhost behind an allowlisted destination — defeating the
-# destination agreement `request` enforces — and rewriting the framing headers is smuggling.
-_HEADER_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
+# _parse_secret, _MAX_SECRET, _HEADER_TOKEN and _ROUTING_HEADERS live in rule_engine
+# so cli/silkgate can reuse the same parser for launch-time validation without taking
+# a mitmproxy dependency.  _SECRET_NAME is proxy-internal (control-socket op names).
 _SECRET_NAME = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,63}")
-_ROUTING_HEADERS = frozenset({"host", "content-length", "transfer-encoding",
-                              "connection", "upgrade"})
-_MAX_SECRET = 4096
-
-
-def _parse_secret(value):
-    """Split a "<Header>: <value>" secret into (header, value), or None if it is unusable.
-
-    Rejected: a header name outside the token charset or naming a routing/framing header, a
-    value that is empty or carries anything but printable ASCII (a CR/LF would inject a header
-    of the guest's choosing into the upstream request), and anything over _MAX_SECRET.
-    """
-    if not isinstance(value, str) or not value or len(value) > _MAX_SECRET:
-        return None
-    name, sep, val = value.partition(":")
-    if not sep:
-        return None
-    name, val = name.strip(), val.strip()
-    if not _HEADER_TOKEN.fullmatch(name) or name.lower() in _ROUTING_HEADERS:
-        return None
-    if not val or not all(0x20 <= ord(c) <= 0x7e for c in val):
-        return None
-    return name, val
 
 
 class SecretStore:
