@@ -259,7 +259,7 @@ start exactly as before. The user learns what is missing the first time they ask
 sandbox: the CLI's preflight names every absent tool with its install command at once, e.g.
 `mitmdump not found — pip install mitmproxy` beside `msb not found — curl -fsSL
 https://install.microsandbox.dev | sh`. Two installs later, they export
-`EGRESS_SECRET_ANTHROPIC="x-api-key: …"` in their shell profile, per the README. Then, in
+`SILKGATE_EGRESS_SECRET_ANTHROPIC="x-api-key: …"` in their shell profile, per the README. Then, in
 any project: *"run the failing tests in a sandbox and fix them"* — the skill fires as
 `silkgate:sandboxed-agent`, invokes the CLI out of the plugin root, builds the first image
 (about a minute, once), and the audit log path prints. `silkgate verify` on request. Total

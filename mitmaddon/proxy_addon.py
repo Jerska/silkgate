@@ -3,17 +3,17 @@
 Every request is resolved the same way: the listener port it arrived on picks a ruleset.
 Which registry answers that question is the only difference between the two ways to run:
 
-    export EGRESS_RULES=/path/to/rules.txt                   # colon-separate to combine files
-    export EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-..."   # injected; never in the guest
+    export SILKGATE_EGRESS_RULES=/path/to/rules.txt                   # colon-separate to combine files
+    export SILKGATE_EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-..."   # injected; never in the guest
     mitmdump -s mitmaddon/proxy_addon.py --listen-port 8090
         one ruleset, every port — for guests silkgate doesn't manage
 
-    export EGRESS_SESSIONS_DIR=~/.silkgate/sessions          # <name>/meta.json + <name>/rules.txt
-    export EGRESS_CONTROL_SOCK=~/.silkgate/proxy.sock        # unix control socket (secrets)
+    export SILKGATE_EGRESS_SESSIONS_DIR=~/.silkgate/sessions          # <name>/meta.json + <name>/rules.txt
+    export SILKGATE_EGRESS_CONTROL_SOCK=~/.silkgate/proxy.sock        # unix control socket (secrets)
     mitmdump -s mitmaddon/proxy_addon.py --mode regular@8090 --mode regular@8091 ...
         one proxy serving many sessions, each on its own port
 
-Exactly one of EGRESS_RULES / EGRESS_SESSIONS_DIR must be set (die at load otherwise).
+Exactly one of SILKGATE_EGRESS_RULES / SILKGATE_EGRESS_SESSIONS_DIR must be set (die at load otherwise).
 
 Two hooks decide: `http_connect` gates the authority of a CONNECT before its tunnel exists,
 `request` decides every request — including the ones decrypted out of such a tunnel. Both
@@ -41,13 +41,13 @@ from rule_engine import RuleSet, normalize_host
 
 logger = logging.getLogger("egress")
 
-# --- configuration: exactly one of EGRESS_RULES / EGRESS_SESSIONS_DIR ---------
-_RULES_PATH = os.environ.get("EGRESS_RULES")
-_SESSIONS_DIR = os.environ.get("EGRESS_SESSIONS_DIR")
-_CONTROL_SOCK = os.environ.get("EGRESS_CONTROL_SOCK")
+# --- configuration: exactly one of SILKGATE_EGRESS_RULES / SILKGATE_EGRESS_SESSIONS_DIR ---------
+_RULES_PATH = os.environ.get("SILKGATE_EGRESS_RULES")
+_SESSIONS_DIR = os.environ.get("SILKGATE_EGRESS_SESSIONS_DIR")
+_CONTROL_SOCK = os.environ.get("SILKGATE_EGRESS_CONTROL_SOCK")
 if bool(_RULES_PATH) == bool(_SESSIONS_DIR):
-    raise RuntimeError("set exactly one of EGRESS_RULES (one ruleset, colon-separated rule "
-                       "files) or EGRESS_SESSIONS_DIR (a session per listener port)")
+    raise RuntimeError("set exactly one of SILKGATE_EGRESS_RULES (one ruleset, colon-separated rule "
+                       "files) or SILKGATE_EGRESS_SESSIONS_DIR (a session per listener port)")
 
 
 def configure(updates):
@@ -106,7 +106,7 @@ class SecretStore:
     A scope is a session name, or None for the standalone single-ruleset proxy. A session's
     secrets arrive over the control socket, already naming their scope, from the `up` that
     provisioned it — so a session spends only the credentials its own creator could show.
-    EGRESS_SECRET_* env vars are read for the None scope only: the process environment is
+    SILKGATE_EGRESS_SECRET_* env vars are read for the None scope only: the process environment is
     one bag shared by every session, and honouring it per session would be exactly the
     cross-session grant this scoping exists to remove. Values never leave this object: they
     are not logged, not returned by list, not echoed by any control op — only spent by
@@ -122,15 +122,15 @@ class SecretStore:
         if key in scope:
             return scope[key]
         if session is None:
-            return os.environ.get("EGRESS_SECRET_" + name.upper())
+            return os.environ.get("SILKGATE_EGRESS_SECRET_" + name.upper())
         return None
 
     def set(self, session, name, value):
         self._store.setdefault(session, {})[name.lower()] = value
 
     def names(self, session):
-        env = ({k[len("EGRESS_SECRET_"):].lower()
-                for k in os.environ if k.startswith("EGRESS_SECRET_")}
+        env = ({k[len("SILKGATE_EGRESS_SECRET_"):].lower()
+                for k in os.environ if k.startswith("SILKGATE_EGRESS_SECRET_")}
                if session is None else set())
         return sorted(env | set(self._store.get(session, {})))
 
@@ -171,7 +171,7 @@ class FixedRegistry:
 
 
 class SessionRegistry:
-    """Resolve a listener port to (session name, RuleSet) from EGRESS_SESSIONS_DIR.
+    """Resolve a listener port to (session name, RuleSet) from SILKGATE_EGRESS_SESSIONS_DIR.
 
     Layout: <dir>/<name>/meta.json (carries "port") and <dir>/<name>/rules.txt (the composed
     ruleset snapshot). Both layers are re-read from disk on every resolve: sessions appear by

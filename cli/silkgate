@@ -18,7 +18,7 @@ dedicated proxy port each. Host state lives under ~/.silkgate. See ../README.md.
     silkgate logs N [-f|--audit]   tail a session's guest output (or its proxy decisions)
     silkgate down N                stop + remove a session (+ the proxy if it was the last)
     silkgate ls                    list sessions + shared-proxy health
-    silkgate secret set NAME       push EGRESS_SECRET_<NAME> to the shared proxy (never argv)
+    silkgate secret set NAME       push SILKGATE_EGRESS_SECRET_<NAME> to the shared proxy (never argv)
     silkgate secret ls             list secret names held by the proxy (names only)
 
 A profile (profiles/<name>/) is one capability: setup.sh installs it at image build
@@ -26,7 +26,7 @@ time, rules.txt says what it may reach at run time. One `--with` list therefore
 decides both the image — synthesized here, hash-tagged, cached in msb — and the
 egress policy, so a guest can't hold a tool whose traffic nobody allowed.
 
-Secrets stay in the environment: EGRESS_SECRET_<NAME>="<header>: <value>" on the
+Secrets stay in the environment: SILKGATE_EGRESS_SECRET_<NAME>="<header>: <value>" on the
 host feeds inject_auth=<name> rules; the guest never sees them.
 """
 import argparse
@@ -337,11 +337,11 @@ def check_env(pairs):
 
 def check_secrets(ruleset, fatal):
     names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
-    missing = [n for n in names if not os.environ.get(f"EGRESS_SECRET_{n.upper()}")]
+    missing = [n for n in names if not os.environ.get(f"SILKGATE_EGRESS_SECRET_{n.upper()}")]
     if not missing:
         return
     msg = ("missing secret(s): "
-           + ", ".join(f'EGRESS_SECRET_{n.upper()}="<header>: <value>"' for n in missing))
+           + ", ".join(f'SILKGATE_EGRESS_SECRET_{n.upper()}="<header>: <value>"' for n in missing))
     if fatal:
         die(msg)
     say(f"warning: {msg} — inject_auth requests will be denied")
@@ -539,8 +539,8 @@ def start_proxy(rules_text, port):
     log_path = LOG_DIR / f"proxy-{stamp}.log"
     rules_file = LOG_DIR / f"proxy-{stamp}.rules"
     rules_file.write_text(rules_text)
-    env = dict(os.environ, EGRESS_RULES=str(rules_file))
-    env.pop("EGRESS_SESSIONS_DIR", None)
+    env = dict(os.environ, SILKGATE_EGRESS_RULES=str(rules_file))
+    env.pop("SILKGATE_EGRESS_SESSIONS_DIR", None)
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
     argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"] + _modes(port)
@@ -1189,10 +1189,10 @@ def start_shared_proxy(base_port):
     argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"]
     for p in ports:
         argv += _modes(p)
-    # Multi-session mode: EGRESS_SESSIONS_DIR on, EGRESS_RULES off (addon needs exactly one).
-    env = dict(os.environ, EGRESS_SESSIONS_DIR=str(SESSIONS_DIR),
-               EGRESS_CONTROL_SOCK=str(PROXY_SOCK))
-    env.pop("EGRESS_RULES", None)
+    # Multi-session mode: SILKGATE_EGRESS_SESSIONS_DIR on, SILKGATE_EGRESS_RULES off (addon needs exactly one).
+    env = dict(os.environ, SILKGATE_EGRESS_SESSIONS_DIR=str(SESSIONS_DIR),
+               SILKGATE_EGRESS_CONTROL_SOCK=str(PROXY_SOCK))
+    env.pop("SILKGATE_EGRESS_RULES", None)
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
@@ -1409,7 +1409,7 @@ def _push_secrets(ruleset, session):
     session pushed earlier is not visible here and does not count."""
     names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
     for n in names:
-        value = os.environ.get(f"EGRESS_SECRET_{n.upper()}")
+        value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{n.upper()}")
         if value:                                       # value goes over the socket only
             _sock_call({"op": "set_secret", "name": n.lower(), "value": value,
                         "session": session})
@@ -1418,7 +1418,7 @@ def _push_secrets(ruleset, session):
     missing = [n for n in names if n.lower() not in have]
     if missing:
         die("missing secret(s): "
-            + ", ".join(f'EGRESS_SECRET_{n.upper()}="<header>: <value>"' for n in missing))
+            + ", ".join(f'SILKGATE_EGRESS_SECRET_{n.upper()}="<header>: <value>"' for n in missing))
 
 
 # --- msb session guests -----------------------------------------------------
@@ -2225,8 +2225,8 @@ def cmd_proxy(args):
     _prune_logs()
     rules_file = LOG_DIR / f"standalone-{datetime.now():%Y%m%d-%H%M%S}.rules"
     rules_file.write_text(rules_text)
-    env = dict(os.environ, EGRESS_RULES=str(rules_file))
-    env.pop("EGRESS_SESSIONS_DIR", None)
+    env = dict(os.environ, SILKGATE_EGRESS_RULES=str(rules_file))
+    env.pop("SILKGATE_EGRESS_SESSIONS_DIR", None)
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
     argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"] + _modes(args.port)
@@ -2718,9 +2718,9 @@ def cmd_logs(args):
 def cmd_secret_set(args):
     """Secrets are scoped per session in the proxy, so a set names the one it is for."""
     name = args.name
-    value = os.environ.get(f"EGRESS_SECRET_{name.upper()}")
+    value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{name.upper()}")
     if not value:
-        die(f'missing secret: EGRESS_SECRET_{name.upper()}="<header>: <value>"')
+        die(f'missing secret: SILKGATE_EGRESS_SECRET_{name.upper()}="<header>: <value>"')
     if not read_meta(args.session):
         die(f"no such session: {args.session!r} (silkgate ls)")
     if not _proxy_running():
@@ -2880,7 +2880,7 @@ _VERIFY_IMAGE = "debian"                  # the guest verify boots; bare, so pro
 # test/test_addon.py already uses, for the same reason: what proves the injection path must
 # never be a real key, and one grep finds both the unit test and this live fixture.
 _VERIFY_SENTINEL = "SENTINEL-NOT-A-REAL-KEY"
-_VERIFY_SECRET_NAME = "verify_sentinel"   # -> EGRESS_SECRET_VERIFY_SENTINEL, set for this run
+_VERIFY_SECRET_NAME = "verify_sentinel"   # -> SILKGATE_EGRESS_SECRET_VERIFY_SENTINEL, set for this run
 _VERIFY_AUTH_HEADER = "x-api-key"         # the header the guest sends and the secret replaces
 
 # The recorder's rule host must be a NAME: normalize_host rejects IP literals by design, in
@@ -3629,10 +3629,10 @@ class _VerifyOracles:
         except BaseException:                  # incl. SystemExit from die()
             self.observer.close()
             raise
-        # The proxy inherits this process's environment, and SecretStore reads EGRESS_SECRET_*
+        # The proxy inherits this process's environment, and SecretStore reads SILKGATE_EGRESS_SECRET_*
         # for the unscoped (single-ruleset) proxy verify starts. The value is the sentinel, so
         # what this fixture spends is never a credential.
-        os.environ[f"EGRESS_SECRET_{_VERIFY_SECRET_NAME.upper()}"] = \
+        os.environ[f"SILKGATE_EGRESS_SECRET_{_VERIFY_SECRET_NAME.upper()}"] = \
             f"{_VERIFY_AUTH_HEADER}: {_VERIFY_SENTINEL}"
 
     def rules(self):
@@ -3942,7 +3942,7 @@ def main():
     def env_opt(p):
         p.add_argument("-e", "--env", action="append", default=[], metavar="NAME=VALUE",
                        help="set an env var in the guest (repeatable; secrets belong in "
-                            "EGRESS_SECRET_* + inject_auth instead)")
+                            "SILKGATE_EGRESS_SECRET_* + inject_auth instead)")
         p.add_argument("--no-context", action="store_true",
                        help=f"don't describe the sandbox to the guest ({GUEST_CONTEXT} and "
                             "$SILKGATE_CONTEXT)")
@@ -4058,9 +4058,9 @@ def main():
 
     p = sub.add_parser("secret", help="manage host-held secrets in the shared proxy")
     ssub = p.add_subparsers(dest="secret_cmd", required=True)
-    q = ssub.add_parser("set", help="push EGRESS_SECRET_<NAME> to the proxy, scoped to one "
+    q = ssub.add_parser("set", help="push SILKGATE_EGRESS_SECRET_<NAME> to the proxy, scoped to one "
                                     "session (value never on argv)")
-    q.add_argument("name", metavar="NAME", help="secret name (reads EGRESS_SECRET_<NAME>)")
+    q.add_argument("name", metavar="NAME", help="secret name (reads SILKGATE_EGRESS_SECRET_<NAME>)")
     q.add_argument("--session", required=True, metavar="SESSION",
                    help="session the secret belongs to — only its guest can spend it")
     q.set_defaults(fn=cmd_secret_set)

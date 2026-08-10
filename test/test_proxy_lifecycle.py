@@ -98,7 +98,7 @@ while True:
 # Fake mitmdump: records its argv (and its pid, beside it, so a test can still find it
 # once it is orphaned), binds each `--mode regular@host:port` on exactly the host it
 # names (so a wildcard bind is observable as one), serves the control protocol on
-# EGRESS_CONTROL_SOCK, and runs until signalled. Mode specs split host from port at the
+# SILKGATE_EGRESS_CONTROL_SOCK, and runs until signalled. Mode specs split host from port at the
 # last colon, as mitmproxy's own grammar does, so an IPv6 literal arrives bare.
 FAKE_MITMDUMP_SRC = r"""
 import json, os, socket, sys, threading, time
@@ -138,7 +138,7 @@ def handle(conn):
             resp["names"] = []
         f.write(json.dumps(resp) + "\n")
         f.flush()
-cs = os.environ.get("EGRESS_CONTROL_SOCK")
+cs = os.environ.get("SILKGATE_EGRESS_CONTROL_SOCK")
 if cs:
     try:
         os.unlink(cs)

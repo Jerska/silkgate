@@ -23,8 +23,8 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 rules = pathlib.Path(tempfile.mkdtemp()) / "rules.txt"
 rules.write_text("api.anthropic.com/**  GET POST  q:*  h:*  max_body=10m  inject_auth=anthropic\n"
                  "registry.npmjs.org/** GET\n")
-os.environ["EGRESS_RULES"] = str(rules)
-os.environ["EGRESS_SECRET_ANTHROPIC"] = SENTINEL
+os.environ["SILKGATE_EGRESS_RULES"] = str(rules)
+os.environ["SILKGATE_EGRESS_SECRET_ANTHROPIC"] = SENTINEL
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 import proxy_addon                                             # noqa: E402

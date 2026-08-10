@@ -959,7 +959,7 @@ class OracleWiring(unittest.TestCase):
         base = _free_port(span=3)
         oracles = self.oracles(base)
         self.assertIn(f"localhost:{base + 2}/verify/record/** POST", oracles.rules())
-        self.assertEqual(os.environ[f"EGRESS_SECRET_{sg._VERIFY_SECRET_NAME.upper()}"],
+        self.assertEqual(os.environ[f"SILKGATE_EGRESS_SECRET_{sg._VERIFY_SECRET_NAME.upper()}"],
                          f"x-api-key: {sg._VERIFY_SENTINEL}")
         self.assertIn(sg._VERIFY_SENTINEL, "SENTINEL-NOT-A-REAL-KEY")   # never a real key
 
@@ -1022,7 +1022,7 @@ import json, os, selectors, socket, sys
 sys.path.insert(0, %(mitmaddon)r)
 from rule_engine import RuleSet, normalize_host
 
-rules = RuleSet.parse(open(os.environ["EGRESS_RULES"]).read())
+rules = RuleSet.parse(open(os.environ["SILKGATE_EGRESS_RULES"]).read())
 misbehave = os.environ.get("STUB_MISBEHAVE", "")
 binds = [a.split("@", 1)[1] for a in sys.argv if a.startswith("regular@")]
 listeners = []
@@ -1075,7 +1075,7 @@ def serve(conn):
                      b"Content-Length: 0\\r\\n\\r\\n")
         return
     kept = [p for p in query.split("&") if p and rule.query_ok(*p.split("=", 1))]
-    secret = os.environ.get("EGRESS_SECRET_" + (rule.inject_auth or "x").upper(), "")
+    secret = os.environ.get("SILKGATE_EGRESS_SECRET_" + (rule.inject_auth or "x").upper(), "")
     name, _, value = secret.partition(": ")
     if rule.inject_auth and secret:
         have = [h for h in headers if h[0].lower() == name.lower()]

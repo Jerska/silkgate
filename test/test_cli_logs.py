@@ -358,9 +358,9 @@ class CmdProxyTest(SilkgateTest):
 
     def test_rules_snapshot_and_single_ruleset_env(self):
         argv, env = self.run_cmd_proxy()
-        self.assertNotIn("EGRESS_SESSIONS_DIR", env,
+        self.assertNotIn("SILKGATE_EGRESS_SESSIONS_DIR", env,
                          "the addon needs exactly one ruleset source")
-        rules_file = Path(env["EGRESS_RULES"])
+        rules_file = Path(env["SILKGATE_EGRESS_RULES"])
         self.assertEqual(rules_file.parent, MOD.LOG_DIR)
         self.assertTrue(rules_file.name.startswith("standalone-"))
         self.assertIn(RULE, rules_file.read_text())

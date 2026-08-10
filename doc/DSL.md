@@ -98,7 +98,7 @@ then `posixpath.normpath` to resolve `.`/`..`. So `your-org/x/../../other` norma
 | `h:*` | allow **all** request headers, incl. `Authorization` (escape hatch — use sparingly) | headers stripped |
 | `h:<name>=<value>` | forward header only if value **==** `<value>` (exact) | — |
 | `h:<name>~<regex>` | forward header only if `<regex>` **fullmatches** (no spaces; use `\s`) | — |
-| `inject_auth=<name>` | if the request already carries the header named in `EGRESS_SECRET_<NAME>` (`header: value`), replace its value with the host-held secret; **never added when absent** (no forced header) | — |
+| `inject_auth=<name>` | if the request already carries the header named in `SILKGATE_EGRESS_SECRET_<NAME>` (`header: value`), replace its value with the host-held secret; **never added when absent** (no forced header) | — |
 
 Notes:
 - Per-rule body *content* rules are deferred (only `max_body` size). Query params now have

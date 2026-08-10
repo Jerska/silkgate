@@ -28,10 +28,10 @@ hang; later runs with the same profiles reuse it and start in under a second.
   There is no read-only mount, so a verification run can still write to it.
 - The base image has **no language runtimes** — no node, no python, no git. A guest has exactly
   what its profiles installed, so `--with claude` alone cannot run `node --test`.
-- **Secrets:** `EGRESS_SECRET_<NAME>` on the host holds the **complete header line the proxy
+- **Secrets:** `SILKGATE_EGRESS_SECRET_<NAME>` on the host holds the **complete header line the proxy
   sends upstream** (`"x-api-key: sk-ant-…"`, not a bare key). `<NAME>` upper-cases the
   `inject_auth=<name>` in a profile's `rules.txt`, which is why the Anthropic key is
-  `EGRESS_SECRET_ANTHROPIC`. Missing it is a clean startup error naming the variable.
+  `SILKGATE_EGRESS_SECRET_ANTHROPIC`. Missing it is a clean startup error naming the variable.
 - The guest's own `ANTHROPIC_API_KEY` is a dummy the claude profile bakes in, and the proxy's CA
   is in the guest's trust store — that combination is what makes the interception work. Check it
   yourself with `run --with claude -- printenv ANTHROPIC_API_KEY`. If a run dies on a TLS or auth
@@ -48,7 +48,7 @@ to `down` afterwards, and it cannot leave a session or a sandbox behind if the c
 mid-task. Boot is ~0.3s, so the fresh VM per command costs almost nothing.
 
 ```sh
-EGRESS_SECRET_ANTHROPIC="x-api-key: $ANTHROPIC_SANDBOX_API_KEY" \
+SILKGATE_EGRESS_SECRET_ANTHROPIC="x-api-key: $ANTHROPIC_SANDBOX_API_KEY" \
 ./cli/silkgate run \
     --with node@22.11.0 \
     --with claude \

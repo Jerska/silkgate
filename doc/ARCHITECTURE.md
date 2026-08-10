@@ -191,13 +191,13 @@ so it needs no auth. Ops: `ping`, `set_secret`, `list_secrets`; unknown ops and 
 errors.
 
 **Secrets flow: env → CLI → socket → proxy memory, scoped per session.** The credential lives on
-the host only as `EGRESS_SECRET_<NAME>`. `silkgate up` (and `silkgate secret set <name> --session
+the host only as `SILKGATE_EGRESS_SECRET_<NAME>`. `silkgate up` (and `silkgate secret set <name> --session
 <session>`) reads it from the local environment and pushes it over the control socket with
 `set_secret`, naming the session it belongs to; the addon holds it in an **in-memory** dict keyed by
 that session, and `inject_auth=<name>` resolves only within the session the request arrived for —
 the listener port being spoof-proof session identity is what makes that sound. One proxy serving
 many sessions therefore does not let a later session spend a key an earlier one pushed. The
-`EGRESS_SECRET_*` environment the proxy was launched with serves the **standalone** case only
+`SILKGATE_EGRESS_SECRET_*` environment the proxy was launched with serves the **standalone** case only
 (`silkgate proxy`, where there are no sessions).
 
 That is a deliberate loss of convenience: a session must be given its own secret rather than

@@ -56,11 +56,11 @@ example.test/** GET inject_auth=absent
 
 _rules_file = pathlib.Path(tempfile.mkdtemp()) / "rules.txt"
 _rules_file.write_text(RULES)
-os.environ["EGRESS_RULES"] = str(_rules_file)
-os.environ["EGRESS_SECRET_ANTHROPIC"] = f"x-api-key: {SENTINEL_VALUE}"
-os.environ["EGRESS_SECRET_BADHOST"] = "Host: evil.example"     # must never be honoured
-os.environ.pop("EGRESS_SESSIONS_DIR", None)
-os.environ.pop("EGRESS_CONTROL_SOCK", None)
+os.environ["SILKGATE_EGRESS_RULES"] = str(_rules_file)
+os.environ["SILKGATE_EGRESS_SECRET_ANTHROPIC"] = f"x-api-key: {SENTINEL_VALUE}"
+os.environ["SILKGATE_EGRESS_SECRET_BADHOST"] = "Host: evil.example"     # must never be honoured
+os.environ.pop("SILKGATE_EGRESS_SESSIONS_DIR", None)
+os.environ.pop("SILKGATE_EGRESS_CONTROL_SOCK", None)
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 import proxy_addon                                             # noqa: E402
@@ -559,7 +559,7 @@ class Secrets(AddonCase):
                          (unmatched.response.status_code, self.body(unmatched)))
 
     def test_secret_may_not_rewrite_the_routing_header(self):
-        """EGRESS_SECRET_BADHOST is "Host: evil.example" — honouring it would front another
+        """SILKGATE_EGRESS_SECRET_BADHOST is "Host: evil.example" — honouring it would front another
         vhost behind an allowlisted destination, undoing the check in step 3."""
         f = self.run_request(host="pypi.org", claimed="pypi.org", path="/simple/")
         self.assertDenied(f, host="pypi.org", reason="unusable secret")
@@ -590,7 +590,7 @@ class Secrets(AddonCase):
 
 # --- driving the addon against a real (temp) sessions directory ---------------
 class RegistryCase(AddonCase):
-    """Shared plumbing for EGRESS_SESSIONS_DIR mode: a real directory of sessions, the
+    """Shared plumbing for SILKGATE_EGRESS_SESSIONS_DIR mode: a real directory of sessions, the
     module flipped to resolve against it, and a clean secret store around every test."""
 
     def setUp(self):
@@ -600,7 +600,7 @@ class RegistryCase(AddonCase):
         self.addCleanup(setattr, proxy_addon.SECRETS, "_store", saved)
 
     def sessions_mode(self, registry):
-        """Flip the module into EGRESS_SESSIONS_DIR mode around one test."""
+        """Flip the module into SILKGATE_EGRESS_SESSIONS_DIR mode around one test."""
         real_dir, proxy_addon._SESSIONS_DIR = proxy_addon._SESSIONS_DIR, "<in-test>"
         real_reg, proxy_addon.REGISTRY = proxy_addon.REGISTRY, registry
         self.addCleanup(setattr, proxy_addon, "_SESSIONS_DIR", real_dir)
@@ -722,7 +722,7 @@ class Registry(RegistryCase):
 class SessionSecrets(RegistryCase):
     """The store is keyed by the session the listener port resolves to, so a later session
     naming inject_auth=<name> no longer inherits a key an earlier one pushed. The
-    process-global EGRESS_SECRET_* env — still set module-wide here — serves only the
+    process-global SILKGATE_EGRESS_SECRET_* env — still set module-wide here — serves only the
     session-less standalone scope, never a named session."""
 
     def test_a_session_cannot_spend_anothers_secret(self):
@@ -750,7 +750,7 @@ class SessionSecrets(RegistryCase):
 
     def test_env_secrets_do_not_serve_named_sessions(self):
         self.assertIsNotNone(proxy_addon.SECRETS.get(None, "anthropic"),
-                             "the standalone scope still reads EGRESS_SECRET_*")
+                             "the standalone scope still reads SILKGATE_EGRESS_SECRET_*")
         self.assertIsNone(proxy_addon.SECRETS.get("alpha", "anthropic"),
                           "one process env must not become every session's key")
 
@@ -858,7 +858,7 @@ class Control(AddonCase):
 
     def test_set_secret_round_trip(self):
         """No session named: legal here because this module runs the addon in standalone
-        (EGRESS_RULES) mode, where the None scope is the only one there is."""
+        (SILKGATE_EGRESS_RULES) mode, where the None scope is the only one there is."""
         reply = proxy_addon._control_dispatch(
             json.dumps({"op": "set_secret", "name": "demo", "value": "x-token: abc123"}))
         self.assertEqual(reply, {"ok": True})

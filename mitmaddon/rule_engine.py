@@ -19,7 +19,7 @@ Options (space-separated, after the pattern):
     h:*                 allow all request headers          (default: baseline only)
     h:<name>=<value>    forward header only if value == <value>   (exact)
     h:<name>~<regex>    forward header only if regex fullmatches  (no spaces; use \s)
-    inject_auth=<name>  set auth header from EGRESS_SECRET_<NAME>
+    inject_auth=<name>  set auth header from SILKGATE_EGRESS_SECRET_<NAME>
 
 Security model:
   * The allowlist bounds *capability/blast-radius* (host+path+method), NOT exfil

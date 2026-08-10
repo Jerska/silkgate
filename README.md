@@ -21,7 +21,7 @@ Prereqs: `pip install mitmproxy`, docker, and msb (see [Installing microsandbox]
 ```sh
 ./cli/silkgate profiles                    # what capabilities are available
 ./cli/silkgate verify                      # Tier-1 containment check (--full for the proxy path)
-export EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"   # host-only; never enters the guest or argv
+export SILKGATE_EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"   # host-only; never enters the guest or argv
 ./cli/silkgate run --with claude --workspace ~/projects/foo -- \
   claude --bare -p "task…" --permission-mode bypassPermissions
 ```
@@ -162,11 +162,11 @@ substitute content. It can also read any LFS object in the store, so treat the s
 to the guest. Hooks are copied into the clone verbatim and run in the guest; a hook that
 references host paths fails there (`--no-verify`, or fix the hook).
 
-`up` pushes every `EGRESS_SECRET_<NAME>` the session's `inject_auth` rules need, and refuses to
+`up` pushes every `SILKGATE_EGRESS_SECRET_<NAME>` the session's `inject_auth` rules need, and refuses to
 start if one is missing from your environment. Secrets are held **per session**, so one shared
 proxy never lets a later session spend a key an earlier one pushed — which means each `up` needs
 the variable in its own environment rather than inheriting one already in the proxy. Add or rotate
-one with `silkgate secret set anthropic --session foo`, which reads `EGRESS_SECRET_ANTHROPIC` from
+one with `silkgate secret set anthropic --session foo`, which reads `SILKGATE_EGRESS_SECRET_ANTHROPIC` from
 the environment; the value is **never** an argument. `silkgate secret ls` lists names only, and
 `--session` narrows it to one.
 
@@ -177,7 +177,7 @@ the environment; the value is **never** an argument. `silkgate secret ls` lists 
   (`python3 mitmaddon/rule_engine.py` self-tests)
 - `mitmaddon/proxy_addon.py` — the addon: SNI==Host, allowlist, header/body/query enforcement,
   secret injection, fail-closed, audit log. A listener port always resolves to a ruleset, either
-  from a session registry (`EGRESS_SESSIONS_DIR`) or from one fixed ruleset (`EGRESS_RULES`)
+  from a session registry (`SILKGATE_EGRESS_SESSIONS_DIR`) or from one fixed ruleset (`SILKGATE_EGRESS_RULES`)
 - `cli/silkgate` — the host CLI (`profiles` / `build` / `verify` / `proxy` / `run` / `up` /
   `exec` / `attach` / `logs` / `harvest` / `down` / `ls` / `secret`), stdlib-only Python
 - `test/verify_guest.sh` — the Tier-1 checks, run as root inside a guest by `silkgate verify`
