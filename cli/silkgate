@@ -16,6 +16,7 @@ dedicated proxy port each. Host state lives under ~/.silkgate. See ../README.md.
     silkgate exec N [-t] -- CMD    run a command in a session's guest
     silkgate attach N              attach a TTY to a session, running its default command
     silkgate logs N [-f|--audit]   tail a session's guest output (or its proxy decisions)
+    silkgate ui [--port P]         serve the local web UI over the proxy's audit trail
     silkgate down N                stop + remove a session (+ the proxy if it was the last)
     silkgate ls                    list sessions + shared-proxy health
     silkgate secret set NAME       push SILKGATE_EGRESS_SECRET_<NAME> to the shared proxy (never argv)
@@ -2936,6 +2937,343 @@ def cmd_secret_ls(args):
             print(f"{s}/{n}")
 
 
+# --- ui: a local web view over the events files -------------------------------------
+# `silkgate ui` serves ui/ and three JSON endpoints on 127.0.0.1 — the host's browser
+# and nothing else: the trail has no auth, a guest's Tier-1 rules allow only its own
+# proxy port, and the LAN never sees a loopback bind. The server holds no state about
+# the trail itself: history is a filtered read of the retained events-*.jsonl files,
+# the live view is a byte-offset tail of the one the proxy is writing, and the
+# allow/response join happens client-side on `id` — which is what lets a dropped
+# stream resume from a plain Last-Event-ID instead of a server-side session.
+
+UI_DIR = REPO / "ui"
+DEFAULT_UI_PORT = 8642       # clear of the proxy pool (8090..8105) and common dev ports
+UI_EVENTS_LIMIT = 2000       # /api/events default page
+UI_EVENTS_LIMIT_MAX = 20000
+UI_STREAM_POLL = 0.5         # seconds between tail passes on /api/stream
+UI_STREAM_HEARTBEAT = 15.0   # idle seconds before an SSE comment keeps the pipe alive
+
+# Every asset the UI can serve, by exact request path. A map instead of a filesystem
+# walk makes traversal structurally impossible: a path outside it resolves to nothing.
+_UI_ROUTES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/store.js": ("store.js", "text/javascript; charset=utf-8"),
+    "/style.css": ("style.css", "text/css; charset=utf-8"),
+}
+
+
+def _events_files():
+    """The retained events files, oldest first — the stamp in the name is the order."""
+    return sorted(LOG_DIR.glob("events-*.jsonl"))
+
+
+def _event_passes(rec, filters):
+    """Whether one parsed record survives the /api/events filters.
+
+    `session` compares exactly, with "null" selecting unattributed records (a deny on
+    an unclaimed pool port carries session: null); `host` is a case-folded substring,
+    mirroring the UI's filter box; `method` compares case-folded; `since`/`until` are
+    offset-aware datetimes, and a record whose `ts` cannot be parsed — or is naive —
+    fails a time filter rather than slipping past it."""
+    since, until = filters.get("since"), filters.get("until")
+    if since is not None or until is not None:
+        try:
+            ts = datetime.fromisoformat(rec.get("ts") or "")
+        except (TypeError, ValueError):
+            return False
+        if ts.tzinfo is None:
+            return False
+        if since is not None and ts < since:
+            return False
+        if until is not None and ts > until:
+            return False
+    session = filters.get("session")
+    if session is not None:
+        if session == "null":
+            if rec.get("session") is not None:
+                return False
+        elif rec.get("session") != session:
+            return False
+    decision = filters.get("decision")
+    if decision is not None and rec.get("decision") != decision:
+        return False
+    method = filters.get("method")
+    if method is not None and (rec.get("method") or "").upper() != method.upper():
+        return False
+    host = filters.get("host")
+    if host is not None and host.lower() not in (rec.get("host") or "").lower():
+        return False
+    return True
+
+
+def _events_history(filters, limit):
+    """The newest `limit` records passing `filters`, oldest first, across every
+    retained events file (filename order — the stamp is chronological, and records
+    within a file are append-ordered). Unparsable lines are skipped: the live file's
+    tail can be half-written mid-read, and history must not die on it."""
+    kept = []
+    for path in _events_files():
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:                          # pruned mid-scan: already gone
+            continue
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and _event_passes(rec, filters):
+                kept.append(rec)
+    return kept[-limit:]
+
+
+class _EventsTailer:
+    """Byte-offset tail of the live events file, one poll at a time.
+
+    The handler owns the socket, the sleep and the serialization; this owns which file
+    is live and how far into it the client has read, which is what makes the stream
+    testable without a server. `poll` takes the current proxy.json each pass — the
+    caller re-reads it, following _logs_audit — and answers ("reset"|"record",
+    payload, cursor) tuples. A cursor is "<events-file name>:<offset past the line>",
+    doubling as the SSE frame id, so a reconnecting client resumes mid-file.
+
+    Resets: a proxy restart swaps the events path → adopt the new file from 0 (it just
+    started, so replaying it is cheap and complete); in-place truncation → same file
+    from 0; a start cursor naming anything but the live file → the live file's EOF,
+    since the client refetches history on reset and history covers the gap. No proxy
+    at all yields nothing — the caller keeps polling and heartbeating, so a `down`
+    followed by an `up` flows into the same open stream."""
+
+    def __init__(self, cursor=None):
+        self._path = None                        # nothing live seen yet
+        self._offset = 0
+        self._start = cursor                     # consumed when a live file first appears
+
+    @staticmethod
+    def _parse_cursor(cursor):
+        name, sep, off = (cursor or "").rpartition(":")
+        if sep and off.isdigit():
+            return name, int(off)
+        return None, None
+
+    def poll(self, proxy_meta):
+        out = []
+        events = (proxy_meta or {}).get("events")
+        if not events:
+            return out
+        path = Path(events)
+        if self._path is None:                   # first pass that sees a live file
+            cursor, self._start = self._start, None
+            self._path = path
+            name, offset = self._parse_cursor(cursor)
+            if name == path.name:
+                self._offset = offset            # hand-over from /api/events, or a reconnect
+            else:
+                try:
+                    self._offset = path.stat().st_size
+                except OSError:
+                    self._offset = 0
+                if cursor is not None:           # a cursor was given, but for another file
+                    out.append(("reset", None, f"{path.name}:{self._offset}"))
+        if path != self._path:                   # proxy restarted onto a fresh file
+            self._path, self._offset = path, 0
+            out.append(("reset", None, f"{path.name}:0"))
+        try:
+            size = self._path.stat().st_size
+        except OSError:
+            size = None
+        if size is not None and size < self._offset:     # truncated in place
+            self._offset = 0
+            out.append(("reset", None, f"{self._path.name}:0"))
+        lines, new_offset = _read_from(self._path, self._offset)
+        if lines is None:                        # unreadable this pass: try again later
+            return out
+        pos = self._offset
+        for i, line in enumerate(lines):
+            # json.dumps output is ASCII, so a line's length is its byte length; the
+            # final line's cursor is pinned to _read_from's own offset regardless.
+            pos = new_offset if i == len(lines) - 1 else pos + len(line.encode()) + 1
+            try:
+                rec = json.loads(line)
+            except ValueError:                   # a torn write that still ended in \n
+                continue
+            if isinstance(rec, dict):
+                out.append(("record", line, f"{self._path.name}:{pos}"))
+        self._offset = new_offset
+        return out
+
+
+def _ui_server(port):
+    """The bound, threaded HTTP server behind `silkgate ui`; the caller runs it.
+
+    Threads, because one open SSE stream on a plain HTTPServer would block every other
+    request; daemon threads, so main()'s os._exit(130) on Ctrl-C reaps the open
+    streams. Loopback only, and every response carries nosniff + a self-only CSP: the
+    UI must not be able to send the trail anywhere, even if a record smuggles markup.
+    """
+    # Local imports: only this command needs an HTTP server, and every `silkgate exec`
+    # would otherwise pay for importing one.
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        server_version = "silkgate-ui"
+        sys_version = ""
+
+        def log_message(self, *a):               # the events files are the record
+            pass
+
+        def _security(self):
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "default-src 'self'")
+
+        def _reply(self, code, ctype, body):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self._security()
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def _json(self, obj, code=200):
+            self._reply(code, "application/json", json.dumps(obj).encode())
+
+        def do_GET(self):
+            url = urllib.parse.urlsplit(self.path)
+            query = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
+            try:
+                if url.path == "/api/sessions":
+                    self._sessions()
+                elif url.path == "/api/events":
+                    self._events(query)
+                elif url.path == "/api/stream":
+                    self._stream(query)
+                else:
+                    self._static(url.path)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True     # the tab closed; nobody to answer
+
+        def _refuse(self):
+            self.close_connection = True         # keep a HEAD from desyncing keep-alive
+            self._json({"error": "method not allowed"}, 405)
+
+        do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _refuse
+
+        def _static(self, path):
+            route = _UI_ROUTES.get(path)
+            if route is None:
+                return self._json({"error": "not found"}, 404)
+            name, ctype = route
+            try:
+                body = (UI_DIR / name).read_bytes()
+            except OSError:
+                return self._json({"error": f"{name} is missing from {UI_DIR}"}, 404)
+            self._reply(200, ctype, body)
+
+        def _sessions(self):
+            meta = read_proxy() or {}
+            ident = _proxy_ident()               # identity via the control socket, as ever:
+            running = ident is not None          # a recycled pid must not read as "running"
+            self._json({"sessions": list_metas(),
+                        "proxy": {"running": running,
+                                  "pid": (ident or meta.get("pid")) if running else None,
+                                  "ports": meta.get("ports"),
+                                  "started": meta.get("started"),
+                                  "log": meta.get("log"),
+                                  "events": meta.get("events")}})
+
+        def _events(self, query):
+            filters = {}
+            for key in ("since", "until"):
+                if key in query:
+                    try:
+                        t = datetime.fromisoformat(query[key])
+                    except ValueError:
+                        return self._json({"error": f"{key}: not an ISO-8601 timestamp"},
+                                          400)
+                    if t.tzinfo is None:         # records are offset-aware; comparing one
+                        return self._json(       # to a naive time raises, so refuse early
+                            {"error": f"{key}: needs a UTC offset "
+                                      f"(e.g. {query[key]}+00:00)"}, 400)
+                    filters[key] = t
+            for key in ("session", "decision", "method", "host"):
+                if key in query:
+                    filters[key] = query[key]
+            try:
+                limit = int(query.get("limit", UI_EVENTS_LIMIT))
+            except ValueError:
+                return self._json({"error": "limit: not an integer"}, 400)
+            if limit < 1:
+                return self._json({"error": "limit: must be >= 1"}, 400)
+            limit = min(limit, UI_EVENTS_LIMIT_MAX)
+            # The live file's size is read BEFORE the history: a record appended between
+            # the two shows up in both history and the stream — the client dedupes on
+            # (id, decision) — where a size read after would show it in neither.
+            cursor = None
+            live = (read_proxy() or {}).get("events")
+            if live:
+                try:
+                    cursor = f"{Path(live).name}:{Path(live).stat().st_size}"
+                except OSError:
+                    cursor = f"{Path(live).name}:0"
+            self._json({"events": _events_history(filters, limit), "cursor": cursor})
+
+        def _stream(self, query):
+            tailer = _EventsTailer(self.headers.get("Last-Event-ID")
+                                   or query.get("cursor"))
+            self.close_connection = True         # no Content-Length: the stream is the body
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self._security()
+            self.end_headers()
+            self.wfile.write(b"retry: 2000\n\n")
+            self.wfile.flush()                   # BufferedWriter: an unflushed SSE frame
+            beat = time.monotonic()              # sits in the buffer, never on the wire
+            while True:
+                try:
+                    for kind, payload, cursor in tailer.poll(read_proxy()):
+                        if kind == "reset":
+                            frame = f"id: {cursor}\nevent: reset\ndata: {{}}\n\n"
+                        else:
+                            frame = f"id: {cursor}\ndata: {payload}\n\n"
+                        self.wfile.write(frame.encode())
+                        self.wfile.flush()
+                        beat = time.monotonic()
+                    if time.monotonic() - beat >= UI_STREAM_HEARTBEAT:
+                        self.wfile.write(b": alive\n\n")
+                        self.wfile.flush()
+                        beat = time.monotonic()
+                except (BrokenPipeError, ConnectionResetError):
+                    return                       # closed tab: this thread's work is done
+                time.sleep(UI_STREAM_POLL)
+
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True                    # Ctrl-C must not wait on an open stream
+
+    return Server(("127.0.0.1", port), Handler)
+
+
+def cmd_ui(args):
+    """Serve the local audit UI: static assets from ui/ plus the sessions, history and
+    live-stream endpoints. Needs no running proxy — history and session listings work
+    on their own, and the stream heartbeats until a proxy appears."""
+    if not (UI_DIR / "index.html").is_file():
+        die(f"ui assets not found at {UI_DIR} — run from a complete checkout "
+            "(the ui/ directory ships with the repo)")
+    try:
+        server = _ui_server(args.port)
+    except OSError:
+        die(f"cannot bind the ui at 127.0.0.1:{args.port} — "
+            + _port_in_use_error(args.port))
+    host, port = server.server_address[:2]
+    say(f"silkgate ui at http://{host}:{port}/ — Ctrl-C stops it")
+    server.serve_forever()
+
+
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
 # the https probes can complete. The CA is mounted in, since nothing is baked here.
 # -q sets apt's quiet level explicitly rather than leaving it to apt's own tty detection,
@@ -4247,6 +4585,11 @@ def main():
     p.add_argument("--interval", type=float, default=1.0, metavar="SECS",
                    help="follow poll interval in seconds (default: 1.0)")
     p.set_defaults(fn=cmd_logs)
+
+    p = sub.add_parser("ui", help="serve the local web UI over the proxy's audit trail")
+    p.add_argument("--port", type=int, default=DEFAULT_UI_PORT,
+                   help=f"listen port on 127.0.0.1 (default: {DEFAULT_UI_PORT})")
+    p.set_defaults(fn=cmd_ui)
 
     p = sub.add_parser("harvest", help="bank a --branch session's commits into the host repo "
                                        "without stopping it")
