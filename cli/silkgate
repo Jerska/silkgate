@@ -517,7 +517,7 @@ def _wait_proxy_ready(proc, ports, log_path):
 # (archive elsewhere if the trail must outlive the machine).
 LOG_RETAIN_DAYS = 30
 LOG_RETAIN_COUNT = 20
-_LOG_PATTERNS = ("proxy-*.log", "proxy-*.rules", "standalone-*.rules")
+_LOG_PATTERNS = ("proxy-*.log", "proxy-*.rules", "standalone-*.rules", "events-*.jsonl")
 
 
 def _prune_logs():
@@ -533,8 +533,8 @@ def _prune_logs():
         days = LOG_RETAIN_DAYS
     if days <= 0:                                # 0 (or less): retention is off, keep all
         return
-    live = (read_proxy() or {}).get("log")
-    live = Path(live) if live else None
+    _proxy_meta = read_proxy() or {}
+    live = {Path(v) for k in ("log", "events") if (v := _proxy_meta.get(k))}
     cutoff = time.time() - days * 86400
     pruned = 0
     for pattern in _LOG_PATTERNS:
@@ -546,7 +546,7 @@ def _prune_logs():
                 continue
         stamped.sort(reverse=True)
         for mtime, p in stamped[LOG_RETAIN_COUNT:]:
-            if p == live or mtime >= cutoff:
+            if p in live or mtime >= cutoff:
                 continue
             try:
                 p.unlink()
@@ -574,9 +574,11 @@ def start_proxy(rules_text, port):
     _prune_logs()
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
     log_path = LOG_DIR / f"proxy-{stamp}.log"
+    events_path = LOG_DIR / f"events-{stamp}.jsonl"
     rules_file = LOG_DIR / f"proxy-{stamp}.rules"
     rules_file.write_text(rules_text)
-    env = dict(os.environ, SILKGATE_EGRESS_RULES=str(rules_file))
+    env = dict(os.environ, SILKGATE_EGRESS_RULES=str(rules_file),
+               SILKGATE_EGRESS_EVENTS_FILE=str(events_path))
     env.pop("SILKGATE_EGRESS_SESSIONS_DIR", None)
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
@@ -1252,7 +1254,9 @@ def start_shared_proxy(base_port, ports=None):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
-    log_path = LOG_DIR / f"proxy-{datetime.now():%Y%m%d-%H%M%S}.log"
+    stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
+    log_path = LOG_DIR / f"proxy-{stamp}.log"
+    events_path = LOG_DIR / f"events-{stamp}.jsonl"
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
     argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"]
@@ -1260,13 +1264,17 @@ def start_shared_proxy(base_port, ports=None):
         argv += _modes(p)
     # Multi-session mode: SILKGATE_EGRESS_SESSIONS_DIR on, SILKGATE_EGRESS_RULES off (addon needs exactly one).
     env = dict(os.environ, SILKGATE_EGRESS_SESSIONS_DIR=str(SESSIONS_DIR),
-               SILKGATE_EGRESS_CONTROL_SOCK=str(PROXY_SOCK))
+               SILKGATE_EGRESS_CONTROL_SOCK=str(PROXY_SOCK),
+               SILKGATE_EGRESS_EVENTS_FILE=str(events_path))
     env.pop("SILKGATE_EGRESS_RULES", None)
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
+    # base_port is the pool that landed, not the one asked for — _find_free_pool may have
+    # scanned past a squatter, and pick_port re-reads this record to follow it.
     meta = {"pid": proc.pid, "base_port": ports[0], "ports": ports,
-            "log": str(log_path), "sock": str(PROXY_SOCK), "started": now_iso()}
+            "log": str(log_path), "events": str(events_path),
+            "sock": str(PROXY_SOCK), "started": now_iso()}
     try:
         _wait_proxy_ready(proc, ports, log_path)
         _write_json(PROXY_JSON, meta)
@@ -2380,9 +2388,12 @@ def cmd_proxy(args):
     mitmdump = which("mitmdump", "pip install mitmproxy")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
-    rules_file = LOG_DIR / f"standalone-{datetime.now():%Y%m%d-%H%M%S}.rules"
+    stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
+    rules_file = LOG_DIR / f"standalone-{stamp}.rules"
+    events_path = LOG_DIR / f"events-{stamp}.jsonl"
     rules_file.write_text(rules_text)
-    env = dict(os.environ, SILKGATE_EGRESS_RULES=str(rules_file))
+    env = dict(os.environ, SILKGATE_EGRESS_RULES=str(rules_file),
+               SILKGATE_EGRESS_EVENTS_FILE=str(events_path))
     env.pop("SILKGATE_EGRESS_SESSIONS_DIR", None)
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.

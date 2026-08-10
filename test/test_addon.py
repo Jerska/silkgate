@@ -26,6 +26,7 @@ import socket
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -1033,6 +1034,73 @@ class ControlSocket(AddonCase):
             self.assertTrue(proxy_addon._control_sock_live(self.path))
 
         asyncio.run(scenario())
+
+
+class EventsFileTest(AddonCase):
+    """_EventsFile writes the same line the logger emits, flushes after each, and fails closed."""
+
+    def swap_events(self, ef):
+        """Install ef as the module-level EVENTS sink for the duration of the test."""
+        real = proxy_addon.EVENTS
+        proxy_addon.EVENTS = ef
+        self.addCleanup(setattr, proxy_addon, "EVENTS", real)
+
+    def test_none_path_is_inert(self):
+        ef = proxy_addon._EventsFile(None)
+        ef.write("anything")   # must not raise
+
+    def test_lines_are_byte_identical_to_stdout(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "events.jsonl")
+            ef = proxy_addon._EventsFile(path)
+            self.swap_events(ef)
+            self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
+                             method="POST", body=b"prompt",
+                             headers=[(b"x-api-key", b"guest-dummy")])
+            # The audit line captured by the logger is the same JSON the file received.
+            with open(path) as fh:
+                file_lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
+            self.assertEqual(file_lines, self.audit.lines)
+
+    def test_flush_visible_to_fresh_reader(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "events.jsonl")
+            ef = proxy_addon._EventsFile(path)
+            self.swap_events(ef)
+            self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
+                             method="GET")
+            # A separately opened handle sees the line without closing the writer.
+            with open(path) as fh:
+                self.assertTrue(fh.read().strip(), "line was not flushed")
+
+    def test_write_failure_propagates(self):
+        """A broken events file must not silently drop the record — fail closed."""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "events.jsonl")
+            ef = proxy_addon._EventsFile(path)
+            # Replace the underlying file handle with one that always raises.
+            ef._fh = unittest.mock.MagicMock()
+            ef._fh.write.side_effect = OSError("disk full")
+            self.swap_events(ef)
+            f = self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
+                                 method="GET")
+            # The OSError from the events file should propagate through _audit,
+            # causing fail-closed: the request gets a 500.
+            self.assertIsNotNone(f.response)
+            self.assertEqual(f.response.status_code, 500)
+
+    def test_control_records_not_mirrored(self):
+        """control/stream decisions from the control socket never go to the events file."""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "events.jsonl")
+            ef = proxy_addon._EventsFile(path)
+            self.swap_events(ef)
+            # A ping goes through _control_dispatch which calls logger.info directly,
+            # not _audit, so it must not appear in the events file.
+            proxy_addon._control_dispatch('{"op": "ping"}')
+            with open(path) as fh:
+                content = fh.read()
+            self.assertEqual(content, "", "control record written to events file")
 
 
 if __name__ == "__main__":

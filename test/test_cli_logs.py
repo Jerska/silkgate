@@ -173,11 +173,13 @@ class SilkgateTest(unittest.TestCase):
             os.utime(p, (past, past))
         return p
 
-    def proxy_meta(self, pid=None, log=None, base=8090):
+    def proxy_meta(self, pid=None, log=None, events=None, base=8090):
         meta = {"pid": pid or os.getpid(), "base_port": base,
                 "ports": list(range(base, base + MOD.POOL_SIZE)),
                 "log": str(log or (MOD.LOG_DIR / "proxy-live.log")),
                 "sock": str(MOD.PROXY_SOCK)}
+        if events is not None:
+            meta["events"] = str(events)
         MOD._write_json(MOD.PROXY_JSON, meta)
         return meta
 
@@ -273,6 +275,34 @@ class PruneLogsTest(SilkgateTest):
         for kind in ("proxy-{:02d}.log", "proxy-{:02d}.rules", "standalone-{:02d}.rules"):
             self.assertIn(kind.format(0), names)
             self.assertNotIn(kind.format(n - 1), names)
+
+    def test_events_jsonl_pruned_as_own_kind(self):
+        """events-*.jsonl has its own newest-20 bucket, independent of proxy-*.log."""
+        n = MOD.LOG_RETAIN_COUNT + 2
+        for i in range(n):
+            age = MOD.LOG_RETAIN_DAYS + 10 + i
+            self.log_file(f"events-{i:02d}.jsonl", age_days=age)
+            self.log_file(f"proxy-{i:02d}.log", age_days=age)
+        MOD._prune_logs()
+        names = self.log_names()
+        # The newest LOG_RETAIN_COUNT of each kind survive.
+        self.assertIn("events-00.jsonl", names)
+        self.assertNotIn(f"events-{n - 1:02d}.jsonl", names)
+        self.assertIn("proxy-00.log", names)
+        self.assertNotIn(f"proxy-{n - 1:02d}.log", names)
+
+    def test_live_events_file_survives_a_full_prune(self):
+        """The events file the live proxy is writing is protected the same as its log."""
+        live_log = self.log_file("proxy-00-live.log", age_days=90)
+        live_events = self.log_file("events-00-live.jsonl", age_days=90)
+        self.proxy_meta(log=live_log, events=live_events)
+        for i in range(1, MOD.LOG_RETAIN_COUNT + 6):
+            age = 40 + i
+            self.log_file(f"proxy-{i:02d}.log", age_days=age)
+            self.log_file(f"events-{i:02d}.jsonl", age_days=age)
+        MOD._prune_logs()
+        self.assertTrue(live_events.exists(), "pruned the events file a live proxy is writing")
+        self.assertTrue(live_log.exists(), "pruned the log a live proxy is writing")
 
 
 # -- retention applied where logs are created -----------------------------------

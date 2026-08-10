@@ -52,6 +52,26 @@ if bool(_RULES_PATH) == bool(_SESSIONS_DIR):
                        "files) or SILKGATE_EGRESS_SESSIONS_DIR (a session per listener port)")
 
 
+class _EventsFile:
+    """Append-mode secondary sink for machine-readable event records.
+
+    Each write appends one JSON line and flushes — no fsync. A None path disables
+    the sink; control and stream records are never written here.
+    """
+
+    def __init__(self, path):
+        self._fh = open(path, "a") if path is not None else None
+
+    def write(self, line):
+        if self._fh is None:
+            return
+        self._fh.write(line + "\n")
+        self._fh.flush()
+
+
+EVENTS = _EventsFile(os.environ.get("SILKGATE_EGRESS_EVENTS_FILE"))
+
+
 def configure(updates):
     """Refuse the one mitmproxy option that would route requests around this addon.
 
@@ -440,7 +460,7 @@ def _audit(decision, flow, reason="", session=None, **extra):
     second line. `status` on a "response" record is the destination's answer, or null if it
     never gave one.
     """
-    logger.info(json.dumps({
+    line = json.dumps({
         "ts": _ts(),
         "decision": decision,
         "id": flow.id,
@@ -452,7 +472,9 @@ def _audit(decision, flow, reason="", session=None, **extra):
         "session": session,
         "listen_port": _listen_port(flow),
         **extra,
-    }))
+    })
+    logger.info(line)
+    EVENTS.write(line)
 
 
 def _deny(flow, reason, code=403, session=None, shown=None, **extra):

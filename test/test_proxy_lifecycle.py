@@ -108,6 +108,8 @@ if rec:
         json.dump(sys.argv[1:], fh)
     with open(rec + ".pid", "w") as fh:
         fh.write(str(os.getpid()))
+    with open(rec + ".env", "w") as fh:
+        json.dump(dict(os.environ), fh)
 def opts(flag):
     return [sys.argv[i + 1] for i, a in enumerate(sys.argv) if a == flag and i + 1 < len(sys.argv)]
 listens = []
@@ -1003,6 +1005,30 @@ class LifecycleTest(_FakeToolsCase):
                 socket.create_connection((lan, base), timeout=2).close()
         MOD.stop_proxy(meta)
         self.assertFalse(MOD.PROXY_JSON.exists())
+
+    def test_start_shared_proxy_events_file(self):
+        """meta["events"] exists, its stamp matches the log's, and the events env var reaches the child."""
+        base = _free_pool_base(MOD.POOL_SIZE)
+        meta = MOD.start_shared_proxy(base)
+        _autoreap(meta["pid"])
+        self.addCleanup(self._kill_pid, meta["pid"])
+
+        # meta must carry the events path
+        self.assertIn("events", meta, "start_shared_proxy must add 'events' to proxy.json")
+        log_name = Path(meta["log"]).name          # proxy-STAMP.log
+        events_name = Path(meta["events"]).name    # events-STAMP.jsonl
+        log_stamp = log_name[len("proxy-"):-len(".log")]
+        events_stamp = events_name[len("events-"):-len(".jsonl")]
+        self.assertEqual(events_stamp, log_stamp, "events stamp must match the log stamp")
+
+        # SILKGATE_EGRESS_EVENTS_FILE must have reached the child
+        env_file = Path(self.mitm_argv.parent, self.mitm_argv.name + ".env")
+        if env_file.exists():
+            child_env = json.loads(env_file.read_text())
+            self.assertIn("SILKGATE_EGRESS_EVENTS_FILE", child_env)
+            self.assertEqual(child_env["SILKGATE_EGRESS_EVENTS_FILE"], meta["events"])
+
+        MOD.stop_proxy(meta)
 
     def test_start_proxy_binds_loopback_and_disables_rawtcp(self):
         port = _free_pool_base(1)
