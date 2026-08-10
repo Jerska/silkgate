@@ -1281,5 +1281,50 @@ class TestGithubGrants(CliCase):
         self.assertEqual(meta["github_write"], ["org/proj"])
 
 
+class TestWorkspaceRoMount(CliCase):
+    """--workspace-ro: mount DIR read-only at /workspace."""
+
+    def test_ro_spec_is_produced(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        path, mounts = sg._workspace_mount(str(project), read_only=True)
+        self.assertEqual(path, str(project))
+        self.assertEqual(mounts, [f"{project}:/workspace:ro"])
+
+    def test_git_directory_accepted_read_only(self):
+        # A tree with a .git directory is refused rw but accepted ro.
+        repo = self.tmp / "repo"
+        (repo / ".git" / "hooks").mkdir(parents=True)
+        path, mounts = sg._workspace_mount(str(repo), read_only=True)
+        self.assertEqual(path, str(repo))
+        self.assertEqual(mounts, [f"{repo}:/workspace:ro"])
+
+    def test_workspace_and_workspace_ro_refused(self):
+        # argparse mutually exclusive group — exit code 2, message names both flags.
+        dir_ = str(self.tmp)
+        self.refuses_argv("not allowed", "--workspace-ro",
+                          ["run", "--workspace", dir_, "--workspace-ro", dir_, "--", "true"])
+
+    def test_branch_with_workspace_ro_refused(self):
+        # --branch derives its own rw workspace; --workspace-ro is excluded.
+        with mock.patch.object(sys, "argv", ["silkgate", "run", "--with", "git",
+                                             "--branch", "x", "--workspace-ro",
+                                             str(self.tmp), "--", "true"]), \
+                self.no_preflight():
+            self.refuses("--workspace-ro", sg.main)
+
+    def test_allow_git_dir_with_workspace_ro_refused(self):
+        # --allow-git-dir only makes sense for rw mounts; refuse it with --workspace-ro.
+        with mock.patch.object(sys, "argv", ["silkgate", "run", "--allow-git-dir",
+                                             "--workspace-ro", str(self.tmp), "--", "true"]), \
+                self.no_preflight():
+            self.refuses("--workspace-ro", sg.main)
+
+    def test_forbidden_mounts_still_refused_read_only(self):
+        # Credentials and config must not be exposed even read-only.
+        for path in [str(Path.home()), str(REPO), os.sep]:
+            self.refuses("refusing to mount", sg._workspace_mount, path, read_only=True)
+
+
 if __name__ == "__main__":
     unittest.main()

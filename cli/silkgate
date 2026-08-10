@@ -893,7 +893,7 @@ def ensure_image(profiles, image, *, base=BASE_IMAGE):
 # — and never a control: an adversarial guest ignores it, so nothing may rely on it.
 
 def session_context(profiles, ruleset, *, workspace, persistent, branch=None,
-                    github_read=(), github_write=()):
+                    github_read=(), github_write=(), workspace_ro=False):
     """The markdown a guest is handed about its own sandbox."""
     lines = [
         "# Where you are running: a silkgate sandbox",
@@ -931,6 +931,12 @@ def session_context(profiles, ruleset, *, workspace, persistent, branch=None,
             "rewrite or amend commits you have already made: the branch only ever moves forward.",
             "Do not push: there is no remote that accepts one. If you need history, `git log` and",
             "`git fetch origin` work; the clone's origin is a read-only mount of the host repo.",
+        ]
+    elif workspace and workspace_ro:
+        lines += [
+            "`/workspace` is read-only host code — writes to it fail. The rest of the filesystem",
+            "is scratch that dies with this machine; your printed output and anything you write",
+            "outside `/workspace` is the deliverable.",
         ]
     elif workspace:
         lines += [
@@ -1806,10 +1812,9 @@ def _relay(line, *, newline, on_line=None):
         on_line(text.decode(errors="replace"))
 
 
-# The mount is the only host path a guest can write, and it is rw, so what it must never be
-# handed is a directory the host itself later reads as instructions: home, silkgate's own
-# state, the checkout this CLI runs from, or a repository's `.git` — hooks and
-# `core.fsmonitor` there are host code execution the next time a human runs git in it.
+# The mount is the only host path a guest ever sees. Even read-only access to home,
+# silkgate's own state, or the checkout this CLI runs from exposes credentials and
+# configuration — so the guard applies regardless of the mount mode.
 def _forbidden_mounts():
     return ((Path.home(), "your home directory"),
             (SILK_DIR, "silkgate's own state (session rulesets, the control socket, the CA)"),
@@ -1825,8 +1830,8 @@ def _find_git_dir(root):
     return None
 
 
-def _workspace_mount(workspace, *, allow_git_dir=False):
-    """(resolved host path, msb -v arguments) for --workspace, or (None, []) for no mount.
+def _workspace_mount(workspace, *, allow_git_dir=False, read_only=False):
+    """(resolved host path, msb -v arguments) for --workspace/--workspace-ro, or (None, []).
 
     A *linked worktree* is deliberately allowed and is the pattern to reach for when a guest
     needs a repository: its `.git` is a file naming a gitdir outside the mount, so no hook and
@@ -1836,6 +1841,11 @@ def _workspace_mount(workspace, *, allow_git_dir=False):
     that checked only the root would be trusted as if it checked everything. --allow-git-dir
     skips the check (and the walk) entirely: the risk then sits on the command line a human
     approved, never in an environment variable that quietly outlives the decision.
+
+    With read_only=True (--workspace-ro) the mount is `:ro`; the .git-directory walk and its
+    refusal are skipped because the risk — hooks and config becoming guest-writable — does not
+    exist for a read-only mount. The _forbidden_mounts guard still applies: credentials and
+    configuration in those directories must not be exposed even read-only.
     """
     if not workspace:
         return None, []
@@ -1847,8 +1857,13 @@ def _workspace_mount(workspace, *, allow_git_dir=False):
     for path, what in _forbidden_mounts():
         target = Path(path).resolve()
         if w == target or w in target.parents:
-            die(f"refusing to mount {w} at /workspace: it is (or contains) {what}, and the "
-                "guest gets it read-write — mount the project directory itself instead")
+            die(f"refusing to mount {w} at /workspace: it is (or contains) {what} — "
+                "credentials and configuration there must not be exposed to the guest")
+    if read_only:
+        if (w / ".git").is_file():
+            say(f"note: {w} is a linked git worktree — the .git pointer file is in the "
+                "read-only mount, but hooks and config live outside it")
+        return str(w), [f"{w}:/workspace:ro"]
     if allow_git_dir:
         say(f"note: --allow-git-dir — {w} is mounted without the .git check, so hooks and "
             "config of any repository inside are guest-writable: host code execution the "
@@ -2033,6 +2048,9 @@ def _check_branch_flags(args):
     if args.workspace:
         die("--branch and --workspace are exclusive — --branch derives its own workspace "
             "under <repo>/.silkgate/sandboxes")
+    if getattr(args, "workspace_ro", None):
+        die("--branch and --workspace-ro are exclusive — --branch derives its own "
+            "read-write workspace under <repo>/.silkgate/sandboxes")
     if args.allow_git_dir:
         die("--allow-git-dir does not apply to --branch, whose workspace never holds a .git")
 
@@ -2370,6 +2388,9 @@ def cmd_run(args):
     """One-shot over a persistent session: up (ephemeral) -> exec -> down, all foreground."""
     check_env(args.env)
     _check_branch_flags(args)
+    if args.workspace_ro and args.allow_git_dir:
+        die("--allow-git-dir does not apply to --workspace-ro — the .git risk it accepts "
+            "only exists for a read-write mount")
     profiles, rules_text, ruleset = _session_policy(args)
     github_read = getattr(args, "github_read", None) or []
     github_write = getattr(args, "github_write", None) or []
@@ -2384,8 +2405,11 @@ def cmd_run(args):
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
     spec = _branch_spec(args.branch, profiles, args.env) if args.branch else None
     name = uuid4().hex[:6]
+    workspace_ro = bool(args.workspace_ro)
     if spec:
         ws, mounts = _branch_workspace(spec, name)
+    elif workspace_ro:
+        ws, mounts = _workspace_mount(args.workspace_ro, read_only=True)
     else:
         ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
     image = ensure_image(profiles, args.image, base=args.base)
@@ -2398,10 +2422,12 @@ def cmd_run(args):
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=False,
-                                      branch=args.branch)
+                                      branch=args.branch, workspace_ro=workspace_ro)
+        meta_extra = {**_session_meta(profiles, cmd), **(spec or {}), **github_meta}
+        if workspace_ro:
+            meta_extra["workspace_ro"] = True
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           {**_session_meta(profiles, cmd), **(spec or {}),
-                            **github_meta}, ctx, ctx_paths)
+                           meta_extra, ctx, ctx_paths)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -2470,7 +2496,8 @@ def _session_meta(profiles, cmd):
     return {"profiles": [p.spec for p in profiles], "command": cmd}
 
 
-def _context_for(args, profiles, ruleset, ws, *, persistent, branch=None):
+def _context_for(args, profiles, ruleset, ws, *, persistent, branch=None,
+                 workspace_ro=False):
     """(context text, where to put it in the guest) — or (None, ()) with --no-context.
 
     Always at GUEST_CONTEXT, plus wherever a harness profile says its own tool looks for
@@ -2481,7 +2508,7 @@ def _context_for(args, profiles, ruleset, ws, *, persistent, branch=None):
     paths = [GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
                                if p.conf.get("context_path")]
     return session_context(profiles, ruleset, workspace=ws, persistent=persistent,
-                           branch=branch,
+                           branch=branch, workspace_ro=workspace_ro,
                            github_read=getattr(args, "github_read", None) or (),
                            github_write=getattr(args, "github_write", None) or ()), paths
 
@@ -2489,6 +2516,9 @@ def _context_for(args, profiles, ruleset, ws, *, persistent, branch=None):
 def cmd_up(args):
     check_env(args.env)
     _check_branch_flags(args)
+    if args.workspace_ro and args.allow_git_dir:
+        die("--allow-git-dir does not apply to --workspace-ro — the .git risk it accepts "
+            "only exists for a read-write mount")
     profiles, rules_text, ruleset = _session_policy(args)
     github_read = getattr(args, "github_read", None) or []
     github_write = getattr(args, "github_write", None) or []
@@ -2502,8 +2532,11 @@ def cmd_up(args):
     preflight(*(() if args.image else _build_tools()), "msb", "mitmdump",
               *(("git",) if args.branch else ()))
     spec = _branch_spec(args.branch, profiles, args.env) if args.branch else None
+    workspace_ro = bool(args.workspace_ro)
     if spec:
         ws, mounts = _branch_workspace(spec, name)
+    elif workspace_ro:
+        ws, mounts = _workspace_mount(args.workspace_ro, read_only=True)
     else:
         ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
     image = ensure_image(profiles, args.image, base=args.base)
@@ -2515,10 +2548,13 @@ def cmd_up(args):
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=True,
-                                      branch=args.branch)
+                                      branch=args.branch, workspace_ro=workspace_ro)
+        meta_extra = {**_session_meta(profiles, profile_command(profiles)), **(spec or {}),
+                      **github_meta}
+        if workspace_ro:
+            meta_extra["workspace_ro"] = True
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           {**_session_meta(profiles, profile_command(profiles)),
-                            **(spec or {}), **github_meta}, ctx, ctx_paths)
+                           meta_extra, ctx, ctx_paths)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -2648,8 +2684,9 @@ def cmd_ls(args):
         statuses = _msb_statuses()
         rows = [("NAME", "STATUS", "PORT", "WORKSPACE", "AGE")]
         for m in metas:
+            ws_display = (m.get("workspace") or "-") + (" (ro)" if m.get("workspace_ro") else "")
             rows.append((m["name"], statuses.get(m["sandbox"], "?"),
-                         str(m.get("port", "?")), m.get("workspace") or "-",
+                         str(m.get("port", "?")), ws_display,
                          _age(m.get("created"))))
         _print_table(rows)
     proxy = read_proxy()
@@ -4083,9 +4120,14 @@ def main():
                         "necessarily here (default: 8090)")
     p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")
-    p.add_argument("--workspace", metavar="DIR",
-                   help="mount DIR at /workspace (rw). Not $HOME and not a directory "
-                        "holding a .git directory — for a repo, mount a linked worktree")
+    _ws = p.add_mutually_exclusive_group()
+    _ws.add_argument("--workspace", metavar="DIR",
+                     help="mount DIR at /workspace (rw). Not $HOME and not a directory "
+                          "holding a .git directory — for a repo, mount a linked worktree")
+    _ws.add_argument("--workspace-ro", metavar="DIR",
+                     help="mount DIR at /workspace read-only. The .git check is skipped — "
+                          "a whole repo is mountable — but $HOME and silkgate state are "
+                          "still refused. Exclusive with --workspace and --allow-git-dir")
     p.add_argument("--allow-git-dir", action="store_true",
                    help="mount --workspace even where it holds .git directories — their "
                         "hooks and config become guest-writable, which is host code "
@@ -4093,7 +4135,7 @@ def main():
     p.add_argument("--branch", metavar="NAME",
                    help="give the guest a git checkout of the enclosing repo on new branch "
                         "NAME; its commits land in the host repo as that branch at teardown "
-                        "(needs --with git; excludes --workspace)")
+                        "(needs --with git; excludes --workspace and --workspace-ro)")
     p.add_argument("--github-read", action="append", metavar="OWNER/REPO",
                    type=_github_repo_arg,
                    help="grant clone/fetch/LFS-download/API-GET for OWNER/REPO; "
@@ -4115,9 +4157,14 @@ def main():
 
     p = sub.add_parser("up", help="start a persistent session (background guest + shared proxy)")
     p.add_argument("--name", metavar="N", help="session name (default: random 6-char id)")
-    p.add_argument("--workspace", metavar="DIR",
-                   help="mount DIR at /workspace (rw). Not $HOME and not a directory "
-                        "holding a .git directory — for a repo, mount a linked worktree")
+    _ws = p.add_mutually_exclusive_group()
+    _ws.add_argument("--workspace", metavar="DIR",
+                     help="mount DIR at /workspace (rw). Not $HOME and not a directory "
+                          "holding a .git directory — for a repo, mount a linked worktree")
+    _ws.add_argument("--workspace-ro", metavar="DIR",
+                     help="mount DIR at /workspace read-only. The .git check is skipped — "
+                          "a whole repo is mountable — but $HOME and silkgate state are "
+                          "still refused. Exclusive with --workspace and --allow-git-dir")
     p.add_argument("--allow-git-dir", action="store_true",
                    help="mount --workspace even where it holds .git directories — their "
                         "hooks and config become guest-writable, which is host code "
@@ -4125,7 +4172,7 @@ def main():
     p.add_argument("--branch", metavar="NAME",
                    help="give the guest a git checkout of the enclosing repo on new branch "
                         "NAME; its commits land in the host repo as that branch at down "
-                        "(needs --with git; excludes --workspace)")
+                        "(needs --with git; excludes --workspace and --workspace-ro)")
     p.add_argument("--github-read", action="append", metavar="OWNER/REPO",
                    type=_github_repo_arg,
                    help="grant clone/fetch/LFS-download/API-GET for OWNER/REPO; "

@@ -277,10 +277,13 @@ unable to reach the network any other way — otherwise the proxy is advisory.
   nothing in silkgate hands a guest more than the certificate. Don't reuse that CA elsewhere.
 - Allowlisted destinations remain exfil carriers — keep each profile's rules minimal, never
   allowlist a header- or body-reflecting endpoint, and prefer download-only (GET).
-- `--workspace` is refused where the mount itself would hand over the host: `/`, your home
-  directory, silkgate's own checkout and state, and any directory holding a `.git`
-  **directory** anywhere under it — hooks and `core.fsmonitor` there are host code execution
-  the next time you run git in it. A linked worktree's `.git` **file** is allowed, with a
-  printed note. For a repository, use `--branch` instead of a mount.
+- `--workspace DIR` mounts DIR read-write. `--workspace-ro DIR` mounts the same path
+  read-only — `/workspace` is then browsable but writes to it fail. The read-only form
+  skips the `.git`-directory check (a whole repository is mountable), so an agent that only
+  reads code can be pointed directly at the repo. Both forms are refused for `/`, your home
+  directory, and silkgate's own checkout and state — credentials and configuration there must
+  not be exposed even read-only. A linked worktree's `.git` **file** passes either form, with
+  a printed note. `--workspace-ro` is exclusive with `--workspace`, `--allow-git-dir`, and
+  `--branch`. For a repository where the guest must also commit, use `--branch` instead.
 - The `probe` profile exists for `verify` only: it opens the Debian mirrors, so every other
   command refuses to compose it.

@@ -25,7 +25,10 @@ hang; later runs with the same profiles reuse it and start in under a second.
 
 - `--workspace DIR` mounts DIR at **`/workspace`, read-write**, and that is the working
   directory. It is the only host path present; everything else the guest writes dies with it.
-  There is no read-only mount, so a verification run can still write to it.
+  `--workspace-ro DIR` mounts the same path **read-only** — writes to `/workspace` fail, so
+  the host code is protected. The `.git`-directory check is skipped for read-only mounts, so
+  a whole repository can be mounted directly. `--workspace-ro` is exclusive with `--workspace`,
+  `--allow-git-dir`, and `--branch`.
 - The base image has **no language runtimes** — no node, no python, no git. A guest has exactly
   what its profiles installed, so `--with claude` alone cannot run `node --test`.
 - **Secrets:** `inject_auth=<name>` in a rules file maps to `SILKGATE_EGRESS_SECRET_<NAME>` in
