@@ -1996,6 +1996,19 @@ def _maybe_stop_proxy():
 
 _BRANCH_ENV = ("GIT_DIR=/root/gitdir/.git", "GIT_WORK_TREE=/workspace")
 _GIT_TIMEOUT = 120                 # host git during harvest: bounded, per the deferral contract
+# Every repo-location override git(1) honors from the environment. Host git here must act
+# on the repository named by cwd or --git-dir, never one a parent process exported — run
+# silkgate from inside a silkgate --branch guest, for instance, and GIT_DIR/GIT_WORK_TREE
+# point at that session's clone, not the repo under the caller's feet.
+_GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                      "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+                      "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+                      "GIT_INDEX_VERSION", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE")
+
+
+def _host_git_env():
+    """os.environ minus git's repo-location overrides, for every host-side git call."""
+    return {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_VARS}
 _BASE_RE = re.compile(r"[0-9a-f]{40}")
 # meta.json's branch reaches git argv (always behind --git-dir, always fully qualified) and,
 # with repo_root, an rmtree decision — held to a charset before use, like "sandbox" above.
@@ -2008,7 +2021,7 @@ def _git(git_dir, *argv):
     try:
         return subprocess.run([which("git"), "--git-dir", str(git_dir), *argv],
                               capture_output=True, text=True, start_new_session=True,
-                              timeout=_GIT_TIMEOUT)
+                              timeout=_GIT_TIMEOUT, env=_host_git_env())
     except subprocess.TimeoutExpired:
         return None
 
@@ -2039,21 +2052,22 @@ def _branch_spec(branch, profiles, env):
     if branch.startswith("-") or any(c.isspace() or ord(c) < 0x20 for c in branch):
         die(f"invalid branch name {branch!r}")
     if subprocess.run([which("git"), "check-ref-format", "--branch", branch],
-                      capture_output=True).returncode:
+                      capture_output=True, env=_host_git_env()).returncode:
         die(f"invalid branch name {branch!r} (git check-ref-format refused it)")
     probe = subprocess.run([which("git"), "rev-parse", "--path-format=absolute",
                             "--git-common-dir", "--show-toplevel"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=_host_git_env())
     if probe.returncode:
         die("--branch needs the current directory to be inside a git work tree — cd into the "
             "repo whose branch this session should produce")
     git_dir, repo_root = probe.stdout.splitlines()[:2]
     if not subprocess.run([which("git"), "--git-dir", git_dir, "show-ref", "--verify",
-                           "--quiet", f"refs/heads/{branch}"], capture_output=True).returncode:
+                           "--quiet", f"refs/heads/{branch}"], capture_output=True,
+                          env=_host_git_env()).returncode:
         die(f"branch {branch!r} already exists — the branch is this session's deliverable; "
             "pick a new name")
     head = subprocess.run([which("git"), "rev-parse", "--verify", "HEAD^{commit}"],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env=_host_git_env())
     if head.returncode:
         die("the repository has no commits — --branch needs a base commit")
     _exclude_silkgate(Path(git_dir))
