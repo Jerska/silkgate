@@ -102,6 +102,7 @@ _TOOL_HINTS = {
     "docker": "images are built with docker, then loaded into msb",
     "msb": "curl -fsSL https://install.microsandbox.dev | sh",
     "mitmdump": "pip install mitmproxy",
+    "git": "--branch drives the host repository with it",
 }
 
 
@@ -819,7 +820,7 @@ def ensure_image(profiles, image, *, base=BASE_IMAGE):
 # a courtesy to a cooperating agent — it saves turns wasted on things the sandbox forbids
 # — and never a control: an adversarial guest ignores it, so nothing may rely on it.
 
-def session_context(profiles, ruleset, *, workspace, persistent):
+def session_context(profiles, ruleset, *, workspace, persistent, branch=None):
     """The markdown a guest is handed about its own sandbox."""
     lines = [
         "# Where you are running: a silkgate sandbox",
@@ -848,7 +849,17 @@ def session_context(profiles, ruleset, *, workspace, persistent):
         "installed but no mirror is reachable, so check what exists before reaching for it.",
         "",
     ]
-    if workspace:
+    if branch:
+        lines += [
+            f"`/workspace` is a checkout of the project on branch **`{branch}`**, and git works:",
+            "commit to that branch as you go. **Commits are the deliverable** — when this session",
+            "ends they land in the host repository as that branch, and everything uncommitted in",
+            "`/workspace` is deleted. The host may collect the branch mid-session too, so never",
+            "rewrite or amend commits you have already made: the branch only ever moves forward.",
+            "Do not push: there is no remote that accepts one. If you need history, `git log` and",
+            "`git fetch origin` work; the clone's origin is a read-only mount of the host repo.",
+        ]
+    elif workspace:
         lines += [
             "`/workspace` is your working directory, read-write, and a directory on the host — so",
             "treat what you leave there as the deliverable. The rest of the filesystem is writable",
@@ -979,6 +990,12 @@ def read_meta(name):
     sandbox = meta.get("sandbox")
     if sandbox is not None and not _SANDBOX_RE.fullmatch(str(sandbox)):
         die(f"session {name!r}: its meta.json names sandbox {sandbox!r} — refusing it")
+    if meta.get("branch") is not None:
+        # Branch metas add git argv (branch, base) and an rmtree decision (repo_root via
+        # _reap_derived_workspace) — same refusal as sandbox above for a planted meta.
+        branch, base = str(meta["branch"]), str(meta.get("base", ""))
+        if not _BRANCH_RE.fullmatch(branch) or ".." in branch or not _BASE_RE.fullmatch(base):
+            die(f"session {name!r}: its meta.json names branch {branch!r} — refusing it")
     return meta
 
 
@@ -1790,6 +1807,272 @@ def _maybe_stop_proxy():
         stop_proxy(meta)
 
 
+# --- branch sessions: a clone in the guest, a branch back on the host -----------
+# The guest clones from a read-only mount of the host repo's gitdir into its own rootfs, works
+# a branch there, and hands commits back as a bundle the host fetches under fsck and promotes
+# fast-forward-only. The workspace mount holds zero git metadata (GIT_DIR is rootfs-side), so
+# there is nothing on the mount for a guest to rewrite; the one writable piece of host git
+# state is `.git/lfs` — content-addressed, SHA-verified on read, so a hostile guest costs
+# availability (a re-download), never integrity.
+
+_BRANCH_ENV = ("GIT_DIR=/root/gitdir/.git", "GIT_WORK_TREE=/workspace")
+_GIT_TIMEOUT = 120                 # host git during harvest: bounded, per the deferral contract
+_BASE_RE = re.compile(r"[0-9a-f]{40}")
+# meta.json's branch reaches git argv (always behind --git-dir, always fully qualified) and,
+# with repo_root, an rmtree decision — held to a charset before use, like "sandbox" above.
+_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,200}")
+
+
+def _git(git_dir, *argv):
+    """One bounded host-git call, or None on timeout. Its own session: harvest runs inside
+    _deferred_interrupts after a Ctrl-C already hit the foreground group."""
+    try:
+        return subprocess.run([which("git"), "--git-dir", str(git_dir), *argv],
+                              capture_output=True, text=True, start_new_session=True,
+                              timeout=_GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _check_branch_flags(args):
+    """--branch owns the workspace, so the flags that shape one are refused with it."""
+    if not getattr(args, "branch", None):
+        return
+    if args.workspace:
+        die("--branch and --workspace are exclusive — --branch derives its own workspace "
+            "under <repo>/.silkgate/sandboxes")
+    if args.allow_git_dir:
+        die("--allow-git-dir does not apply to --branch, whose workspace never holds a .git")
+
+
+def _branch_spec(branch, profiles, env):
+    """Validate --branch against the enclosing repo; the meta extras a branch session records.
+
+    Everything here dies before any host process starts: the guest needs git in the image, the
+    name must be a legal single-level ref, the enclosing repo must have a commit to base on,
+    and the branch is this session's deliverable — an existing one is refused, never moved.
+    """
+    if not any(p.name == "git" for p in profiles):
+        die("--branch needs git in the guest — add --with git")
+    for pair in env:
+        if pair.partition("=")[0] in ("GIT_DIR", "GIT_WORK_TREE"):
+            die(f"-e {pair.partition('=')[0]} conflicts with --branch, which owns it in the guest")
+    if branch.startswith("-") or any(c.isspace() or ord(c) < 0x20 for c in branch):
+        die(f"invalid branch name {branch!r}")
+    if subprocess.run([which("git"), "check-ref-format", "--branch", branch],
+                      capture_output=True).returncode:
+        die(f"invalid branch name {branch!r} (git check-ref-format refused it)")
+    probe = subprocess.run([which("git"), "rev-parse", "--path-format=absolute",
+                            "--git-common-dir", "--show-toplevel"],
+                           capture_output=True, text=True)
+    if probe.returncode:
+        die("--branch needs the current directory to be inside a git work tree — cd into the "
+            "repo whose branch this session should produce")
+    git_dir, repo_root = probe.stdout.splitlines()[:2]
+    if not subprocess.run([which("git"), "--git-dir", git_dir, "show-ref", "--verify",
+                           "--quiet", f"refs/heads/{branch}"], capture_output=True).returncode:
+        die(f"branch {branch!r} already exists — the branch is this session's deliverable; "
+            "pick a new name")
+    head = subprocess.run([which("git"), "rev-parse", "--verify", "HEAD^{commit}"],
+                          capture_output=True, text=True)
+    if head.returncode:
+        die("the repository has no commits — --branch needs a base commit")
+    _exclude_silkgate(Path(git_dir))
+    return {"branch": branch, "git_dir": git_dir, "base": head.stdout.strip(),
+            "repo_root": repo_root, "workspace_derived": True}
+
+
+def _exclude_silkgate(git_dir):
+    """One idempotent `.silkgate/` line in info/exclude, so derived workspaces never show up
+    in the repo's own status. info/exclude over .gitignore: host-side, nothing to commit."""
+    exclude = git_dir / "info" / "exclude"
+    text = exclude.read_text() if exclude.is_file() else ""
+    if ".silkgate/" in text.splitlines():
+        return
+    exclude.parent.mkdir(exist_ok=True)
+    exclude.write_text(text + ("" if not text or text.endswith("\n") else "\n") + ".silkgate/\n")
+
+
+def _branch_workspace(spec, name):
+    """The derived workspace and the mounts of a branch session.
+
+    The workspace is a fresh directory nested inside the repo — inside, so the guard's refusal
+    of the repo root itself keeps holding for everyone else — and it is silkgate's to delete at
+    teardown, which is why a user-named --workspace can never reach this path."""
+    ws_dir = Path(spec["repo_root"]) / ".silkgate" / "sandboxes" / name
+    silk = Path(SILK_DIR).resolve()
+    if silk == ws_dir.resolve() or silk in ws_dir.resolve().parents:
+        die(f"refusing to keep branch workspaces under {ws_dir}: that is inside silkgate's "
+            "own state — a repository rooted at your home directory cannot use --branch")
+    if ws_dir.exists():
+        die(f"leftover workspace {ws_dir} already exists — a previous session kept it; "
+            "review and remove it first")
+    ws_dir.mkdir(parents=True)
+    ws, mounts = _workspace_mount(str(ws_dir))
+    mounts.append(f"{spec['git_dir']}:/silkgate/base.git:ro")
+    # The whole of .git/lfs, not objects/ alone: git-lfs stages under <storage>/tmp and
+    # renames into <storage>/objects, and a rename across two virtiofs mounts is EXDEV
+    # (measured, git-lfs 3.3.0 has no copy fallback). One mount = one filesystem, and the
+    # guest-side storage layout matches the host's byte for byte.
+    if (Path(spec["git_dir"]) / "lfs").is_dir():
+        mounts.append(f"{spec['git_dir']}/lfs:/root/lfsstore:rw")
+    return ws, mounts
+
+
+# Runs once per branch session, between the Tier-1 gate and the handover, with GIT_DIR unset
+# for the clone: the create-time -e pair is inherited by every exec, this one included, and
+# would point the clone at its own destination. lfs.storage is set before the checkout so the
+# smudge of an LFS-tracked tree reads the mounted store.
+_BRANCH_SETUP_SH = """\
+set -eu
+branch=$1; base=$2; session=$3
+unset GIT_DIR GIT_WORK_TREE
+git clone --quiet --no-checkout /silkgate/base.git /root/gitdir
+if [ -d /silkgate/base.git/hooks ]; then cp -a /silkgate/base.git/hooks/. /root/gitdir/.git/hooks/; fi
+if [ -d /silkgate/base.git/logs ]; then mkdir -p /root/gitdir/.git/logs && cp -a /silkgate/base.git/logs/. /root/gitdir/.git/logs/; fi
+git -C /root/gitdir config lfs.storage /root/lfsstore
+if command -v git-lfs >/dev/null 2>&1; then git -C /root/gitdir lfs install --skip-repo >/dev/null; fi
+git -C /root/gitdir config user.name "Claude (silkgate/$session)"
+git -C /root/gitdir config user.email "claude-$session@silkgate.invalid"
+export GIT_DIR=/root/gitdir/.git GIT_WORK_TREE=/workspace
+git checkout -b "$branch" "$base"
+"""
+
+
+def _setup_branch_guest(sandbox, branch, base, session):
+    """Clone + checkout in the guest, streamed (a big repo's clone must show progress)."""
+    rc = run_guest(lambda c: msb_exec_argv(sandbox, c),
+                   ["sh", "-c", _BRANCH_SETUP_SH, "_", branch, base, session], tty=False)
+    if rc:
+        die("guest git setup failed — session torn down")
+
+
+# The bundle range is always base..branch; only the nothing-new check moves with harvests.
+# rev-list --count, not a tip comparison: a guest reset to an ancestor of the base would
+# otherwise reach `bundle create`, which refuses an empty range with an error this protocol
+# would misread as a broken guest.
+_BUNDLE_SH = """\
+set -eu
+if ! tip=$(git rev-parse --verify "refs/heads/$1^{commit}" 2>/dev/null); then
+  echo SILKGATE_NO_BRANCH; exit 0
+fi
+if [ "$(git rev-list --count "$2..refs/heads/$1")" -eq 0 ]; then
+  echo SILKGATE_NO_COMMITS; exit 0
+fi
+rm -f /workspace/.silkgate.bundle
+git bundle create --quiet /workspace/.silkgate.bundle "$3..refs/heads/$1"
+echo "SILKGATE_BUNDLED $tip"
+"""
+
+
+def _bundle_in_guest(meta):
+    """(token, detail) from the guest: NO_BRANCH, NO_COMMITS, BUNDLED <tip>, or ERROR <why>."""
+    since = meta.get("branch_ingested") or meta["base"]
+    try:
+        proc = subprocess.run(msb_exec_argv(meta["sandbox"],
+                                            ["sh", "-c", _BUNDLE_SH, "_", meta["branch"],
+                                             since, meta["base"]]),
+                              capture_output=True, text=True, start_new_session=True,
+                              timeout=_GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return "SILKGATE_ERROR", "the guest did not answer the bundle request in time"
+    for line in reversed(proc.stdout.splitlines()):
+        token, _, detail = line.strip().partition(" ")
+        if token in ("SILKGATE_NO_BRANCH", "SILKGATE_NO_COMMITS", "SILKGATE_BUNDLED"):
+            return token, detail
+    return "SILKGATE_ERROR", (proc.stderr.strip().splitlines() or ["no verdict from the guest"])[-1]
+
+
+def _ingest_bundle(meta, bundle, tip):
+    """Fetch the guest's bundle under fsck and fast-forward the branch, or say why not.
+
+    The promote is one compare-and-swap: old value = what the last harvest ingested, or
+    must-not-exist on the first. That single step refuses a host branch someone else moved
+    and a guest that rewrote already-harvested history — the branch only ever fast-forwards,
+    and refused commits stay reachable at the staging ref."""
+    name, branch, git_dir = meta["name"], meta["branch"], meta["git_dir"]
+    staging = f"refs/silkgate/{name}/{branch}"
+    kept = f"the bundle stays at {bundle}; the workspace is kept"
+
+    def refuse(why):
+        say(f"branch {branch!r} not updated: {why} — {kept}")
+        return False
+
+    if not bundle.is_file():
+        return refuse("the guest reported a bundle that never landed in the workspace")
+    proc = _git(git_dir, "bundle", "verify", str(bundle))
+    if proc is None or proc.returncode:
+        return refuse("the bundle does not verify against this repository")
+    proc = _git(git_dir, "-c", "fetch.fsckObjects=true", "fetch", "--no-write-fetch-head",
+                str(bundle), f"+refs/heads/{branch}:{staging}")
+    if proc is None or proc.returncode:
+        return refuse("fetching the bundle failed fsck")
+    proc = _git(git_dir, "rev-parse", "--verify", f"{staging}^{{commit}}")
+    if proc is None or proc.returncode:
+        return refuse("the staging ref did not materialise")
+    staged = proc.stdout.strip()
+    if staged != tip:
+        return refuse("the fetched tip is not what the guest bundled")
+    # Ancestry against the last harvested tip, not the base: descent from the base alone
+    # would let a guest that rewrote already-harvested history move the branch sideways
+    # with a clean CAS (the old value still matches). Fast-forward-only means each harvest
+    # descends from the previous one; the first descends from the base.
+    old = meta.get("branch_ingested", "")
+    proc = _git(git_dir, "merge-base", "--is-ancestor", old or meta["base"], staged)
+    if proc is None or proc.returncode:
+        what = "fast-forward the last harvested tip" if old else "descend from the base commit"
+        return refuse(f"the branch does not {what} — commits staged at {staging}")
+    proc = _git(git_dir, "update-ref", f"refs/heads/{branch}", staged, old)
+    if proc is None or proc.returncode:
+        return refuse(f"refs/heads/{branch} moved since the last harvest — commits staged "
+                      f"at {staging}")
+    _git(git_dir, "update-ref", "-d", staging, staged)          # best-effort tidy-up
+    count = _git(git_dir, "rev-list", "--count", f"{meta['base']}..{staged}")
+    n = count.stdout.strip() if count and not count.returncode else "?"
+    say(f"branch {branch}: {n} commit(s) since base, tip {staged[:12]}")
+    mpath = session_dir(name) / "meta.json"
+    if mpath.is_file():
+        _write_json(mpath, {**meta, "branch_ingested": staged})
+        meta["branch_ingested"] = staged
+    return True
+
+
+def _harvest_branch(meta):
+    """Bundle out of the guest and ingest; True iff the workspace holds nothing durable."""
+    token, detail = _bundle_in_guest(meta)
+    if token == "SILKGATE_NO_COMMITS":
+        since = "the last harvest" if meta.get("branch_ingested") else "the base commit"
+        say(f"no commits since {since} — nothing to ingest")
+        return True
+    if token == "SILKGATE_NO_BRANCH":
+        say(f"the guest deleted branch {meta['branch']!r} — nothing to ingest")
+        return True
+    if token == "SILKGATE_BUNDLED":
+        return _ingest_bundle(meta, Path(meta["workspace"]) / ".silkgate.bundle", detail)
+    if meta.get("branch_ingested"):
+        say(f"could not reach the guest ({detail}); refs/heads/{meta['branch']} holds the "
+            f"last harvested state — the workspace is kept")
+    else:
+        say(f"could not harvest branch {meta['branch']!r}: {detail} — the workspace is kept")
+    return False
+
+
+def _reap_derived_workspace(meta):
+    """Delete a branch session's workspace — and only that. meta is data from disk, and this
+    is an rmtree, so both locks must hold: the flag, and the path resolving to exactly the
+    directory a branch session derives. A user-named --workspace never carries the flag."""
+    if not meta.get("workspace_derived") or not meta.get("workspace"):
+        return
+    ws = Path(meta["workspace"])
+    expected = Path(meta.get("repo_root", "")) / ".silkgate" / "sandboxes" / meta["name"]
+    if not ws.exists():
+        return
+    if ws.resolve() != expected.resolve():
+        say(f"not deleting {ws}: it is not this session's derived workspace")
+        return
+    shutil.rmtree(ws, ignore_errors=True)
+
+
 # --- commands ------------------------------------------------------------------
 
 def cmd_build(args):
@@ -1873,6 +2156,7 @@ def _strip_cmd_sep(cmd):
 def cmd_run(args):
     """One-shot over a persistent session: up (ephemeral) -> exec -> down, all foreground."""
     check_env(args.env)
+    _check_branch_flags(args)
     profiles, rules_text, ruleset = _session_policy(args)
     cmd = _strip_cmd_sep(args.cmd) or profile_command(profiles)
     if not cmd:
@@ -1880,23 +2164,33 @@ def cmd_run(args):
     # The ask is well-formed; now the whole toolchain shortfall in one report, before any
     # host process. An explicit --image is run as-is, never built, so docker is not its
     # business.
-    preflight(*(() if args.image else _build_tools()), "msb", "mitmdump")
+    preflight(*(() if args.image else _build_tools()), "msb", "mitmdump",
+              *(("git",) if args.branch else ()))
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
-    ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
-    image = ensure_image(profiles, args.image, base=args.base)
+    spec = _branch_spec(args.branch, profiles, args.env) if args.branch else None
     name = uuid4().hex[:6]
+    if spec:
+        ws, mounts = _branch_workspace(spec, name)
+    else:
+        ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
+    image = ensure_image(profiles, args.image, base=args.base)
     proxy_was_running = _proxy_running()        # --port is the base port iff WE start it
-    rc, provisioned, proxy = 1, False, None
+    rc, provisioned, branch_ready, proxy = 1, False, False, None
+    create_env = list(args.env) + (list(_BRANCH_ENV) if spec else [])
     try:
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
-        ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=False)
-        _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
-                           _session_meta(profiles, cmd), ctx, ctx_paths)
+        ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=False,
+                                      branch=args.branch)
+        _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
+                           {**_session_meta(profiles, cmd), **(spec or {})}, ctx, ctx_paths)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
             die(fault)                      # the finally below tears the session down
+        if spec:
+            _setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
+            branch_ready = True
         say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
         rc = run_guest(lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
                        cmd, tty=tty)
@@ -1905,10 +2199,22 @@ def cmd_run(args):
         # signals deferred, so a second Ctrl-C cannot leave the session half-removed.
         with _deferred_interrupts():
             if provisioned:
-                _teardown_session(read_meta(name) or
-                                  {"name": name, "sandbox": sandbox_name(name)})
+                meta = read_meta(name) or {"name": name, "sandbox": sandbox_name(name)}
+                # Harvest while the guest is still up — its gitdir dies with the VM. A
+                # harvest that could not bank everything keeps the workspace and must not
+                # let a green guest run mask it, hence the forced nonzero exit.
+                keep = False
+                if branch_ready:
+                    keep = not _harvest_branch(meta)
+                    if keep and rc == 0:
+                        rc = 1
+                _teardown_session(meta)
+                if spec and not keep:
+                    _reap_derived_workspace(meta)
             else:
                 _release_port(name)     # a claim pick_port made, however far it got
+                if spec and ws:
+                    shutil.rmtree(ws, ignore_errors=True)   # empty: created before the try
             # Only tear down the proxy if this command started it and nothing else
             # needs it.
             if not proxy_was_running and not list_metas():
@@ -1936,7 +2242,7 @@ def _session_meta(profiles, cmd):
     return {"profiles": [p.spec for p in profiles], "command": cmd}
 
 
-def _context_for(args, profiles, ruleset, ws, *, persistent):
+def _context_for(args, profiles, ruleset, ws, *, persistent, branch=None):
     """(context text, where to put it in the guest) — or (None, ()) with --no-context.
 
     Always at GUEST_CONTEXT, plus wherever a harness profile says its own tool looks for
@@ -1946,11 +2252,13 @@ def _context_for(args, profiles, ruleset, ws, *, persistent):
         return None, ()
     paths = [GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
                                if p.conf.get("context_path")]
-    return session_context(profiles, ruleset, workspace=ws, persistent=persistent), paths
+    return session_context(profiles, ruleset, workspace=ws, persistent=persistent,
+                           branch=branch), paths
 
 
 def cmd_up(args):
     check_env(args.env)
+    _check_branch_flags(args)
     profiles, rules_text, ruleset = _session_policy(args)
     name = args.name or uuid4().hex[:6]
     _validate_name(name)
@@ -1959,33 +2267,45 @@ def cmd_up(args):
     # The ask is well-formed; now the whole toolchain shortfall in one report, before any
     # host process. An explicit --image is run as-is, never built, so docker is not its
     # business.
-    preflight(*(() if args.image else _build_tools()), "msb", "mitmdump")
-    ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
+    preflight(*(() if args.image else _build_tools()), "msb", "mitmdump",
+              *(("git",) if args.branch else ()))
+    spec = _branch_spec(args.branch, profiles, args.env) if args.branch else None
+    if spec:
+        ws, mounts = _branch_workspace(spec, name)
+    else:
+        ws, mounts = _workspace_mount(args.workspace, allow_git_dir=args.allow_git_dir)
     image = ensure_image(profiles, args.image, base=args.base)
     provisioned = False
+    create_env = list(args.env) + (list(_BRANCH_ENV) if spec else [])
     try:
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
-        ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=True)
-        _provision_session(name, image, port, rules_text, ruleset, mounts, ws, args.env,
-                           _session_meta(profiles, profile_command(profiles)), ctx, ctx_paths)
+        ctx, ctx_paths = _context_for(args, profiles, ruleset, ws, persistent=True,
+                                      branch=args.branch)
+        _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
+                           {**_session_meta(profiles, profile_command(profiles)),
+                            **(spec or {})}, ctx, ctx_paths)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
             die(fault)
+        if spec:
+            _setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
     except BaseException:
         # A session `up` never handed over is unwound whole, interrupt included:
         # nothing of the user's is in the guest yet — work accrues only once
-        # exec/attach run, after `up` returns, and the workspace lives on the host
-        # either way — while a session left behind would hide that the command
-        # failed. The unwind defers the stop signals so a second Ctrl-C cannot
-        # leave it half-removed.
+        # exec/attach run, after `up` returns, and a derived workspace holds nothing
+        # but the fresh checkout — while a session left behind would hide that the
+        # command failed. The unwind defers the stop signals so a second Ctrl-C
+        # cannot leave it half-removed.
         with _deferred_interrupts():
             if provisioned:
                 _teardown_session(read_meta(name) or
                                   {"name": name, "sandbox": sandbox_name(name)})
             else:
                 _release_port(name)     # a claim pick_port made, however far it got
+            if spec and ws:
+                shutil.rmtree(ws, ignore_errors=True)   # no commits can exist yet
             _maybe_stop_proxy()
         raise
     say(f"session {name} up · proxy :{port} · audit: tail -f {proxy['log']}")
@@ -2021,13 +2341,32 @@ def cmd_down(args):
         die(f"no such session: {args.name!r} (silkgate ls)")
     # Teardown needs msb to stop/rm the guest; without this, its absence surfaces as
     # "msb rm failed — session kept", which reads as a broken sandbox, not a missing tool.
-    preflight("msb")
+    preflight("msb", *(("git",) if meta.get("branch") else ()))
     # The removal holds the stop signals: a Ctrl-C partway through would leave the
     # session half-removed, the one state worse than up or gone.
     with _deferred_interrupts():
+        # Harvest first: the guest's gitdir dies with the VM. A retried down harvests
+        # again — new commits fast-forward the branch; nothing new is a quiet no-op.
+        keep = bool(meta.get("branch")) and not _harvest_branch(meta)
         _teardown_session(meta)
+        if meta.get("branch") and not keep:
+            _reap_derived_workspace(meta)
         _maybe_stop_proxy()
     say(f"session {args.name} down")
+    if keep:
+        sys.exit(1)
+
+
+def cmd_harvest(args):
+    """Bundle the session's branch out of the live guest and fast-forward the host branch —
+    the mid-session save point. No teardown, no workspace reaping."""
+    meta = read_meta(args.name)
+    if not meta:
+        die(f"no such session: {args.name!r} (silkgate ls)")
+    if not meta.get("branch"):
+        die(f"session {args.name!r} has no --branch — nothing to harvest")
+    preflight("msb", "git")
+    sys.exit(0 if _harvest_branch(meta) else 1)
 
 
 def _age(iso):
@@ -3501,6 +3840,10 @@ def main():
                    help="mount --workspace even where it holds .git directories — their "
                         "hooks and config become guest-writable, which is host code "
                         "execution the next time a human runs git there")
+    p.add_argument("--branch", metavar="NAME",
+                   help="give the guest a git checkout of the enclosing repo on new branch "
+                        "NAME; its commits land in the host repo as that branch at teardown "
+                        "(needs --with git; excludes --workspace)")
     env_opt(p)
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
                    help="give the command a terminal, for a TUI (default: yes if stdin is a "
@@ -3519,6 +3862,10 @@ def main():
                    help="mount --workspace even where it holds .git directories — their "
                         "hooks and config become guest-writable, which is host code "
                         "execution the next time a human runs git there")
+    p.add_argument("--branch", metavar="NAME",
+                   help="give the guest a git checkout of the enclosing repo on new branch "
+                        "NAME; its commits land in the host repo as that branch at down "
+                        "(needs --with git; excludes --workspace)")
     profile_opts(p)
     env_opt(p)
     p.add_argument("--image", metavar="REF", type=_image_arg,
@@ -3556,6 +3903,11 @@ def main():
     p.add_argument("--interval", type=float, default=1.0, metavar="SECS",
                    help="follow poll interval in seconds (default: 1.0)")
     p.set_defaults(fn=cmd_logs)
+
+    p = sub.add_parser("harvest", help="bank a --branch session's commits into the host repo "
+                                       "without stopping it")
+    p.add_argument("name", metavar="NAME", help="session name")
+    p.set_defaults(fn=cmd_harvest)
 
     p = sub.add_parser("down", help="stop + remove a session (and the proxy if it was the last)")
     p.add_argument("name", metavar="NAME", help="session name")

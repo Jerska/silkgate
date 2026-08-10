@@ -565,8 +565,9 @@ class TestPreflight(CliCase):
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
             sg.main()
         self.assertEqual(caught.exception.code, 1)
-        for binary, hint in sg._TOOL_HINTS.items():
-            self.assertIn(f"{binary} — {hint}", err.getvalue())
+        # A plain run's toolchain — git is hinted too, but only --branch demands it.
+        for binary in ("docker", "msb", "mitmdump"):
+            self.assertIn(f"{binary} — {sg._TOOL_HINTS[binary]}", err.getvalue())
         # Bytes: str.splitlines would split on the (invisible) mark itself.
         for line in err.getvalue().encode().splitlines():    # host voice, so marked
             self.assertTrue(line.startswith(sg._ERR_TAG), repr(line))
@@ -718,8 +719,212 @@ class TestMarkedArgparse(CliCase):
         proc = self.run_cli("run", "--", "true", path="/nonexistent-path-entry")
         self.assertEqual(proc.returncode, 1)
         self.assert_marked(proc.stderr)
-        for binary, hint in sg._TOOL_HINTS.items():
-            self.assertIn(f"{binary} — {hint}".encode(), proc.stderr)
+        # A plain run's toolchain — git is in _TOOL_HINTS too, but only --branch demands it.
+        for binary in ("docker", "msb", "mitmdump"):
+            self.assertIn(f"{binary} — {sg._TOOL_HINTS[binary]}".encode(), proc.stderr)
+
+
+class TestBranchGuards(CliCase):
+    """--branch: what run/up refuse before any host process, and the derived-workspace locks."""
+
+    def argv_refuses(self, needle, argv):
+        with mock.patch.object(sys, "argv", ["silkgate"] + argv), self.no_preflight():
+            return self.refuses(needle, sg.main)
+
+    def git_profile(self):
+        import types
+        return [types.SimpleNamespace(name="git")]
+
+    def _repo(self, commit=True, name="repo"):
+        root = self.tmp / name
+        subprocess.run(["git", "init", "-q", "-b", "main", str(root)],
+                       check=True, capture_output=True)
+        if commit:
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=t",
+                            "-c", "user.email=t@t.invalid", "commit", "-q",
+                            "--allow-empty", "-m", "seed"], check=True, capture_output=True)
+        return root
+
+    @contextlib.contextmanager
+    def _cwd(self, path):
+        old = os.getcwd()
+        os.chdir(path)
+        try:
+            yield
+        finally:
+            os.chdir(old)
+
+    # --- flag surface, no git needed ------------------------------------------
+
+    def test_branch_excludes_workspace(self):
+        self.argv_refuses("exclusive",
+                          ["run", "--branch", "x", "--workspace", str(self.tmp), "--", "true"])
+
+    def test_branch_excludes_allow_git_dir(self):
+        self.argv_refuses("--allow-git-dir",
+                          ["run", "--branch", "x", "--allow-git-dir", "--", "true"])
+
+    def test_branch_needs_the_git_profile(self):
+        self.argv_refuses("--with git", ["run", "--branch", "x", "--", "true"])
+
+    def test_branch_owns_its_guest_env(self):
+        self.argv_refuses("conflicts with --branch",
+                          ["run", "--with", "git", "--branch", "x",
+                           "-e", "GIT_DIR=/x", "--", "true"])
+
+    def test_branch_name_precheck_needs_no_git(self):
+        for bad in ("-x", "a b", "a\tb"):
+            self.refuses("invalid branch name", sg._branch_spec, bad, self.git_profile(), [])
+
+    # --- repo validation, real git --------------------------------------------
+
+    @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
+    def test_branch_spec_against_a_repo(self):
+        root = self._repo()
+        with self._cwd(root):
+            self.refuses("invalid branch name", sg._branch_spec, "a..b", self.git_profile(), [])
+            self.refuses("already exists", sg._branch_spec, "main", self.git_profile(), [])
+            spec = sg._branch_spec("agent/x", self.git_profile(), [])
+        self.assertEqual(Path(spec["git_dir"]), (root / ".git").resolve())
+        self.assertEqual(Path(spec["repo_root"]), root.resolve())
+        self.assertRegex(spec["base"], r"\A[0-9a-f]{40}\Z")
+        self.assertTrue(spec["workspace_derived"])
+        exclude = root / ".git" / "info" / "exclude"
+        self.assertIn(".silkgate/", exclude.read_text().splitlines())
+
+    @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
+    def test_branch_spec_refuses_a_repoless_cwd_and_an_unborn_head(self):
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        with self._cwd(empty):
+            self.refuses("inside a git work tree", sg._branch_spec, "x", self.git_profile(), [])
+        with self._cwd(self._repo(commit=False, name="unborn")):
+            self.refuses("no commits", sg._branch_spec, "x", self.git_profile(), [])
+
+    @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
+    def test_branch_spec_from_a_linked_worktree(self):
+        # git_dir must be the common dir (the worktree's own gitdir has no objects), and
+        # the base must be the worktree's HEAD, not the main checkout's.
+        root = self._repo()
+        wt = self.tmp / "wt"
+        subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "--detach", str(wt)],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(wt), "-c", "user.name=t", "-c",
+                        "user.email=t@t.invalid", "commit", "-q", "--allow-empty",
+                        "-m", "ahead"], check=True, capture_output=True)
+        head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        with self._cwd(wt):
+            spec = sg._branch_spec("agent/x", self.git_profile(), [])
+        self.assertEqual(Path(spec["git_dir"]), (root / ".git").resolve())
+        self.assertEqual(spec["base"], head)
+
+    def test_exclude_silkgate_is_idempotent_and_preserving(self):
+        git_dir = self.tmp / "gd"
+        (git_dir / "info").mkdir(parents=True)
+        (git_dir / "info" / "exclude").write_text("prior\n")
+        sg._exclude_silkgate(git_dir)
+        sg._exclude_silkgate(git_dir)
+        self.assertEqual((git_dir / "info" / "exclude").read_text(), "prior\n.silkgate/\n")
+
+    # --- the derived workspace -------------------------------------------------
+
+    def spec_for(self, root):
+        return {"branch": "agent/x", "git_dir": str(root / ".git"), "base": "0" * 40,
+                "repo_root": str(root), "workspace_derived": True}
+
+    def test_branch_workspace_mounts(self):
+        root = self.tmp / "proj"
+        (root / ".git").mkdir(parents=True)
+        ws, mounts = sg._branch_workspace(self.spec_for(root), "n1")
+        self.assertEqual(Path(ws), (root / ".silkgate" / "sandboxes" / "n1").resolve())
+        self.assertIn(f"{ws}:/workspace:rw", mounts)
+        self.assertIn(f"{root / '.git'}:/silkgate/base.git:ro", mounts)
+        self.assertFalse(any("/root/lfsstore" in m for m in mounts),
+                         "no lfs mount when the repo has no .git/lfs")
+        (root / ".git" / "lfs").mkdir()
+        ws2, mounts2 = sg._branch_workspace(self.spec_for(root), "n2")
+        self.assertIn(f"{root / '.git' / 'lfs'}:/root/lfsstore:rw", mounts2)
+
+    def test_branch_workspace_refuses_a_leftover(self):
+        root = self.tmp / "proj"
+        (root / ".silkgate" / "sandboxes" / "n1").mkdir(parents=True)
+        self.refuses("leftover workspace", sg._branch_workspace, self.spec_for(root), "n1")
+
+    def test_branch_workspace_refuses_silkgates_own_state(self):
+        root = Path(sg.SILK_DIR) / "somerepo"
+        self.refuses("silkgate's own state", sg._branch_workspace, self.spec_for(root), "n1")
+
+    def test_workspace_guard_accepts_the_nested_sandbox_dir(self):
+        # The pin for the whole layout: the repo root stays refused while the derived
+        # directory nested inside it mounts — nesting is what separates the two.
+        repo = self.tmp / "nestrepo"
+        (repo / ".git").mkdir(parents=True)
+        nested = repo / ".silkgate" / "sandboxes" / "x"
+        nested.mkdir(parents=True)
+        self.refuses("refusing to mount", sg._workspace_mount, str(repo))
+        ws, mounts = sg._workspace_mount(str(nested))
+        self.assertEqual(mounts, [f"{nested.resolve()}:/workspace:rw"])
+
+    # --- meta as input ----------------------------------------------------------
+
+    def plant_meta(self, name, **extra):
+        sdir = sg.SESSIONS_DIR / name
+        sdir.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sdir, ignore_errors=True)
+        (sdir / "meta.json").write_text(json.dumps(
+            {"name": name, "sandbox": f"sg-{name}", **extra}))
+
+    def test_read_meta_refuses_a_planted_branch(self):
+        self.plant_meta("aaa111", branch="-evil", base="0" * 40)
+        self.refuses("refusing it", sg.read_meta, "aaa111")
+
+    def test_read_meta_refuses_a_planted_base(self):
+        self.plant_meta("bbb222", branch="fine", base="not-a-sha")
+        self.refuses("refusing it", sg.read_meta, "bbb222")
+
+    def test_read_meta_accepts_a_wellformed_branch_meta(self):
+        self.plant_meta("ccc333", branch="agent/x", base="0" * 40)
+        self.assertEqual(sg.read_meta("ccc333")["branch"], "agent/x")
+
+    def test_reap_needs_both_locks(self):
+        root = self.tmp / "proj"
+        ws = root / ".silkgate" / "sandboxes" / "n1"
+        ws.mkdir(parents=True)
+        base = {"name": "n1", "repo_root": str(root), "workspace": str(ws)}
+        sg._reap_derived_workspace({**base})                          # no flag
+        self.assertTrue(ws.exists())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):                         # flag, wrong path
+            sg._reap_derived_workspace({**base, "workspace_derived": True,
+                                        "workspace": str(self.tmp)})
+        self.assertTrue(self.tmp.exists())
+        self.assertIn("not this session's derived workspace", err.getvalue())
+        sg._reap_derived_workspace({**base, "workspace_derived": True})
+        self.assertFalse(ws.exists())
+
+    # --- wiring ------------------------------------------------------------------
+
+    def test_run_and_up_wire_branch_through_spec_and_workspace(self):
+        fake_spec = {"branch": "nb", "git_dir": "/g", "base": "0" * 40,
+                     "repo_root": "/r", "workspace_derived": True}
+        for argv in (["run", "--with", "git", "--branch", "nb", "--", "true"],
+                     ["up", "--name", "w1", "--with", "git", "--branch", "nb"]):
+            seen = {}
+
+            def spy(spec, name, _seen=seen):
+                _seen["spec"], _seen["name"] = spec, name
+                raise SystemExit(42)                # stop before any proxy/msb work
+
+            with mock.patch.object(sys, "argv", ["silkgate"] + argv), \
+                    mock.patch.object(sg, "_branch_spec", lambda *a: fake_spec), \
+                    mock.patch.object(sg, "_branch_workspace", spy), \
+                    self.no_preflight(), self.assertRaises(SystemExit) as caught:
+                sg.main()
+            self.assertEqual(caught.exception.code, 42, argv[0])
+            self.assertEqual(seen["spec"], fake_spec)
+            self.assertTrue(seen["name"] == "w1" if argv[0] == "up"
+                            else sg._name_ok(seen["name"]))
 
 
 if __name__ == "__main__":

@@ -170,16 +170,26 @@ reported as requests instead of retried in a loop.
 - **`-t` changes how the command behaves**, not just how it looks: it hands the guest a real
   terminal, so programs colorize, emit cursor control, and merge stdout into stderr — which
   corrupts a JSON stream. Leave it off for anything you intend to parse.
+- **An agent that needs git gets `--branch`, not a repo mount.** `run`/`up` from inside the
+  repo with `--with git --branch <new-name>` hands the guest a real clone checked out on that
+  branch at `/workspace`; its commits land in the host repo as that branch at `down` (or on
+  demand with `silkgate harvest NAME`), fast-forward-only, fetched under fsck. Commits are the
+  deliverable: uncommitted files are deleted with the session, and file modes ride in the
+  commits, so the old exec-bit ritual is gone. The host repo's `.git` is mounted read-only;
+  with LFS in use, `.git/lfs` is the one host-writable piece — a hostile guest can cost you a
+  re-download there, never content substitution (SHA-256 verifies on read). Two guest-side
+  surprises: host hooks are copied into the clone verbatim, so a hook referencing host paths
+  fails in the guest (`--no-verify`, or fix the hook); and `GIT_DIR`/`GIT_WORK_TREE` are in
+  every exec's environment, so an unrelated clone inside the guest needs
+  `env -u GIT_DIR -u GIT_WORK_TREE git clone …`.
 - **git does not work in a mounted worktree** — its `.git` file points at a host path outside
   the mount. Mounting the whole repo would hand the guest rw access to `.git` — host code
   execution via hooks or `core.fsmonitor` the next time a human runs git there — so silkgate
-  refuses any workspace whose root holds a `.git` directory (and `/`, `$HOME`, its own checkout
-  and state); a linked worktree's `.git` file passes, with a printed note, and only the mount
-  root is examined. Mount the subdirectory that holds the work, as the example does. An agent
-  that must run git itself can `--with git` and clone inside the guest; once a guest has
-  written a `.git` anywhere in the workspace, don't run git there on the host —
-  `git fetch <dir> branch:branch` copies the objects without executing anything from them.
-- **Guest rewrites can drop the exec bit** — `chmod +x` after an agent edits a script.
+  refuses any workspace holding a `.git` directory anywhere under it (and `/`, `$HOME`, its
+  own checkout and state); a linked worktree's `.git` file passes, with a printed note. For
+  git-free work, mount the subdirectory that holds it, as the example does. The pre-`--branch`
+  fallback still works: `--with git`, clone inside the guest, and on the host
+  `git fetch <dir> branch:branch` — never run git in a directory a guest wrote.
 - **Nothing bounds a runaway agent** — silkgate has no timeout or cost ceiling. Wrap the
   invocation in `timeout 600 …` if that matters to you; it tears down cleanly, but its clock
   includes the image build, so a cold profile set spends part of the budget on docker.

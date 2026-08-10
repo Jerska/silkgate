@@ -130,6 +130,38 @@ session you did not start in the foreground, or to see only its egress decisions
 ./cli/silkgate logs foo --audit -f    # just this session's allow/deny lines
 ```
 
+## Handing a guest real git: `--branch`
+
+Run `run` or `up` from inside a repository with `--with git --branch <new-name>` and the guest
+gets a working checkout on that branch at `/workspace`, cloned inside the VM from a **read-only**
+mount of the repo's `.git`. The workspace mount holds no git metadata at all, so there is nothing
+on it for a guest to rewrite; commits are the deliverable, and file modes ride in them.
+
+```sh
+cd ~/projects/foo
+silkgate run --with git --with claude --branch agent/fix-flaky-test -- \
+  silkgate-claude -p "fix the flaky test in tests/test_sync.py, commit as you go"
+```
+
+A persistent session works the same way (`up --branch … --name bar`), and
+`silkgate harvest bar` banks its commits mid-session without stopping it.
+
+At `down` (and on every `harvest`) the guest's commits come out as a bundle the host fetches
+under `fetch.fsckObjects`, then promotes **fast-forward-only** with one compare-and-swap: a
+branch that already exists, was moved by someone else, or whose harvested history the guest
+rewrote is refused, and the refused commits stay reachable at `refs/silkgate/<session>/<branch>`.
+The derived workspace under `<repo>/.silkgate/sandboxes/` is deleted at teardown — uncommitted
+files die with it, and the guest's brief says so — except when a harvest could not bank
+everything, in which case it is kept and named. Commits made after the last harvest live only in
+the VM, so `harvest` long sessions at milestones.
+
+With LFS in use, `.git/lfs` is mounted **read-write** — the one piece of host git state a guest
+can touch. That is an availability risk only, accepted by design: objects are content-addressed
+and git-lfs verifies SHA-256 on read, so a hostile guest can force a re-download, never
+substitute content. It can also read any LFS object in the store, so treat the store as visible
+to the guest. Hooks are copied into the clone verbatim and run in the guest; a hook that
+references host paths fails there (`--no-verify`, or fix the hook).
+
 `up` pushes every `EGRESS_SECRET_<NAME>` the session's `inject_auth` rules need, and refuses to
 start if one is missing from your environment. Secrets are held **per session**, so one shared
 proxy never lets a later session spend a key an earlier one pushed — which means each `up` needs
@@ -147,7 +179,7 @@ the environment; the value is **never** an argument. `silkgate secret ls` lists 
   secret injection, fail-closed, audit log. A listener port always resolves to a ruleset, either
   from a session registry (`EGRESS_SESSIONS_DIR`) or from one fixed ruleset (`EGRESS_RULES`)
 - `cli/silkgate` — the host CLI (`profiles` / `build` / `verify` / `proxy` / `run` / `up` /
-  `exec` / `attach` / `logs` / `down` / `ls` / `secret`), stdlib-only Python
+  `exec` / `attach` / `logs` / `harvest` / `down` / `ls` / `secret`), stdlib-only Python
 - `test/verify_guest.sh` — the Tier-1 checks, run as root inside a guest by `silkgate verify`
 - `test/linux/` — a container to run the whole thing on Linux hosts too old for the msb binaries
 
@@ -243,9 +275,9 @@ unable to reach the network any other way — otherwise the proxy is advisory.
 - Allowlisted destinations remain exfil carriers — keep each profile's rules minimal, never
   allowlist a header- or body-reflecting endpoint, and prefer download-only (GET).
 - `--workspace` is refused where the mount itself would hand over the host: `/`, your home
-  directory, silkgate's own checkout and state, and any directory whose root holds a `.git`
-  **directory** — hooks and `core.fsmonitor` there are host code execution the next time you
-  run git in it. A linked worktree's `.git` **file** is allowed, with a printed note. Only the
-  mount root is examined; a repository nested deeper inside is the operator's call.
+  directory, silkgate's own checkout and state, and any directory holding a `.git`
+  **directory** anywhere under it — hooks and `core.fsmonitor` there are host code execution
+  the next time you run git in it. A linked worktree's `.git` **file** is allowed, with a
+  printed note. For a repository, use `--branch` instead of a mount.
 - The `probe` profile exists for `verify` only: it opens the Debian mirrors, so every other
   command refuses to compose it.
