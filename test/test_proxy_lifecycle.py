@@ -109,7 +109,7 @@ if rec:
     with open(rec + ".pid", "w") as fh:
         fh.write(str(os.getpid()))
     with open(rec + ".env", "w") as fh:
-        json.dump(dict(os.environ), fh)
+        json.dump({k: v for k, v in os.environ.items() if k.startswith("SILKGATE_EGRESS_")}, fh)
 def opts(flag):
     return [sys.argv[i + 1] for i, a in enumerate(sys.argv) if a == flag and i + 1 < len(sys.argv)]
 listens = []
@@ -1023,10 +1023,9 @@ class LifecycleTest(_FakeToolsCase):
 
         # SILKGATE_EGRESS_EVENTS_FILE must have reached the child
         env_file = Path(self.mitm_argv.parent, self.mitm_argv.name + ".env")
-        if env_file.exists():
-            child_env = json.loads(env_file.read_text())
-            self.assertIn("SILKGATE_EGRESS_EVENTS_FILE", child_env)
-            self.assertEqual(child_env["SILKGATE_EGRESS_EVENTS_FILE"], meta["events"])
+        self.assertTrue(env_file.exists(), "the fake mitmdump did not record its environment")
+        child_env = json.loads(env_file.read_text())
+        self.assertEqual(child_env.get("SILKGATE_EGRESS_EVENTS_FILE"), meta["events"])
 
         MOD.stop_proxy(meta)
 

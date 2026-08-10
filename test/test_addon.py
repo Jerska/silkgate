@@ -1090,13 +1090,14 @@ class EventsFileTest(AddonCase):
             self.assertEqual(f.response.status_code, 500)
 
     def test_control_records_not_mirrored(self):
-        """control/stream decisions from the control socket never go to the events file."""
+        """Control records never go to the events file."""
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "events.jsonl")
             ef = proxy_addon._EventsFile(path)
             self.swap_events(ef)
-            # A ping goes through _control_dispatch which calls logger.info directly,
-            # not _audit, so it must not appear in the events file.
+            # _control_log is what emits "control" records; it logs directly, never
+            # through _audit, so the events file stays flow records only.
+            proxy_addon._control_log("listening on /tmp/nowhere.sock")
             proxy_addon._control_dispatch('{"op": "ping"}')
             with open(path) as fh:
                 content = fh.read()
