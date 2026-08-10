@@ -27,8 +27,9 @@ hang; later runs with the same profiles reuse it and start in under a second.
   directory. It is the only host path present; everything else the guest writes dies with it.
   `--workspace-ro DIR` mounts the same path **read-only** — writes to `/workspace` fail, so
   the host code is protected. The `.git`-directory check is skipped for read-only mounts, so
-  a whole repository can be mounted directly. `--workspace-ro` is exclusive with `--workspace`,
-  `--allow-git-dir`, and `--branch`.
+  a whole repository can be mounted directly — which also means the guest reads all of `.git`,
+  `.git/config` included, where a remote URL can embed a token; check that before mounting a
+  repo. `--workspace-ro` is exclusive with `--workspace`, `--allow-git-dir`, and `--branch`.
 - The base image has **no language runtimes** — no node, no python, no git. A guest has exactly
   what its profiles installed, so `--with claude` alone cannot run `node --test`.
 - **Secrets:** `inject_auth=<name>` in a rules file maps to `SILKGATE_EGRESS_SECRET_<NAME>` in
@@ -228,11 +229,13 @@ reported as requests instead of retried in a loop.
   every exec's environment, so an unrelated clone inside the guest needs
   `env -u GIT_DIR -u GIT_WORK_TREE git clone …`.
 - **git does not work in a mounted worktree** — its `.git` file points at a host path outside
-  the mount. Mounting the whole repo would hand the guest rw access to `.git` — host code
-  execution via hooks or `core.fsmonitor` the next time a human runs git there — so silkgate
-  refuses any workspace holding a `.git` directory anywhere under it (and `/`, `$HOME`, its
-  own checkout and state); a linked worktree's `.git` file passes, with a printed note. For
-  git-free work, mount the subdirectory that holds it, as the example does. The pre-`--branch`
+  the mount. Mounting the whole repo read-write would hand the guest rw access to `.git` —
+  host code execution via hooks or `core.fsmonitor` the next time a human runs git there — so
+  silkgate refuses a read-write workspace holding a `.git` directory anywhere under it (and
+  `/`, `$HOME`, its own checkout and state, in either mode); `--workspace-ro` skips the `.git`
+  refusal — the hook risk needs guest writes — and a linked worktree's `.git` file passes
+  either way, with a printed note. For git-free work under a read-write mount, mount the
+  subdirectory that holds it, as the example does. The pre-`--branch`
   fallback still works: `--with git`, clone inside the guest, and on the host
   `git fetch <dir> branch:branch` — never run git in a directory a guest wrote.
 - **Nothing bounds a runaway agent** — silkgate has no timeout or cost ceiling. Wrap the

@@ -71,11 +71,14 @@ make the network the only thing it can do — under inspection.
 - **Ephemeral microVM per task** — only for code-interpreter semantics (fresh VM per run);
   worse DX for iterative coding.
 
-**Mounts:** exactly one — the project dir, read-write, via virtiofs. Nothing else. The CLI
-refuses mounts that would hand the guest the host itself: `/`, `$HOME`, silkgate's own checkout
-and state, and any directory whose root holds a `.git` **directory** — hooks and
-`core.fsmonitor` there are host code execution the next time a human runs git in it. A linked
-worktree's `.git` **file** is allowed, with a printed note; only the mount root is examined.
+**Mounts:** at most one project dir, via virtiofs — read-write with `--workspace`, read-only
+with `--workspace-ro`. (`--branch` instead derives its workspace under the repo's
+`.silkgate/sandboxes/` and mounts the host gitdir read-only — plus, with LFS in use, the host
+LFS store writable.) The CLI refuses mounts that would hand the guest the host itself: `/`,
+`$HOME`, and silkgate's own checkout and state, in either mode; a read-write mount is also
+refused when a `.git` **directory** sits anywhere under it — hooks and `core.fsmonitor` there
+are host code execution the next time a human runs git in it. A linked worktree's `.git`
+**file** is allowed, with a printed note.
 
 ## Boundary B — the TLS-terminating egress proxy
 

@@ -280,7 +280,9 @@ unable to reach the network any other way — otherwise the proxy is advisory.
 - `--workspace DIR` mounts DIR read-write. `--workspace-ro DIR` mounts the same path
   read-only — `/workspace` is then browsable but writes to it fail. The read-only form
   skips the `.git`-directory check (a whole repository is mountable), so an agent that only
-  reads code can be pointed directly at the repo. Both forms are refused for `/`, your home
+  reads code can be pointed directly at the repo — though read-only still exposes everything
+  under it, `.git/config` included, where a remote URL can embed a token. Both forms are
+  refused for `/`, your home
   directory, and silkgate's own checkout and state — credentials and configuration there must
   not be exposed even read-only. A linked worktree's `.git` **file** passes either form, with
   a printed note. `--workspace-ro` is exclusive with `--workspace`, `--allow-git-dir`, and
