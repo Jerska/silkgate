@@ -935,8 +935,7 @@ def session_context(profiles, ruleset, *, workspace, persistent, branch=None,
     elif workspace and workspace_ro:
         lines += [
             "`/workspace` is read-only host code — writes to it fail. The rest of the filesystem",
-            "is scratch that dies with this machine; your printed output and anything you write",
-            "outside `/workspace` is the deliverable.",
+            "is writable scratch that dies with this machine, so printed output is the deliverable.",
         ]
     elif workspace:
         lines += [
