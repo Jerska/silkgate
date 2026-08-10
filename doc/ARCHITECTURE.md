@@ -158,11 +158,12 @@ additionally probes `platform.claude.com/v1/oauth/hello` at startup and fails on
 ## The shared-proxy session model
 
 Sessions share **one** mitmproxy process — not one proxy per VM. A single `mitmdump` listens on a
-**pool of ports** (base `8090`, 16 consecutive, `8090..8105`) via repeated
+**pool of ports** (16 consecutive, normally `8090..8105` — a squatter anywhere in a candidate
+range shifts the whole pool to the first fully-free range above it) via repeated
 `--mode regular@<addr>:<port>` args — bound to loopback only, both address families, never the
 LAN (`SILKGATE_PROXY_BIND` overrides it for a platform that routes guests through a real bridge
 address) — and each session claims one port from the pool. `silkgate up` starts this proxy the first
-time it's needed (detached, `start_new_session=True`), waits for the base port to accept, and
+time it's needed (detached, `start_new_session=True`), waits for every pool port to accept, and
 records it in `~/.silkgate/proxy.json`; `silkgate down` terminates it once the last session goes
 away.
 
@@ -177,7 +178,11 @@ That ruleset is a **per-session snapshot** composed at `up` time into
 the per-session `rules.txt` mtime). Unknown port, missing session, or unparsable rules **fail
 closed** — deny with reason `"no session for port"`, never falling through to another session's
 rules. Audit lines gain a `"session"` field. No per-request tokens are needed or used: the network
-layer already proves identity, once, below the guest.
+layer already proves identity, once, below the guest. The port being frozen into each guest — its
+proxy URL and its Tier-1 net-rule both name it — is also why the pool floats only on a
+session-free start: a proxy restart with any session or port claim surviving reuses the recorded
+pool verbatim (and dies if a port of it is now taken), because a pool that moved would strand
+every survivor on a port anything could later bind and answer.
 
 **Control plane: a unix socket, not an in-band HTTP endpoint.** The proxy also needs a channel for
 the host to push secrets and query health. It must **not** be a network endpoint on a proxy port:

@@ -855,14 +855,104 @@ class LifecycleTest(_FakeToolsCase):
         self.assertIn(f"pid {stub.pid}", msg)
         self.assertIn("silkgate ls", msg)
 
-    def test_start_shared_proxy_refuses_squatted_pool_port(self):
-        """The whole pool is checked, not just the base port: mitmdump binds all
-        sixteen or exits, so a squatter anywhere in the pool dooms it."""
-        base = _free_pool_base(MOD.POOL_SIZE)
+    def test_start_shared_proxy_skips_squatted_base_and_finds_next_range(self):
+        """A squatter in the first candidate range shifts the pool forward; no --port
+        override or manual kill is needed. The walk lands one past the blocker — the
+        first fully-free POOL_SIZE range, not the next POOL_SIZE-aligned one — and
+        proxy.json records the actual pool: contiguous, blocker excluded."""
+        base = _free_pool_base(2 * MOD.POOL_SIZE)
         self.squat(base + 3)
-        msg = self.expect_die(MOD.start_shared_proxy, base)
-        self.assertIn(f"port {base + 3} is already in use", msg)
+        meta = MOD.start_shared_proxy(base)
+        _autoreap(meta["pid"])
+        self.addCleanup(self._kill_pid, meta["pid"])
+        self.assertEqual(meta["ports"],
+                         list(range(base + 4, base + 4 + MOD.POOL_SIZE)),
+                         "pool is not the contiguous range one past the squatter")
+        self.assertNotIn(base + 3, meta["ports"],
+                         "the squatted port ended up inside the pool")
+        self.assertEqual(meta["base_port"], meta["ports"][0],
+                         "proxy.json base_port does not match the actual first port")
+        self.assertTrue(MOD.PROXY_JSON.exists())
+        MOD.stop_proxy(meta)
         self.assertFalse(MOD.PROXY_JSON.exists())
+
+    def test_port_free_sees_an_ipv6_only_squatter(self):
+        """_port_free asks every bind address, so a listener holding only ::1 — half
+        of what mitmdump is about to bind — already makes the port busy; a v4-only
+        probe would report free and doom the spawn."""
+        try:
+            with socket.socket(socket.AF_INET6) as s:
+                s.bind(("::1", 0))
+        except OSError:
+            self.skipTest("no IPv6 loopback here")
+        port = _free_pool_base(1)
+        self.squat(port, host="::1")
+        self.assertFalse(MOD._port_free(port),
+                         "a ::1-only listener was not seen: only IPv4 was probed")
+
+    def test_start_shared_proxy_dies_when_no_free_range_exists(self):
+        """With the base itself free but one squatter inside every candidate range,
+        the walk exhausts its window and the error names the scanned extent and each
+        blocking port — not the first squatter as an in-use refusal."""
+        base = _free_pool_base(5 * MOD.POOL_SIZE)
+        squatted = [base + 3 + i * MOD.POOL_SIZE for i in range(5)]
+        for p in squatted:
+            self.squat(p)
+        msg = self.expect_die(MOD.start_shared_proxy, base)
+        self.assertIn(f"{base}..{base + 5 * MOD.POOL_SIZE - 1}", msg,
+                      "the scanned extent is not named")
+        for p in squatted:
+            self.assertIn(str(p), msg, "a blocking port is not named")
+        self.assertFalse(MOD.PROXY_JSON.exists())
+
+    def test_find_free_pool_never_probes_past_65535(self):
+        """A scan whose window would cross the top of port space stops at 65535
+        instead of handing bind() a number it raises OverflowError for; a base too
+        high for even one pool is refused up front."""
+        msg = self.expect_die(MOD._find_free_pool, 65535 - MOD.POOL_SIZE + 2)
+        self.assertIn("65535", msg)
+        base = 65536 - MOD.POOL_SIZE          # exactly one candidate range fits
+        if not all(MOD._port_free(p) for p in range(base, 65536)):
+            self.skipTest(f"ports {base}..65535 not free here")
+        self.assertEqual(MOD._find_free_pool(base), list(range(base, 65536)))
+
+    def test_restart_with_surviving_session_never_floats_the_pool(self):
+        """A guest froze its proxy port at provision time — env URL and Tier-1
+        net-rule — so a restart that floats the pool strands it silently, on a port
+        a later squatter can bind and answer. With a session surviving and a squatter
+        on the recorded base, the restart must die naming the squatted port, never
+        walk past it the way a session-free start would."""
+        base = _free_pool_base(2 * MOD.POOL_SIZE)
+        self.proxy_meta(pid=_dead_pid(), base=base)
+        self.write_session("kept", base + 2)
+        self.squat(base)
+        msg = self.expect_die(MOD.ensure_proxy, base)
+        self.assertIn(f"port {base} is already in use", msg)
+
+    def test_restart_dies_naming_the_session_whose_port_is_squatted(self):
+        """When the squatter sits on the very port a surviving session is frozen
+        onto, the refusal names both — that port cannot be walked past or reassigned
+        without handing the session's traffic to whoever binds it."""
+        base = _free_pool_base(2 * MOD.POOL_SIZE)
+        self.proxy_meta(pid=_dead_pid(), base=base)
+        self.write_session("kept", base + 2)
+        self.squat(base + 2)
+        msg = self.expect_die(MOD.ensure_proxy, base)
+        self.assertIn(f"port {base + 2}", msg)
+        self.assertIn("kept", msg)
+
+    def test_restart_with_surviving_session_reuses_recorded_pool(self):
+        """The healthy half of the pinning rule: with the recorded pool still free,
+        a restart under a surviving session lands exactly where the record says —
+        proxy.json after equals proxy.json before, port for port."""
+        base = _free_pool_base(2 * MOD.POOL_SIZE)
+        old = self.proxy_meta(pid=_dead_pid(), base=base)
+        self.write_session("kept", base + 2)
+        meta = MOD.ensure_proxy(base + 1)     # a drifted scan floor must not matter
+        _autoreap(meta["pid"])
+        self.addCleanup(self._kill_pid, meta["pid"])
+        self.assertEqual(meta["ports"], old["ports"],
+                         "restart did not reuse the pool the session was claimed from")
 
     def test_bind_failure_surfaces_from_the_log(self):
         """A mitmdump that loses its bind reports it only inside the log file (stdout

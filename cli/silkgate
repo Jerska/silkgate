@@ -442,6 +442,33 @@ def _port_in_use_error(port):
             f"lsof -nP -iTCP:{port} -sTCP:LISTEN names the holder")
 
 
+def _find_free_pool(base_port):
+    """The lowest free POOL_SIZE-wide port range at or above base_port.
+
+    Walks forward one port at a time, skipping past each occupied port, so a
+    single-port occupant such as an orphaned verify or proxy process shifts the
+    pool to base_port+1 rather than all the way to base_port+POOL_SIZE. Scans a
+    window of 5*POOL_SIZE ports starting at base_port, clamped so no probe goes
+    past 65535 (bind() raises OverflowError above that, which _port_free does
+    not read as busy); dies naming every blocker if no range is found."""
+    if base_port + POOL_SIZE - 1 > 65535:
+        die(f"base port {base_port} leaves no room for a {POOL_SIZE}-port pool "
+            f"({base_port}..{base_port + POOL_SIZE - 1} runs past port 65535)")
+    limit = min(base_port + 5 * POOL_SIZE, 65536)
+    start = base_port
+    blockers = []
+    while start <= limit - POOL_SIZE:
+        blocked = next((p for p in range(start, start + POOL_SIZE)
+                        if not _port_free(p)), None)
+        if blocked is None:
+            return list(range(start, start + POOL_SIZE))
+        blockers.append(blocked)
+        start = blocked + 1
+    die(f"no {POOL_SIZE}-port range free in {base_port}..{limit - 1} — blocked by "
+        f"listeners on {', '.join(str(p) for p in blockers)} "
+        f"(lsof -nP -iTCP:<port> -sTCP:LISTEN names each holder)")
+
+
 # How long a spawned mitmdump gets to answer on every advertised address.
 PROXY_READY_TIMEOUT = 15
 
@@ -1201,19 +1228,22 @@ def _clear_proxy_files():
             pass
 
 
-def start_shared_proxy(base_port):
+def start_shared_proxy(base_port, ports=None):
     """Start the detached multi-session mitmdump; write proxy.json; return its meta.
 
-    Every pool port is checked free before the spawn — mitmdump binds them all or
-    exits — and readiness then means every one of them answering, with the child and
-    its log watched throughout (see start_proxy for why a bare connect proves the
-    wrong thing). proxy.json appears only once that holds, so no reader ever meets
-    the record of a proxy that never came up."""
+    With no `ports` given, the first free POOL_SIZE-wide range at or above base_port
+    is used (see _find_free_pool), so a single-port occupant such as an orphaned
+    verify or proxy listener shifts the pool forward without needing a manual kill or
+    --port override. `ports` is the pool a restart must reuse verbatim because
+    sessions still pin it (see _pinned_pool, which checked every one free under the
+    same lock). Either way every chosen port is checked free before the spawn —
+    mitmdump binds them all or exits — and readiness then means every one of them
+    answering, with the child and its log watched throughout (see start_proxy for why
+    a bare connect proves the wrong thing). proxy.json appears only once that holds,
+    so no reader ever meets the record of a proxy that never came up."""
     mitmdump = which("mitmdump", "pip install mitmproxy")
-    ports = list(range(base_port, base_port + POOL_SIZE))
-    for p in ports:
-        if not _port_free(p):
-            die(_port_in_use_error(p))
+    if ports is None:
+        ports = _find_free_pool(base_port)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
@@ -1230,7 +1260,7 @@ def start_shared_proxy(base_port):
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
-    meta = {"pid": proc.pid, "base_port": base_port, "ports": ports,
+    meta = {"pid": proc.pid, "base_port": ports[0], "ports": ports,
             "log": str(log_path), "sock": str(PROXY_SOCK), "started": now_iso()}
     try:
         _wait_proxy_ready(proc, ports, log_path)
@@ -1247,6 +1277,40 @@ def ensure_proxy(base_port):
         return _ensure_proxy_locked(base_port)
 
 
+def _pinned_pool(meta):
+    """The exact port pool a proxy restart must reuse, or None when it may float.
+
+    A guest freezes its proxy port at provision time — the proxy URL in its env and
+    the Tier-1 net-rule both name that one port — so a pool that lands anywhere else
+    strands every surviving session on a port nothing answers, and whoever binds the
+    stranded port afterwards receives that guest's traffic. While any session meta or
+    live port claim survives, a restart therefore reuses the recorded pool verbatim,
+    dying on any port of it now occupied; _find_free_pool scans only when nothing
+    survives. Caller holds _proxy_lock and calls this before the stale proxy record
+    is cleared — the record is where the pool is read from."""
+    owners = {}
+    for m in list_metas():
+        if m.get("port"):
+            owners.setdefault(m["port"], m["name"])
+    for p in _live_claims():
+        owners.setdefault(p, (_read_json(_claim_path(p)) or {}).get("name"))
+    if not owners:
+        return None
+    pool = (meta or {}).get("ports") or []
+    strays = sorted(p for p in owners if p not in pool)
+    if strays:
+        held = ", ".join(f"{p} (session {owners[p]})" for p in strays)
+        die(f"sessions hold ports no proxy record names a pool for: {held} — "
+            f"`silkgate down` them before the proxy can start")
+    for p in pool:
+        if not _port_free(p):
+            pin = (f"session {owners[p]} is frozen onto it" if owners.get(p) else
+                   f"surviving sessions pin the pool to {pool[0]}..{pool[-1]}")
+            die(f"port {p} is already in use, but {pin} — "
+                f"lsof -nP -iTCP:{p} -sTCP:LISTEN names the holder")
+    return pool
+
+
 def _ensure_proxy_locked(base_port):
     """ensure_proxy's body, for callers already holding _proxy_lock."""
     meta = read_proxy()
@@ -1259,9 +1323,10 @@ def _ensure_proxy_locked(base_port):
             meta["pid"] = ident                # proxy.json outlived the proxy it described;
             _write_json(PROXY_JSON, meta)      # the socket's owner is the identity
         return meta
+    pinned = _pinned_pool(meta)                # read while the stale record still exists
     if meta:                                   # record of a proxy that no longer answers
         _clear_proxy_files()
-    meta = start_shared_proxy(base_port)
+    meta = start_shared_proxy(base_port, pinned)
     _wait_control_sock(10, meta["pid"])        # port readiness ≠ socket readiness, and
     return meta                                # the socket must answer as that very pid
 
@@ -1385,9 +1450,16 @@ def pick_port(proxy, name):
                     continue
             # `down <last>` may have stopped the proxy between our caller's ensure_proxy
             # and the claim above. The claim is visible to stop_proxy from here on, so
-            # one re-check under the same lock closes that window for good.
+            # one re-check under the same lock closes that window for good. The claim
+            # also pins the restarted pool (see _pinned_pool), but p is checked against
+            # the fresh record rather than trusting that invariant at a distance.
             if not _proxy_running():
-                _ensure_proxy_locked(proxy["base_port"])
+                fresh = _ensure_proxy_locked(proxy["base_port"])
+                if p not in (fresh.get("ports") or ()):
+                    _release_port(name, p)
+                    die(f"the proxy pool moved across a restart: port {p} was claimed "
+                        f"from {proxy['ports'][0]}..{proxy['ports'][-1]} but the new "
+                        f"pool is {fresh['ports'][0]}..{fresh['ports'][-1]} — retry")
             return p
     die(f"no free proxy ports (pool {proxy['ports'][0]}..{proxy['ports'][-1]} is full)")
 
@@ -3992,7 +4064,9 @@ def main():
     p = sub.add_parser("run", help="run an egress-locked guest behind the proxy")
     profile_opts(p)
     p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
-                   help="shared-proxy base port when this command starts it (default: 8090)")
+                   help="shared-proxy scan floor when this command starts it: the pool "
+                        "lands on the first free 16-port range at or above this, not "
+                        "necessarily here (default: 8090)")
     p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")
     p.add_argument("--workspace", metavar="DIR",
@@ -4053,7 +4127,9 @@ def main():
     p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")
     p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
-                   help="shared-proxy base port when this command starts it (default: 8090)")
+                   help="shared-proxy scan floor when this command starts it: the pool "
+                        "lands on the first free 16-port range at or above this, not "
+                        "necessarily here (default: 8090)")
     p.set_defaults(fn=cmd_up)
 
     p = sub.add_parser("exec", help="run a command in a session's guest")
