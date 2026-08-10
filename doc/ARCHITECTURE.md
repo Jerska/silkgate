@@ -115,7 +115,20 @@ Claude Code nor Codex ships, and the whole reason for the exercise.
    hostnames and the *proxy* resolves; raw port 53 from the guest never leaves the VMM
    (see Tier 1 — microsandbox intercepts UDP and TCP 53 alike).
 5. **Logs every decision** — one allow/deny line per request, for post-incident review;
-   never bodies, and never the injected credential.
+   never bodies, and never the injected credential. An allow line also records what the
+   proxy *did* on the way through, as names, never values: the injected credential's
+   **name** (or the name it skipped injecting because the guest sent its own header —
+   the two are exclusive), the sorted names of stripped query params and headers, and
+   the listener port — on every record kind, so even a `session: null` deny stays
+   attributable to a port. The response line adds status, byte counts and duration.
+   Each record is mirrored, byte-identical, into a machine-only `events-<stamp>.jsonl`
+   beside the log — pure JSONL, free of mitmdump's own output — one file per proxy
+   start, under the same retention (newest 20 of its kind / 30 days, the live file
+   never pruned); control-socket records are never mirrored, and a mirror write that
+   fails blocks the request exactly like a broken log. `silkgate ui` serves a live,
+   filterable view over these files on `127.0.0.1`; the pre-mirror mixed-format
+   `proxy-*.log` files are never parsed by it, so its history begins with the first
+   proxy started after the mirror shipped.
 
 ## How four flows play out
 

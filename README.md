@@ -130,6 +130,26 @@ session you did not start in the foreground, or to see only its egress decisions
 ./cli/silkgate logs foo --audit -f    # just this session's allow/deny lines
 ```
 
+## Watching the trail: `silkgate ui`
+
+`silkgate ui` serves a live table over the whole audit trail at `http://127.0.0.1:8642/`
+(`--port` overrides) — loopback only, no auth, safe for the same reason the control
+socket is: a guest's Tier-1 rule allows only its own proxy port, so no guest can ever
+reach it. It needs no running proxy — history and the session list stand on their own,
+and the live stream heartbeats until a proxy appears, adopting a restarted proxy's new
+file without a reload.
+
+One row per request: the allow line joined with its conclusion (a deny is the whole
+story; a CONNECT allow renders as a tunnel). Filters — session, decision, method, host,
+time window — live in the URL hash, so a view is shareable. The ACTIONS column shows
+what the proxy *did* to each request: `inj:<name>` / `skip:<name>` for the credential
+swap (the secret's name, never its value), `q:<n>` / `h:<n>` for stripped query params
+and headers, with the stripped names in the tooltip.
+
+The UI reads only the machine-readable `events-*.jsonl` files (see [Layout](#layout));
+pre-feature mixed-format `proxy-*.log` files are never parsed, so its history begins
+with the first proxy started after the events mirror shipped.
+
 ## Handing a guest real git: `--branch`
 
 Run `run` or `up` from inside a repository with `--with git --branch <new-name>` and the guest
@@ -182,18 +202,26 @@ the environment; the value is **never** an argument. `silkgate secret ls` lists 
   secret injection, fail-closed, audit log. A listener port always resolves to a ruleset, either
   from a session registry (`SILKGATE_EGRESS_SESSIONS_DIR`) or from one fixed ruleset (`SILKGATE_EGRESS_RULES`)
 - `cli/silkgate` — the host CLI (`profiles` / `build` / `verify` / `proxy` / `run` / `up` /
-  `exec` / `attach` / `logs` / `harvest` / `down` / `ls` / `secret`), stdlib-only Python
+  `exec` / `attach` / `logs` / `ui` / `harvest` / `down` / `ls` / `secret`), stdlib-only Python
+- `ui/` — the audit UI `silkgate ui` serves: four static files, vanilla ES modules, no
+  framework, no build step
 - `test/verify_guest.sh` — the Tier-1 checks, run as root inside a guest by `silkgate verify`
 - `test/linux/` — a container to run the whole thing on Linux hosts too old for the msb binaries
 
 Host state lives under `~/.silkgate/` (created on first `run`/`up`):
 
-- `proxy.json` — shared-proxy metadata: pid, base port, the port pool, log path, socket path
+- `proxy.json` — shared-proxy metadata: pid, base port, the port pool, log path, events
+  path, socket path
 - `proxy.sock` — unix control socket (mode 0600) used to push secrets; unreachable from any guest
 - `sessions/<name>/` — `meta.json` (sandbox, port, image, profiles, command, workspace) +
   `rules.txt` (the composed ruleset snapshot the proxy reads for that session)
 - `ca/egress-ca.pem` — the MITM **certificate** (never the key) that images and guests trust
 - `logs/proxy-*.log` — the audit log
+- `logs/events-*.jsonl` — the same audit records mirrored into a machine-only file (pure
+  JSONL, none of mitmdump's own noise), one per proxy start, retained like the logs
+  (newest 20 of its kind / 30 days; the live file is never pruned). Control-socket
+  records are never mirrored, and the action fields carry credential **names** only —
+  values appear nowhere in the trail
 
 ## Installing microsandbox
 
