@@ -1,0 +1,117 @@
+/* style.css — minimal chrome around a monospace table. The trail is the UI. */
+
+:root {
+  --line: #d8d8d8;
+  --muted: #777;
+  --deny-bg: #fdecec;
+  --deny-fg: #8a1f1f;
+  --badge-bg: #eef1fb;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 13px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: #222;
+  background: #fff;
+}
+
+#toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4em 1em;
+  padding: 0.5em 0.75em;
+  background: #f6f6f6;
+  border-bottom: 1px solid var(--line);
+}
+
+#toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  color: var(--muted);
+}
+
+#toolbar select,
+#toolbar input,
+#toolbar button {
+  font: inherit;
+  color: #222;
+}
+
+#status {
+  display: flex;
+  gap: 1.5em;
+  padding: 0.3em 0.75em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  background: #fff;
+  text-align: left;
+  font-weight: 600;
+  padding: 0.3em 0.6em;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+td {
+  padding: 0.15em 0.6em;
+  border-bottom: 1px solid #f0f0f0;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+td.path {
+  max-width: 30em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+td.session {
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+td.time,
+td.dur,
+td.bytes {
+  color: var(--muted);
+}
+
+tr.deny {
+  background: var(--deny-bg);
+}
+
+tr.deny td.decision,
+tr.deny td.status {
+  color: var(--deny-fg);
+}
+
+tr.pending {
+  opacity: 0.6;
+}
+
+tr.tunnel td.status {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0 0.35em;
+  margin-right: 0.35em;
+  border: 1px solid #c3c9e0;
+  border-radius: 3px;
+  background: var(--badge-bg);
+}
