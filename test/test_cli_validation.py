@@ -51,6 +51,19 @@ def tearDownModule():
     shutil.rmtree(_SCRATCH, ignore_errors=True)
 
 
+def _git_env():
+    """os.environ with every GIT_* override dropped (git honors far more than GIT_DIR —
+    GIT_OBJECT_DIRECTORY, GIT_COMMON_DIR, GIT_CEILING_DIRECTORIES, ...) and config pinned
+    to nothing, so fixture git sees only its own temp repos. Without this, an inherited
+    GIT_DIR sends `git init <dir>`/`git -C <dir> commit` at the parent's repository.
+    GIT_EXEC_PATH stays: some installs need it to find git's subcommands at all."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("GIT_") or k == "GIT_EXEC_PATH"}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
+
+
 class CliCase(unittest.TestCase):
     """Shared assertions. die() exits non-zero after printing one line to stderr."""
 
@@ -850,11 +863,12 @@ class TestBranchGuards(CliCase):
     def _repo(self, commit=True, name="repo"):
         root = self.tmp / name
         subprocess.run(["git", "init", "-q", "-b", "main", str(root)],
-                       check=True, capture_output=True)
+                       check=True, capture_output=True, env=_git_env())
         if commit:
             subprocess.run(["git", "-C", str(root), "-c", "user.name=t",
                             "-c", "user.email=t@t.invalid", "commit", "-q",
-                            "--allow-empty", "-m", "seed"], check=True, capture_output=True)
+                            "--allow-empty", "-m", "seed"], check=True, capture_output=True,
+                           env=_git_env())
         return root
 
     @contextlib.contextmanager
@@ -920,12 +934,13 @@ class TestBranchGuards(CliCase):
         root = self._repo()
         wt = self.tmp / "wt"
         subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "--detach", str(wt)],
-                       check=True, capture_output=True)
+                       check=True, capture_output=True, env=_git_env())
         subprocess.run(["git", "-C", str(wt), "-c", "user.name=t", "-c",
                         "user.email=t@t.invalid", "commit", "-q", "--allow-empty",
-                        "-m", "ahead"], check=True, capture_output=True)
+                        "-m", "ahead"], check=True, capture_output=True, env=_git_env())
         head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"],
-                              capture_output=True, text=True, check=True).stdout.strip()
+                              capture_output=True, text=True, check=True,
+                              env=_git_env()).stdout.strip()
         with self._cwd(wt):
             spec = sg._branch_spec("agent/x", self.git_profile(), [])
         self.assertEqual(Path(spec["git_dir"]), (root / ".git").resolve())

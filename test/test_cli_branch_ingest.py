@@ -49,12 +49,22 @@ def tearDownModule():
     shutil.rmtree(_SCRATCH, ignore_errors=True)
 
 
-def _git(*argv, cwd=None):
+def _git_env():
+    """os.environ with every GIT_* override dropped (git honors far more than GIT_DIR —
+    GIT_OBJECT_DIRECTORY, GIT_COMMON_DIR, GIT_CEILING_DIRECTORIES, ...) and config pinned
+    to nothing, so fixture git sees only its own temp repos and the -c flags below.
+    GIT_EXEC_PATH stays: some installs need it to find git's subcommands at all."""
     env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+           if not k.startswith("GIT_") or k == "GIT_EXEC_PATH"}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
+
+
+def _git(*argv, cwd=None):
     proc = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t.invalid",
                            "-c", "init.defaultBranch=main", *argv],
-                          capture_output=True, text=True, cwd=cwd, env=env)
+                          capture_output=True, text=True, cwd=cwd, env=_git_env())
     if proc.returncode:
         raise AssertionError(f"fixture git {argv} failed: {proc.stderr}")
     return proc.stdout.strip()
@@ -112,7 +122,7 @@ class IngestCase(unittest.TestCase):
 
     def host_ref(self, ref):
         proc = subprocess.run(["git", "--git-dir", self.git_dir, "rev-parse", "--verify",
-                               ref], capture_output=True, text=True)
+                               ref], capture_output=True, text=True, env=_git_env())
         return proc.stdout.strip() if proc.returncode == 0 else None
 
     def staging(self):
@@ -190,7 +200,7 @@ class TestFirstHarvest(IngestCase):
         self.commit("junk")
         subprocess.run(["git", "--git-dir", self.git_dir, "fetch", "-q", str(self.guest),
                         f"+refs/heads/{self.BRANCH}:refs/silkgate/{self.NAME}/{self.BRANCH}"],
-                       check=True, capture_output=True)
+                       check=True, capture_output=True, env=_git_env())
         tip = self.commit("real")
         bundle, tip = self.bundle()
         ok, err = self.ingest(self.meta(), bundle, tip)
