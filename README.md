@@ -22,7 +22,7 @@ Prereqs: `pip install mitmproxy`, docker, and msb (see [Installing microsandbox]
 ./cli/silkgate profiles                    # what capabilities are available
 ./cli/silkgate verify                      # Tier-1 containment check (--full for the proxy path)
 export SILKGATE_EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"   # host-only; never enters the guest or argv
-./cli/silkgate run --with claude --workspace ~/projects/foo -- \
+./cli/silkgate run --with claude -v ~/projects/foo:/workspace:rw -- \
   claude --bare -p "task…" --permission-mode bypassPermissions
 ```
 
@@ -76,7 +76,7 @@ touches the proxy or the policy the session will run under.
 
 A cooperating agent wastes turns discovering the sandbox the hard way — reaching for a runtime
 that isn't installed, retrying a host that policy will never allow. So each session generates a
-description of itself from its own profiles, ruleset and mount, and puts it in the guest two
+description of itself from its own profiles, ruleset and mounts, and puts it in the guest two
 ways:
 
 ```sh
@@ -103,12 +103,12 @@ that stays cheap — but `claude --resume` can't work across turns, because the 
 `/root/.claude` are gone. A **session** keeps the VM warm and gives it a dedicated proxy port:
 
 ```sh
-./cli/silkgate up --name foo --with claude --workspace ~/projects/foo
+./cli/silkgate up --name foo --with claude -v ~/projects/foo:/workspace:rw
 ./cli/silkgate exec foo -- claude -p "scaffold a Flask app" --output-format json
 # ↑ prints a session_id; the VM persists, so resume that conversation next turn:
 ./cli/silkgate exec foo -- claude -p --resume <id> "add a /health route and a test"
 ./cli/silkgate attach foo                 # same VM, interactive, runs the profile's command
-./cli/silkgate ls                         # sessions (status/port/workspace/age) + proxy health
+./cli/silkgate ls                         # sessions (status/port/mounts/age) + proxy health
 ./cli/silkgate down foo                   # frees the port; last one out stops the proxy
 ```
 
@@ -213,7 +213,7 @@ Host state lives under `~/.silkgate/` (created on first `run`/`up`):
 - `proxy.json` — shared-proxy metadata: pid, base port, the port pool, log path, events
   path, socket path
 - `proxy.sock` — unix control socket (mode 0600) used to push secrets; unreachable from any guest
-- `sessions/<name>/` — `meta.json` (sandbox, port, image, profiles, command, workspace) +
+- `sessions/<name>/` — `meta.json` (sandbox, port, image, profiles, command, mounts) +
   `rules.txt` (the composed ruleset snapshot the proxy reads for that session)
 - `ca/egress-ca.pem` — the MITM **certificate** (never the key) that images and guests trust
 - `logs/proxy-*.log` — the audit log
@@ -305,15 +305,20 @@ unable to reach the network any other way — otherwise the proxy is advisory.
   nothing in silkgate hands a guest more than the certificate. Don't reuse that CA elsewhere.
 - Allowlisted destinations remain exfil carriers — keep each profile's rules minimal, never
   allowlist a header- or body-reflecting endpoint, and prefer download-only (GET).
-- `--workspace DIR` mounts DIR read-write. `--workspace-ro DIR` mounts the same path
-  read-only — `/workspace` is then browsable but writes to it fail. The read-only form
-  skips the `.git`-directory check (a whole repository is mountable), so an agent that only
-  reads code can be pointed directly at the repo — though read-only still exposes everything
-  under it, `.git/config` included, where a remote URL can embed a token. Both forms are
-  refused for `/`, your home
-  directory, and silkgate's own checkout and state — credentials and configuration there must
-  not be exposed even read-only. A linked worktree's `.git` **file** passes either form, with
-  a printed note. `--workspace-ro` is exclusive with `--workspace`, `--allow-git-dir`, and
-  `--branch`. For a repository where the guest must also commit, use `--branch` instead.
+- `-v SRC:DST[:ro|rw]` (repeatable) mounts host directory SRC at DST in the guest, **read-only
+  unless the spec says `:rw`**. Read-only skips the `.git`-directory check (a whole repository
+  is mountable), so an agent that only reads code can be pointed straight at the repo — though
+  read-only still exposes everything under it, `.git/config` included, where a remote URL can
+  embed a token. Either mode is refused for `/`, your home directory, and silkgate's own
+  checkout and state — credentials and configuration there must not be exposed even read-only.
+  Guest-side, a DST is refused when it is relative, `/`, at or under `/silkgate` or
+  `/root/lfsstore` (silkgate's own guest paths), a duplicate of another mount's, or nested
+  under one — nested virtiofs behavior is unverified, so it is refused rather than trusted.
+  A read-write mount holding a `.git` **directory** anywhere under it is refused — hooks and
+  config would become guest-writable, host code execution the next time a human runs git
+  there — unless `--allow-git-dir` accepts that risk explicitly; a linked worktree's `.git`
+  **file** passes either mode, with a printed note. Steering: an agent that only reads code
+  gets `-v DIR:/workspace` (ro is the default); one whose commits are the deliverable gets
+  `--branch`.
 - The `probe` profile exists for `verify` only: it opens the Debian mirrors, so every other
   command refuses to compose it.

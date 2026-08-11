@@ -70,7 +70,7 @@ class CliCase(unittest.TestCase):
     def setUp(self):
         self.assertTrue(str(sg.SESSIONS_DIR).startswith(str(_SCRATCH)),
                         "tests must never point at a real ~/.silkgate")
-        # Resolved, because _workspace_mount resolves what it is given and macOS hands out
+        # Resolved, because _mount_pair resolves what it is given and macOS hands out
         # temp paths under /var, which is a symlink to /private/var.
         self.tmp = Path(tempfile.mkdtemp(dir=_SCRATCH)).resolve()
 
@@ -278,48 +278,66 @@ class TestSessionNames(CliCase):
         self.assertEqual([m["name"] for m in sg.list_metas()], ["good"])
 
 
-class TestWorkspaceGuard(CliCase):
-    """Finding 9: --workspace is mounted rw and is the only host path in the guest."""
+class TestMountGuards(CliCase):
+    """-v/--mount: the mounts are the only host paths in the guest, so each one is
+    validated on both sides before any host process starts — forbidden directories in
+    either mode, the .git walk for rw, and the guest-path rules."""
 
-    def test_plain_directory_is_mounted(self):
+    def test_plain_directory_is_mounted_ro_by_default(self):
         project = self.tmp / "project"
         project.mkdir()
-        self.assertEqual(sg._workspace_mount(str(project)),
-                         (str(project), [f"{project}:/workspace:rw"]))
-        self.assertEqual(sg._workspace_mount(None), (None, []))
-        self.refuses("not a directory", sg._workspace_mount, str(project / "absent"))
+        self.assertEqual(sg._mount_args([f"{project}:/workspace"]),
+                         [(str(project), "/workspace", "ro")])
+        self.assertEqual(sg._mount_args([f"{project}:/workspace:rw"]),
+                         [(str(project), "/workspace", "rw")])
+        self.assertEqual(sg._mount_args(None), [])
+        self.assertEqual(sg._mount_args([]), [])
+        self.refuses("not a directory", sg._mount_args,
+                     [f"{project / 'absent'}:/workspace:rw"])
 
-    def test_git_directory_is_refused(self):
-        repo = self.tmp / "repo"
-        (repo / ".git" / "hooks").mkdir(parents=True)
-        message = self.refuses("refusing to mount", sg._workspace_mount, str(repo))
-        self.assertIn("worktree", message)                  # the error names the way out
+    def test_malformed_specs_are_refused(self):
+        d = str(self.tmp)
+        for bad in ("", d, f"{d}:", f":{d}", f"{d}:/x:rx", f"{d}:/x:RW", f"{d}:/x:ro:extra"):
+            self.refuses("invalid mount", sg._mount_args, [bad])
 
-    def test_git_worktree_pointer_file_is_allowed(self):
-        tree = self.tmp / "tree"
-        tree.mkdir()
-        (tree / ".git").write_text("gitdir: /elsewhere/.git/worktrees/tree\n")
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            path, mounts = sg._workspace_mount(str(tree))
-        self.assertEqual((path, mounts), (str(tree), [f"{tree}:/workspace:rw"]))
-        self.assertIn("worktree", err.getvalue())           # said, not silently allowed
+    def test_parse_time_errors_name_the_flag(self):
+        self.refuses_argv("invalid mount", "--mount",
+                          ["run", "-v", "nocolon", "--", "true"])
+        self.refuses_argv("invalid mount", "--mount", ["up", "-v", "a:/b:rx"])
 
-    def test_nested_git_directory_is_refused_and_located(self):
+    def test_git_directory_is_refused_rw_and_located(self):
         mount = self.tmp / "mount"
         (mount / "clean").mkdir(parents=True)
         (mount / "vendor" / "dep" / ".git" / "hooks").mkdir(parents=True)
-        message = self.refuses("refusing to mount", sg._workspace_mount, str(mount))
+        message = self.refuses("refusing to mount", sg._mount_args, [f"{mount}:/workspace:rw"])
         self.assertIn(str(Path("vendor") / "dep"), message)  # names where it found it
-        self.assertIn("--allow-git-dir", message)            # and both ways forward
+        self.assertIn("--allow-git-dir", message)            # and every way forward
         self.assertIn("worktree", message)
+        self.assertIn("read-only", message)
 
-    def test_nested_worktree_pointer_file_stays_allowed(self):
+    def test_git_directory_is_accepted_ro(self):
+        repo = self.tmp / "repo"
+        (repo / ".git" / "hooks").mkdir(parents=True)
+        self.assertEqual(sg._mount_args([f"{repo}:/workspace"]),
+                         [(str(repo), "/workspace", "ro")])
+
+    def test_worktree_pointer_file_is_allowed_in_both_modes_and_said(self):
+        tree = self.tmp / "tree"
+        tree.mkdir()
+        (tree / ".git").write_text("gitdir: /elsewhere/.git/worktrees/tree\n")
+        for mode in ("ro", "rw"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                mounts = sg._mount_args([f"{tree}:/workspace:{mode}"])
+            self.assertEqual(mounts, [(str(tree), "/workspace", mode)], mode)
+            self.assertIn("worktree", err.getvalue())        # said, not silently allowed
+
+    def test_nested_worktree_pointer_file_stays_allowed_rw(self):
         mount = self.tmp / "trees"
         (mount / "wt").mkdir(parents=True)
         (mount / "wt" / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
-        path, mounts = sg._workspace_mount(str(mount))
-        self.assertEqual((path, mounts), (str(mount), [f"{mount}:/workspace:rw"]))
+        self.assertEqual(sg._mount_args([f"{mount}:/workspace:rw"]),
+                         [(str(mount), "/workspace", "rw")])
 
     def test_allow_git_dir_mounts_anyway_and_says_so(self):
         repo = self.tmp / "repo"
@@ -327,33 +345,16 @@ class TestWorkspaceGuard(CliCase):
         (repo / "sub" / ".git").mkdir(parents=True)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            path, mounts = sg._workspace_mount(str(repo), allow_git_dir=True)
-        self.assertEqual((path, mounts), (str(repo), [f"{repo}:/workspace:rw"]))
+            mounts = sg._mount_args([f"{repo}:/workspace:rw"], allow_git_dir=True)
+        self.assertEqual(mounts, [(str(repo), "/workspace", "rw")])
         self.assertIn("--allow-git-dir", err.getvalue())    # loud, never silent
 
     def test_allow_git_dir_does_not_unlock_forbidden_mounts(self):
         for path in [str(Path.home()), str(REPO), os.sep]:
-            self.refuses("refusing to mount", sg._workspace_mount, path, allow_git_dir=True)
+            self.refuses("refusing to mount", sg._mount_args,
+                         [f"{path}:/workspace:rw"], allow_git_dir=True)
 
-    def test_run_and_up_wire_allow_git_dir(self):
-        for argv in (["run", "--allow-git-dir", "--", "true"],
-                     ["up", "--name", "wire1", "--allow-git-dir"]):
-            seen = {}
-
-            def spy(workspace, *, allow_git_dir=False):
-                seen["flag"] = allow_git_dir
-                raise SystemExit(42)                        # stop before any proxy/msb work
-
-            with self.no_preflight(), \
-                    mock.patch.object(sg, "_workspace_mount", spy), \
-                    mock.patch.object(sys, "argv", ["silkgate"] + argv), \
-                    contextlib.redirect_stderr(io.StringIO()), \
-                    self.assertRaises(SystemExit) as caught:
-                sg.main()
-            self.assertEqual(caught.exception.code, 42, argv)
-            self.assertTrue(seen["flag"], argv)
-
-    def test_host_state_and_home_are_refused(self):
+    def test_host_state_and_home_are_refused_in_both_modes(self):
         sg.SILK_DIR = self.tmp / "state" / "silkgate"
         sg.SILK_DIR.mkdir(parents=True)
         self.addCleanup(setattr, sg, "SILK_DIR", _SCRATCH / "silkgate")
@@ -362,7 +363,55 @@ class TestWorkspaceGuard(CliCase):
                      str(Path.home()),
                      str(REPO),                             # the checkout this CLI runs from
                      os.sep]:
-            self.refuses("refusing to mount", sg._workspace_mount, path)
+            for mode in ("ro", "rw"):
+                self.refuses("refusing to mount", sg._mount_args, [f"{path}:/data:{mode}"])
+
+    def test_guest_destination_guards(self):
+        src = self.tmp / "src"
+        src.mkdir()
+        self.refuses("not absolute", sg._mount_args, [f"{src}:data"])
+        self.refuses("not absolute", sg._mount_args, [f"{src}:./x"])
+        self.refuses("whole filesystem", sg._mount_args, [f"{src}:/"])
+        self.refuses("whole filesystem", sg._mount_args, [f"{src}:/data/.."])
+        for reserved in ("/silkgate", "/silkgate/base.git", "/root/lfsstore",
+                         "/root/lfsstore/objects"):
+            self.refuses("silkgate's own", sg._mount_args, [f"{src}:{reserved}"])
+
+    def test_duplicate_and_nested_destinations_are_refused(self):
+        a, b = self.tmp / "a", self.tmp / "b"
+        a.mkdir()
+        b.mkdir()
+        self.refuses("duplicate mount destination", sg._mount_args,
+                     [f"{a}:/data", f"{b}:/data:rw"])
+        self.refuses("duplicate mount destination", sg._mount_args,
+                     [f"{a}:/data", f"{b}:/data/"])          # normalization, not spelling
+        for specs in ([f"{a}:/data", f"{b}:/data/sub"],
+                      [f"{a}:/data/sub", f"{b}:/data"]):     # either order
+            self.refuses("nest", sg._mount_args, specs)
+        two = sg._mount_args([f"{a}:/data", f"{b}:/database"])  # a shared prefix is no nest
+        self.assertEqual([guest for _, guest, _ in two], ["/data", "/database"])
+
+    def test_run_and_up_wire_mounts_and_allow_git_dir(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        spec = f"{project}:/data:rw"
+        for argv in (["run", "-v", spec, "--allow-git-dir", "--", "true"],
+                     ["up", "--name", "wire1", "--mount", spec, "--allow-git-dir"]):
+            seen = {}
+
+            def spy(specs, *, allow_git_dir=False):
+                seen["specs"], seen["flag"] = specs, allow_git_dir
+                raise SystemExit(42)                        # stop before any proxy/msb work
+
+            with self.no_preflight(), \
+                    mock.patch.object(sg, "_mount_args", spy), \
+                    mock.patch.object(sys, "argv", ["silkgate"] + argv), \
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as caught:
+                sg.main()
+            self.assertEqual(caught.exception.code, 42, argv)
+            self.assertEqual(seen["specs"], [spec], argv)
+            self.assertTrue(seen["flag"], argv)
 
 
 class TestEnvGuard(CliCase):
@@ -448,11 +497,11 @@ class TestEmptyAllowlist(CliCase):
         self.assertIn("reach nothing", err.getvalue())
 
     def test_guest_brief_describes_an_empty_allowlist(self):
-        empty = sg.session_context([], sg.load_ruleset(""), workspace=None, persistent=False)
+        empty = sg.session_context([], sg.load_ruleset(""), persistent=False)
         self.assertIn("allowlist for this machine is empty", empty)
         self.assertNotIn("Only these", empty)
         listed = sg.session_context([], sg.load_ruleset("api.anthropic.com/v1/** POST\n"),
-                                    workspace=None, persistent=False)
+                                    persistent=False)
         self.assertIn("Only these", listed)
         self.assertIn("`api.anthropic.com/v1/**`", listed)
 
@@ -541,7 +590,7 @@ class TestSecretValidation(CliCase):
         ruleset = self._ruleset()
         with mock.patch.dict(os.environ,
                              {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: sk-ant-test"}):
-            ctx = sg.session_context([], ruleset, workspace=None, persistent=False)
+            ctx = sg.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
         self.assertIn("Available", ctx)
 
@@ -550,7 +599,7 @@ class TestSecretValidation(CliCase):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith("SILKGATE_EGRESS_SECRET_")}
         with mock.patch.dict(os.environ, env, clear=True):
-            ctx = sg.session_context([], ruleset, workspace=None, persistent=False)
+            ctx = sg.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
         self.assertIn("Missing or malformed", ctx)
         self.assertIn("not set", ctx)
@@ -559,13 +608,13 @@ class TestSecretValidation(CliCase):
         ruleset = self._ruleset()
         with mock.patch.dict(os.environ,
                              {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: "}):
-            ctx = sg.session_context([], ruleset, workspace=None, persistent=False)
+            ctx = sg.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
         self.assertIn("Missing or malformed", ctx)
 
     def test_session_context_omits_section_when_no_inject_auth(self):
         ruleset = sg.load_ruleset("api.anthropic.com/v1/** POST\n")
-        ctx = sg.session_context([], ruleset, workspace=None, persistent=False)
+        ctx = sg.session_context([], ruleset, persistent=False)
         self.assertNotIn("Injected credentials", ctx)
 
 
@@ -882,13 +931,36 @@ class TestBranchGuards(CliCase):
 
     # --- flag surface, no git needed ------------------------------------------
 
-    def test_branch_excludes_workspace(self):
-        self.argv_refuses("exclusive",
-                          ["run", "--branch", "x", "--workspace", str(self.tmp), "--", "true"])
+    def test_branch_owns_workspace_against_mounts(self):
+        # /workspace and anything under it — a nested DST would be nested virtiofs on
+        # top of the branch workspace mount, and spelling must not dodge the rule.
+        d = str(self.tmp)
+        for dst in ("/workspace", "/workspace/", "/workspace/sub", "/x/../workspace"):
+            self.argv_refuses("owns /workspace",
+                              ["run", "--branch", "x", "-v", f"{d}:{dst}", "--", "true"])
+            self.argv_refuses("owns /workspace",
+                              ["up", "--name", "col1", "--branch", "x", "-v", f"{d}:{dst}"])
 
-    def test_branch_excludes_allow_git_dir(self):
-        self.argv_refuses("--allow-git-dir",
-                          ["run", "--branch", "x", "--allow-git-dir", "--", "true"])
+    def test_mounts_combine_with_branch(self):
+        # A -v mount beside --branch is legal now; only /workspace is owned. Reaching the
+        # _branch_workspace spy proves _mount_args accepted the pair (it runs first).
+        data = self.tmp / "data"
+        data.mkdir()
+        fake_spec = {"branch": "nb", "git_dir": "/g", "base": "0" * 40,
+                     "repo_root": "/r", "workspace_derived": True}
+
+        def spy(spec, name):
+            raise SystemExit(42)
+
+        with mock.patch.object(sys, "argv",
+                               ["silkgate", "run", "--with", "git", "--branch", "nb",
+                                "-v", f"{data}:/data", "--allow-git-dir", "--", "true"]), \
+                mock.patch.object(sg, "_branch_spec", lambda *a: fake_spec), \
+                mock.patch.object(sg, "_branch_workspace", spy), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                self.no_preflight(), self.assertRaises(SystemExit) as caught:
+            sg.main()
+        self.assertEqual(caught.exception.code, 42)
 
     def test_branch_needs_the_git_profile(self):
         self.argv_refuses("--with git", ["run", "--branch", "x", "--", "true"])
@@ -999,16 +1071,16 @@ class TestBranchGuards(CliCase):
         root = Path(sg.SILK_DIR) / "somerepo"
         self.refuses("silkgate's own state", sg._branch_workspace, self.spec_for(root), "n1")
 
-    def test_workspace_guard_accepts_the_nested_sandbox_dir(self):
+    def test_mount_guard_accepts_the_nested_sandbox_dir(self):
         # The pin for the whole layout: the repo root stays refused while the derived
         # directory nested inside it mounts — nesting is what separates the two.
         repo = self.tmp / "nestrepo"
         (repo / ".git").mkdir(parents=True)
         nested = repo / ".silkgate" / "sandboxes" / "x"
         nested.mkdir(parents=True)
-        self.refuses("refusing to mount", sg._workspace_mount, str(repo))
-        ws, mounts = sg._workspace_mount(str(nested))
-        self.assertEqual(mounts, [f"{nested.resolve()}:/workspace:rw"])
+        self.refuses("refusing to mount", sg._mount_args, [f"{repo}:/workspace:rw"])
+        self.assertEqual(sg._mount_args([f"{nested}:/workspace:rw"]),
+                         [(str(nested.resolve()), "/workspace", "rw")])
 
     # --- meta as input ----------------------------------------------------------
 
@@ -1231,7 +1303,7 @@ class TestGithubGrants(CliCase):
 
     def _github_ctx(self):
         ruleset = sg.load_ruleset("\n".join(sg._github_rules(["a/b"], [])) + "\n")
-        return sg.session_context([], ruleset, workspace=None, persistent=False,
+        return sg.session_context([], ruleset, persistent=False,
                                   github_read=["a/b"])
 
     def test_session_context_github_grant_reports_missing_secret(self):
@@ -1281,74 +1353,91 @@ class TestGithubGrants(CliCase):
         self.assertEqual(meta["github_write"], ["org/proj"])
 
 
-class TestWorkspaceRoMount(CliCase):
-    """--workspace-ro: mount DIR read-only at /workspace."""
+class TestMountProvisioning(CliCase):
+    """What run/up hand _provision_session for -v mounts: the :MODE suffix in the msb
+    list is the whole enforcement, and the meta `mounts` list is what ls and the guest
+    brief stand on — so both are proven through main(), not by calling _mount_args."""
 
-    def test_ro_spec_is_produced(self):
+    def provision_capture(self, argv):
+        """Everything cmd_run/cmd_up hand _provision_session, captured at the call and
+        the run stopped there — before any proxy or msb work."""
+        seen = {}
+
+        def spy(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
+                context=None, context_paths=()):
+            seen.update(name=name, mounts=mounts, ws=ws, env=env, meta=meta_extra,
+                        context=context)
+            raise SystemExit(42)
+
+        with self.no_preflight(), \
+                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
+                mock.patch.object(sg, "_proxy_running", lambda: True), \
+                mock.patch.object(sg, "ensure_proxy",
+                                  lambda port: {"log": "/dev/null", "ports": [8090]}), \
+                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(sg, "_provision_session", spy), \
+                mock.patch.object(sg, "_release_port", lambda *a, **k: None), \
+                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(sys, "argv", ["silkgate"] + argv), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit) as caught:
+            sg.main()
+        self.assertEqual(caught.exception.code, 42, argv)
+        return seen
+
+    def test_mounts_reach_msb_meta_and_brief(self):
         project = self.tmp / "project"
         project.mkdir()
-        path, mounts = sg._workspace_mount(str(project), read_only=True)
-        self.assertEqual(path, str(project))
-        self.assertEqual(mounts, [f"{project}:/workspace:ro"])
+        for argv in (["run", "-v", f"{project}:/data", "-v", f"{project}:/workspace:rw",
+                      "--", "true"],
+                     ["up", "--name", "prov1", "-v", f"{project}:/data",
+                      "-v", f"{project}:/workspace:rw"]):
+            seen = self.provision_capture(argv)
+            expected = [f"{project}:/data:ro", f"{project}:/workspace:rw"]
+            self.assertEqual(seen["mounts"], expected, argv)
+            self.assertEqual(seen["meta"]["mounts"], expected, argv)
+            self.assertIsNone(seen["ws"], argv)
+            self.assertIn("read-write, and a directory on the host", seen["context"], argv)
+            self.assertIn("`/data` — read-only", seen["context"], argv)
 
-    def test_git_directory_accepted_read_only(self):
-        # A tree with a .git directory is refused rw but accepted ro.
-        repo = self.tmp / "repo"
-        (repo / ".git" / "hooks").mkdir(parents=True)
-        path, mounts = sg._workspace_mount(str(repo), read_only=True)
-        self.assertEqual(path, str(repo))
-        self.assertEqual(mounts, [f"{repo}:/workspace:ro"])
+    def test_no_mounts_records_no_mounts_key(self):
+        seen = self.provision_capture(["run", "--", "true"])
+        self.assertEqual(seen["mounts"], [])
+        self.assertNotIn("mounts", seen["meta"])
+        self.assertIn("No host directory is mounted", seen["context"])
 
-    def test_workspace_and_workspace_ro_refused(self):
-        # argparse mutually exclusive group — exit code 2, message names both flags.
-        dir_ = str(self.tmp)
-        self.refuses_argv("not allowed", "--workspace-ro",
-                          ["run", "--workspace", dir_, "--workspace-ro", dir_, "--", "true"])
 
-    def test_branch_with_workspace_ro_refused(self):
-        # --branch derives its own rw workspace; --workspace-ro is excluded.
-        with mock.patch.object(sys, "argv", ["silkgate", "run", "--with", "git",
-                                             "--branch", "x", "--workspace-ro",
-                                             str(self.tmp), "--", "true"]), \
-                self.no_preflight():
-            self.refuses("--workspace-ro", sg.main)
+class TestGuestBriefMounts(CliCase):
+    """session_context keys the /workspace sentence on the mount at /workspace and lists
+    every other mount with its mode."""
 
-    def test_allow_git_dir_with_workspace_ro_refused(self):
-        # --allow-git-dir only makes sense for rw mounts; refuse it with --workspace-ro.
-        with mock.patch.object(sys, "argv", ["silkgate", "run", "--allow-git-dir",
-                                             "--workspace-ro", str(self.tmp), "--", "true"]), \
-                self.no_preflight():
-            self.refuses("--workspace-ro", sg.main)
+    def ctx(self, mounts, branch=None):
+        return sg.session_context([], sg.load_ruleset(""), mounts=mounts,
+                                  persistent=False, branch=branch)
 
-    def test_forbidden_mounts_still_refused_read_only(self):
-        # Credentials and config must not be exposed even read-only.
-        for path in [str(Path.home()), str(REPO), os.sep]:
-            self.refuses("refusing to mount", sg._workspace_mount, path, read_only=True)
+    def test_workspace_rw_text(self):
+        ctx = self.ctx([("/h/p", "/workspace", "rw")])
+        self.assertIn("read-write, and a directory on the host", ctx)
 
-    def test_run_and_up_wire_workspace_ro(self):
-        # The :ro suffix is the whole enforcement, so the wiring from the flag to
-        # read_only=True must be proven through main(), not just by calling
-        # _workspace_mount directly — a cmd_run/cmd_up that dropped the kwarg would
-        # mount read-write and every other test here would still pass.
-        project = self.tmp / "project"
-        project.mkdir()
-        for argv in (["run", "--workspace-ro", str(project), "--", "true"],
-                     ["up", "--name", "wire2", "--workspace-ro", str(project)]):
-            seen = {}
+    def test_workspace_ro_text(self):
+        ctx = self.ctx([("/h/p", "/workspace", "ro")])
+        self.assertIn("read-only host code", ctx)
+        self.assertIn("printed output is the deliverable", ctx)
 
-            def spy(workspace, *, allow_git_dir=False, read_only=False):
-                seen["workspace"], seen["read_only"] = workspace, read_only
-                raise SystemExit(42)                        # stop before any proxy/msb work
+    def test_no_mounts_text(self):
+        self.assertIn("nothing you write survives", self.ctx([]))
 
-            with self.no_preflight(), \
-                    mock.patch.object(sg, "_workspace_mount", spy), \
-                    mock.patch.object(sys, "argv", ["silkgate"] + argv), \
-                    contextlib.redirect_stderr(io.StringIO()), \
-                    self.assertRaises(SystemExit) as caught:
-                sg.main()
-            self.assertEqual(caught.exception.code, 42, argv)
-            self.assertEqual(seen["workspace"], str(project), argv)
-            self.assertTrue(seen["read_only"], argv)
+    def test_other_mounts_listed_with_modes(self):
+        ctx = self.ctx([("/h/a", "/data", "ro"), ("/h/b", "/out", "rw")])
+        self.assertIn("No host directory is mounted at `/workspace`", ctx)
+        self.assertIn("`/data` — read-only", ctx)
+        self.assertIn("`/out` — read-write", ctx)
+
+    def test_branch_text_wins_and_other_mounts_still_listed(self):
+        ctx = self.ctx([("/h/a", "/data", "ro")], branch="agent/x")
+        self.assertIn("**`agent/x`**", ctx)
+        self.assertIn("Commits are the deliverable", ctx)
+        self.assertIn("`/data` — read-only", ctx)
 
 
 if __name__ == "__main__":

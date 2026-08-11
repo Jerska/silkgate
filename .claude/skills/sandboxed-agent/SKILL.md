@@ -9,12 +9,12 @@ The workload runs in a microVM whose only route out is a TLS-terminating proxy t
 each request. Both layers are enforced outside the guest — microsandbox's host-side network
 policy, and the proxy — so nothing the guest does can widen them.
 
-Run the CLI from the repo root (`./cli/silkgate`, as below) or by absolute path; `--workspace`
-takes either kind of path.
+Run the CLI from the repo root (`./cli/silkgate`, as below) or by absolute path; a `-v` mount's
+SRC takes either kind of path.
 
 **Write these invocations across multiple lines, one flag per line, with the guest's command
 indented under `--`.** They are long, and they are what a human sees in the approval prompt: the
-split makes the granted policy (which profiles, which workspace) readable apart from whatever
+split makes the granted policy (which profiles, which mounts) readable apart from whatever
 runs inside. A short command that already fits on one line can stay there.
 
 Prereqs are the README's: docker, mitmproxy, and microsandbox. `run` starts and stops the proxy
@@ -23,13 +23,18 @@ hang; later runs with the same profiles reuse it and start in under a second.
 
 ## What the guest looks like
 
-- `--workspace DIR` mounts DIR at **`/workspace`, read-write**, and that is the working
-  directory. It is the only host path present; everything else the guest writes dies with it.
-  `--workspace-ro DIR` mounts the same path **read-only** — writes to `/workspace` fail, so
-  the host code is protected. The `.git`-directory check is skipped for read-only mounts, so
-  a whole repository can be mounted directly — which also means the guest reads all of `.git`,
+- `-v SRC:DST[:ro|rw]` (repeatable) mounts host directory SRC at DST in the guest,
+  **read-only unless the spec says `:rw`**. The mounts are the only host paths present;
+  everything else the guest writes dies with it. `/workspace` is the working directory —
+  mount something there (`-v DIR:/workspace:rw` for a writable workbench) or leave it as
+  guest-local scratch. The `.git`-directory check is skipped for read-only mounts, so a whole
+  repository can be mounted directly — which also means the guest reads all of `.git`,
   `.git/config` included, where a remote URL can embed a token; check that before mounting a
-  repo. `--workspace-ro` is exclusive with `--workspace`, `--allow-git-dir`, and `--branch`.
+  repo. A read-write mount holding a `.git` directory is refused without `--allow-git-dir`.
+  A DST at `/`, at or under `/silkgate` or `/root/lfsstore`, duplicated, or nested under
+  another mount's is refused. For a writable copy of a plain directory there is no dedicated
+  flag: mount it read-only and copy it in the guest — `-v DIR:/data:ro`, then
+  `cp -a /data/. /workspace/`.
 - The base image has **no language runtimes** — no node, no python, no git. A guest has exactly
   what its profiles installed, so `--with claude` alone cannot run `node --test`.
 - **Secrets:** `inject_auth=<name>` in a rules file maps to `SILKGATE_EGRESS_SECRET_<NAME>` in
@@ -61,7 +66,7 @@ mid-task. Boot is ~0.3s, so the fresh VM per command costs almost nothing.
 ./cli/silkgate run \
     --with node@22.11.0 \
     --with claude \
-    --workspace ./test/mock \
+    -v ./test/mock:/workspace:rw \
     -- silkgate-claude \
         -p "The tests in /workspace fail. Run 'node --test', fix the source, confirm it passes."
 ```
@@ -85,7 +90,7 @@ also correct.
   never that its work is right. To learn whether the tests actually pass, run them yourself in a
   fresh sandbox and read that exit code:
   ```sh
-  ./cli/silkgate run --with node@22.11.0 --workspace ./test/mock -- node --test
+  ./cli/silkgate run --with node@22.11.0 -v ./test/mock:/workspace:rw -- node --test
   ```
   No claude profile and no secret needed for that — the smallest policy that can answer it.
 - **The workspace diff** is the deliverable — review it on the host before pushing, and check
@@ -110,7 +115,7 @@ name the follow-up, use `run`. When you can:
     --name foo \
     --with node@22.11.0 \
     --with claude \
-    --workspace ~/projects/foo
+    -v ~/projects/foo:/workspace:rw
 
 ./cli/silkgate exec foo \
     -- silkgate-claude \
@@ -231,11 +236,11 @@ reported as requests instead of retried in a loop.
 - **git does not work in a mounted worktree** — its `.git` file points at a host path outside
   the mount. Mounting the whole repo read-write would hand the guest rw access to `.git` —
   host code execution via hooks or `core.fsmonitor` the next time a human runs git there — so
-  silkgate refuses a read-write workspace holding a `.git` directory anywhere under it (and
-  `/`, `$HOME`, its own checkout and state, in either mode); `--workspace-ro` skips the `.git`
-  refusal — the hook risk needs guest writes — and a linked worktree's `.git` file passes
-  either way, with a printed note. For git-free work under a read-write mount, mount the
-  subdirectory that holds it, as the example does. The pre-`--branch`
+  silkgate refuses a read-write mount holding a `.git` directory anywhere under it (and
+  `/`, `$HOME`, its own checkout and state, in either mode); a read-only mount skips the
+  `.git` refusal — the hook risk needs guest writes — and a linked worktree's `.git` file
+  passes either mode, with a printed note. For git-free work under a read-write mount, mount
+  the subdirectory that holds it, as the example does. The pre-`--branch`
   fallback still works: `--with git`, clone inside the guest, and on the host
   `git fetch <dir> branch:branch` — never run git in a directory a guest wrote.
 - **Nothing bounds a runaway agent** — silkgate has no timeout or cost ceiling. Wrap the
