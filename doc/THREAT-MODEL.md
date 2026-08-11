@@ -73,9 +73,9 @@ transport, IPv6, or ICMP. It did not escape through a new route, a new address, 
 host's other ports. The addon allowed the allowlisted host and refused an unlisted one. Each
 denial was an answer from the boundary, not a silence.
 
-The three outside oracles. A listener the allowlist omits heard nothing from the guest. A
-recorder endpoint saw the proxy replace a credential the guest sent, and never add one the
-guest did not send. The run's audit log holds the decisions the checks provoked. With
+The three oracles sat outside the guest. A listener the allowlist omits heard nothing from
+the guest. A recorder endpoint saw the proxy replace a credential the guest sent, and never
+add one the guest did not send. The run's audit log holds the decisions the checks provoked. With
 `--negative-control`, a deliberately leaky guest fails six of the checks — the only proof
 that the checks can fail at all.
 
