@@ -14,15 +14,14 @@ and real egress control, combined.
 the network the only thing it can do — under inspection.**
 
 1. The agent runs inside the VM, not on the host. Its Read, Bash, and MCP tools are
-   attacker-controlled, so the agent binary, the toolchain, and everything they touch live
-   in the guest. The host runs only the control CLI and the proxy. This also dissolves
-   Claude Code's read-the-whole-filesystem problem: there is no `~/.ssh` in the guest.
-2. Two independent boundaries. The microVM contains code execution (guest kernel plus
-   hypervisor). The proxy contains data movement. Neither trusts the other: a VM escape
-   still hits the proxy, and a proxy bypass still hits the VM.
+   attacker-controlled, so the agent binary and toolchain live in the guest. This also
+   dissolves Claude Code's read-the-whole-filesystem problem: there is no `~/.ssh` there.
+2. Two independent boundaries. The microVM contains code execution. The proxy contains
+   data movement. Neither trusts the other: a VM escape still hits the proxy, and a proxy
+   bypass still hits the VM.
 3. Default-deny below the guest, not just at the proxy. The guest has no route to the
-   internet except the proxy port. `HTTPS_PROXY` serves the tools that cooperate. Tier 1
-   stops the malware that ignores it.
+   internet except the proxy port. `HTTPS_PROXY` serves the tools that cooperate, and
+   Tier 1 stops the malware that ignores it.
 4. Every allowed destination is an exfiltration channel until proven otherwise. The
    allowlist bounds capability and blast radius, not exfiltration bandwidth.
 
@@ -202,13 +201,13 @@ full mechanism, the DNS story, the ranked fallbacks, and the live-verification r
 
 - Hypervisor escape. A KVM, HVF, or virtio CVE breaks Boundary A. Patch, keep the device
   model minimal, and accept that this cannot be eliminated.
-- Exfiltration within an allowed channel. The bound is per request: `max_body` caps each
-  request body, and every decision is logged. There is no content inspection, no cap on
-  response size, and no budget across requests, so a guest can leak through any allowed POST
-  one capped body at a time. The strongest lever is a tighter allowlist.
+- Exfiltration within an allowed channel. `max_body` caps each request body and every
+  decision is logged, but nothing inspects content, caps responses, or budgets across
+  requests — a guest can leak through any allowed POST one capped body at a time. The
+  strongest lever is a tighter allowlist.
 - DNS tunneling. Closed: the guest does no external DNS, and the VMM answers port 53 itself
   ([THREAT-MODEL.md](./THREAT-MODEL.md)).
 - Workspace tampering. Malicious code can corrupt mounted project files. A human reviews
   diffs before push.
-- Shared MITM CA. By design the proxy reads all guest TLS. That is fine — you own both ends —
-  but do not reuse that CA anywhere else.
+- Shared MITM CA. By design the proxy reads all guest TLS. That is fine — you own both
+  ends — but do not reuse that CA anywhere else.
