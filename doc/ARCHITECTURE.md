@@ -1,27 +1,44 @@
-# Reference Architecture — microVM + TLS-terminating egress proxy
+# Architecture — microVM + TLS-terminating egress proxy
 
-> Target: **developer laptops**. Workload: **coding agents (Claude Code / Codex) treated as
-> adversarial** — assume prompt injection turns the agent into ≈ arbitrary code execution.
-> This is the architecture the [SOTA](./SOTA.md) flagged as the gap nobody ships: strong
-> isolation + real egress control, combined.
+Read this to understand why silkgate pairs a microVM with a TLS-terminating proxy, and what
+each boundary guarantees.
+
+The target is developer laptops. The workload is coding agents (Claude Code, Codex) treated
+as adversarial: assume prompt injection turns the agent into arbitrary code execution. This
+is the architecture [SOTA.md](./SOTA.md) flagged as the gap nobody ships — strong isolation
+and real egress control, combined.
 
 ## Driving principle
 
-Treat the agent process itself as the threat. So **put the whole agent inside the VM**, and
-make the network the only thing it can do — under inspection.
+**Treat the agent process itself as the threat: put the whole agent inside the VM, and make
+the network the only thing it can do — under inspection.**
 
-1. **The agent runs *inside* the VM, not on the host.** Its `Read`/`Bash`/MCP tools are
-   attacker-controlled. The agent binary, toolchain, and everything it touches live in the
-   guest. The host runs only the control CLI and the proxy. (This also dissolves Claude
-   Code's "reads the whole filesystem" problem — there is no `~/.ssh` on the guest.)
-2. **Two independent boundaries.** The **microVM** contains code execution (guest kernel +
-   hypervisor); the **TLS-terminating proxy** contains data movement. Neither trusts the
-   other. A VM escape still hits the proxy; a proxy bypass still hits the VM.
-3. **Default-deny at L3, not just at the proxy.** The guest has no route to the internet
-   except the proxy port. Env-var proxying is for cooperating tools; the L3 drop is for the
-   malware that ignores env vars. (See [THREAT-MODEL.md](./THREAT-MODEL.md) Tier 1.)
-4. **Every allowed destination is an exfil channel until proven otherwise.** The allowlist
-   bounds *capability/blast-radius*, not exfil bandwidth.
+1. The agent runs inside the VM, not on the host. Its Read, Bash, and MCP tools are
+   attacker-controlled, so the agent binary, the toolchain, and everything they touch live
+   in the guest. The host runs only the control CLI and the proxy. This also dissolves
+   Claude Code's read-the-whole-filesystem problem: there is no `~/.ssh` in the guest.
+2. Two independent boundaries. The microVM contains code execution (guest kernel plus
+   hypervisor). The proxy contains data movement. Neither trusts the other: a VM escape
+   still hits the proxy, and a proxy bypass still hits the VM.
+3. Default-deny below the guest, not just at the proxy. The guest has no route to the
+   internet except the proxy port. `HTTPS_PROXY` serves the tools that cooperate. Tier 1
+   stops the malware that ignores it.
+4. Every allowed destination is an exfiltration channel until proven otherwise. The
+   allowlist bounds capability and blast radius, not exfiltration bandwidth.
+
+## Glossary
+
+**These terms are defined here and nowhere else.**
+
+| Term | Definition |
+|---|---|
+| guest | The Linux system inside the microVM. The agent, its toolchain, and everything they touch run here. |
+| host | The developer's machine. It runs only the control CLI and the proxy. |
+| session | One warm microVM plus the proxy port it claims and the ruleset composed for it. `silkgate up` creates it, `silkgate down` ends it. |
+| profile | One capability under [`profiles/`](../profiles/): the install step and the egress rules that capability needs, declared together. |
+| proxy | The TLS-terminating egress proxy on the host: one shared mitmproxy process that is every guest's only route to the network. |
+| Tier 1 | The network boundary outside the guest: microsandbox's host-side stack forces all guest egress to the session's own proxy port. Defined in [THREAT-MODEL.md](./THREAT-MODEL.md). |
+| Tier 2 | Per-request enforcement at the proxy: allowlist, header, body, and query constraints, secret injection. Defined in [THREAT-MODEL.md](./THREAT-MODEL.md). |
 
 ## At a glance
 
@@ -35,17 +52,18 @@ make the network the only thing it can do — under inspection.
 │  │  toolchain: node, python, git, build tools                                    │ │
 │  │  trust store + NODE_EXTRA_CA_CERTS/REQUESTS_CA_BUNDLE ➜ private CA cert        │ │
 │  │  HTTPS_PROXY=<session port>  ·   NO direct internet route                      │ │
-│  │  mounts (virtiofs): user-chosen, ro default (/workspace ⇄ ~/projects/foo rw)  │ │
+│  │  mount (virtiofs):  /workspace ⇄ ~/projects/foo   (rw, the ONLY host path)    │ │
 │  │                     ✗ no ~/.ssh  ✗ no ~/.aws  ✗ no dotfiles  ✗ no host creds  │ │
 │  └──────────────────────────────┬─────────────────────────────────────────────┘  │
-│      all egress default-DROP ────┘  except TCP→ proxy port ; DNS intercepted in VMM│
+│     all egress default-deny ─────┘ except TCP to the session's own proxy port;     │
+│     port 53 (UDP and TCP) is answered inside the VMM and never forwarded           │
 │                                  ▼                                                 │
 │   ┌──────────────────────────────────────────────────┐   ┌──────────────────────┐│
 │   │  TLS-terminating egress proxy (mitmproxy)          │◀──│ host secrets vault   ││
 │   │   • terminates TLS with the private CA             │   │ LLM API key, git PAT ││
-│   │   • SNI == Host enforcement  → kills domain front  │   └──────────────────────┘│
+│   │   • rejects SNI != Host (kills domain fronting)    │   └──────────────────────┘│
 │   │   • allowlist + per-request method/path/size       │                          │
-│   │   • injects Authorization for LLM / API upstreams  │                          │
+│   │   • injects Authorization for allowlisted routes   │                          │
 │   │   • request-body cap (max_body) · audit log        │                          │
 │   └───────────────────────────┬────────────────────────┘                          │
 └───────────────────────────────┼────────────────────────────────────────────────────┘
@@ -55,277 +73,145 @@ make the network the only thing it can do — under inspection.
 
 ## Boundary A — the microVM
 
-**Runtime, per OS** (the cross-platform reality on laptops):
+**The microVM contains code execution: the whole agent process tree runs behind its own
+guest kernel.** The cross-platform runtime, per OS:
 
 | | macOS (Apple Silicon) | Linux |
 |---|---|---|
 | Hypervisor | Hypervisor.framework (HVF) | KVM |
-| microVM runtime | microsandbox (libkrun/HVF), or Lima / Tart / Apple `container` | Firecracker / Cloud Hypervisor / Kata; or microsandbox (libkrun/KVM) |
+| microVM runtime | microsandbox (libkrun/HVF), or Lima / Tart / Apple `container` | Firecracker / Cloud Hypervisor / Kata, or microsandbox (libkrun/KVM) |
 | FS share | virtiofs | virtiofs / 9p |
-| Guest image | one minimal Linux image, **identical on both OSes** | same |
+| Guest image | one minimal Linux image, identical on both OSes | same |
 
-**Two realistic shapes:**
-- **Persistent hardened VM (recommended for coding agents).** One warm Linux VM per
-  project/session — coding agents have stateful workspaces (cloned repo, `node_modules`,
-  build cache). Keep warm for the session, tear down after.
-- **Ephemeral microVM per task** — only for code-interpreter semantics (fresh VM per run);
-  worse DX for iterative coding.
+**A session keeps one warm VM, because agent workspaces are stateful.** The cloned repo,
+`node_modules`, and build caches survive between turns, and `claude --resume` works. An
+ephemeral VM per command suits code-interpreter semantics only, so the one-shot
+`silkgate run` keeps that shape for scripts that want no residue.
 
-**Mounts:** user-chosen, each guarded, read-only by default. `-v SRC:DST[:ro|rw]`
-(repeatable) mounts host directory SRC at guest DST via virtiofs, read-only unless the spec
-says `:rw`. (The git modes shape their own mounts: `--checkout` mounts just the host gitdir,
-read-only at `/silkgate/base.git` — the guest's worktree is its own rootfs, holds committed
-content only, and dies with the VM; `--branch` adds a workspace derived under the repo's
-`.silkgate/sandboxes/`, mounted read-write — plus, with LFS in use, the host LFS store
-writable in either mode.) The CLI refuses mounts that would hand the guest the host itself: `/`,
-`$HOME`, and silkgate's own checkout and state, in either mode; a read-write mount is also
-refused when a `.git` **directory** sits anywhere under it — hooks and `core.fsmonitor` there
-are host code execution the next time a human runs git in it. A linked worktree's `.git`
-**file** is allowed, with a printed note. Guest-side, a DST that is relative, `/`, at,
-under, or above silkgate's own guest paths (`/silkgate`, `/root/lfsstore`, `/root/gitdir`),
-duplicated, or nested under another mount's is refused — nested virtiofs behavior is
-unverified, so it is refused rather than trusted.
+**At most one project directory is mounted.** `--workspace` mounts it read-write,
+`--workspace-ro` read-only, and `--branch` derives a workspace from the repo with the host
+gitdir mounted read-only. The CLI refuses any mount that hands the guest the host itself,
+and refuses a read-write mount that holds a `.git` directory — hooks and `core.fsmonitor`
+there are host code execution the next time a human runs git in it. The full mount rules,
+including the LFS exception, live in the [README](../README.md).
 
-## Boundary B — the TLS-terminating egress proxy
+## Boundary B — the proxy
 
-Runs **on the host, outside the VM**, and is the guest's only gateway. The piece neither
-Claude Code nor Codex ships, and the whole reason for the exercise.
+**The proxy contains data movement: it runs on the host, outside the VM, as the guest's only
+gateway.** This is the piece neither Claude Code nor Codex ships.
 
-1. **Terminates TLS.** Private CA generated once. The **CA cert (public)** goes into the
-   guest's trust store + `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`,
-   `GIT_SSL_CAINFO`, `PIP_CERT`. The **CA private key never leaves the host.** Now the proxy
-   decrypts everything — defeating the hostname-only weakness:
-   - **Domain fronting dies:** proxy sees both TLS SNI and decrypted `Host` and rejects
-     `SNI != Host`. (Claude Code's proxy never decrypts, so it can't.)
-   - **Broad-domain exfil shrinks:** sees the payload, so it can allow `github.com` for
-     `GET /your-org/...` while blocking pushes/gists/large POSTs.
-2. **Allowlist is per-request, not per-domain.** Example for a coding agent:
+1. It terminates TLS. A private CA is generated once. The certificate (public) goes into the
+   guest trust store and the language env vars (`NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`,
+   `SSL_CERT_FILE`, `GIT_SSL_CAINFO`, `PIP_CERT`). The private key never leaves the host.
+   Because the proxy decrypts, domain fronting dies — it rejects any request whose SNI and
+   Host disagree — and broad-domain exfiltration shrinks, because the proxy can allow
+   `GET github.com/your-org/…` while it blocks pushes, gists, and large POSTs.
+2. The allowlist is per request, not per domain. An example policy for a coding agent:
 
-| Upstream | Allowed | Blocked |
+   | Upstream | Allowed | Blocked |
+   |---|---|---|
+   | `api.anthropic.com` | POST `/v1/messages` (key injected) | everything else |
+   | `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org` | `GET` (download) | `PUT`/`POST` (publish) |
+   | `github.com` / `*.github.com` | clone and fetch your org's repos | pushes, gists, arbitrary repos, large uploads |
+   | everything else | — | denied and logged |
+
+3. It injects secrets the guest never holds. The guest's LLM client points at the proxy with
+   a dummy key, and the proxy attaches the real credential from the host for the allowlisted
+   route. Full code execution in the guest cannot steal the API key, because the key is not
+   there. One rule carries this guarantee: the proxy decides the route from the address it
+   will dial, never from request contents that the guest controls. An earlier version
+   matched on the guest's `Host:` header, and any request that named an allowlisted host
+   received the credential. `test/test_addon.py` covers the destination check.
+4. DNS is the proxy's, not the guest's. With an explicit `HTTPS_PROXY`, the guest sends
+   hostnames and the proxy resolves them. Port 53 traffic never leaves the VMM — see
+   [THREAT-MODEL.md](./THREAT-MODEL.md), Tier 1.
+5. It logs every decision: one allow or deny line per request, never bodies, never a
+   credential value. Each record is mirrored into a machine-only events file, and
+   `silkgate ui` serves a live view over those files. [PROXY.md](./PROXY.md) specifies the
+   record fields, the events-file contract, and retention.
+
+## The four flows
+
+**Four flows show how the two boundaries compose.**
+
+| Flow | Path | What contains it |
 |---|---|---|
-| `api.anthropic.com` | POST `/v1/messages` (key injected) | everything else |
-| `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org` | `GET` (download) | `PUT`/`POST` (publish) |
-| `github.com` / `*.github.com` | clone/fetch your org's repos | pushes, gists, arbitrary repos, large uploads |
-| everything else | — | dropped + logged |
+| LLM call | guest → proxy → `api.anthropic.com` | The guest sends a dummy key and the proxy injects the real one. The key survives full guest compromise, because the guest never holds it. |
+| `npm install` | guest → proxy → `GET registry.npmjs.org` | A malicious postinstall runs inside the VM, contained, and reaches nothing except the inspected proxy. |
+| Exfiltration under prompt injection | guest → proxy → denied | There is no `~/.ssh` in the guest. A POST of `/workspace/.env` to `evil.com` is denied (not allowlisted), and to `github.com` is blocked on method, size, or SNI-Host mismatch. Two independent failures are required. |
+| Git push | guest commits → human reviews → host pushes | The safest default: the agent commits inside the VM and the human pushes after review. For autonomy, allow push to one repo only, with the PAT injected and the body capped (`max_body`). No SSH keys exist in the guest. |
 
-3. **Injects secrets the guest never holds.** Guest LLM client points `base_url` at the
-   proxy with a *dummy* key; the proxy attaches the real `Authorization`/`x-api-key` from the
-   host vault for the allowlisted route. **Full code execution in the guest cannot steal the
-   API key — it isn't there.**
-   That guarantee rests entirely on the proxy deciding the route from the address it will dial,
-   never from anything the guest writes into the request. It once did the latter, and a request to
-   any host carrying an allowlisted `Host:` header was answered with the credential attached — so
-   the guest did not need to steal the key, only to ask for it to be spent. `test/test_addon.py`
-   is what keeps that closed; treat the destination check as the load-bearing part of this claim.
-4. **DNS is the proxy's, not the guest's.** With an explicit `HTTPS_PROXY`, the guest sends
-   hostnames and the *proxy* resolves; raw port 53 from the guest never leaves the VMM
-   (see Tier 1 — microsandbox intercepts UDP and TCP 53 alike).
-5. **Logs every decision** — one allow/deny line per request, for post-incident review;
-   never bodies, and never the injected credential. An allow line also records what the
-   proxy *did* on the way through, as names, never values: the injected credential's
-   **name** (or the name it skipped injecting because the guest sent its own header —
-   the two are exclusive), the sorted names of stripped query params and headers, and
-   the listener port — on every record kind, so even a `session: null` deny stays
-   attributable to a port. The response line adds status, byte counts and duration.
-   Each record is mirrored, byte-identical, into a machine-only `events-<stamp>.jsonl`
-   beside the log — pure JSONL, free of mitmdump's own output — one file per proxy
-   start, under the same retention (newest 20 of its kind / 30 days, the live file
-   never pruned); control-socket records are never mirrored, and a mirror write that
-   fails blocks the request exactly like a broken log. `silkgate ui` serves a live,
-   filterable view over these files on `127.0.0.1`; the pre-mirror mixed-format
-   `proxy-*.log` files are never parsed by it, so its history begins with the first
-   proxy started after the mirror shipped.
+## The agent's channel back to the parent
 
-## How four flows play out
+**A guest command's stdio is the channel to whoever drives it: a process pipe, not network
+egress, so it never touches the proxy boundary.** The CLI relays it live with stdout and
+stderr apart. The split is a convenience, not a property — it rides an in-band tag the guest
+can write itself, so everything on both streams is the guest's own report. A human attaches
+the TUI with `silkgate attach <name>`. A parent agent runs
+`silkgate exec <name> -- claude -p --output-format stream-json` and parses the stream. The
+README's [session section](../README.md#persistent-sessions) holds the operational detail.
 
-- **LLM call:** guest → proxy (dummy key) → proxy injects real key → `api.anthropic.com`.
-  Key safe even under full compromise.
-- **`npm install`:** guest → proxy → `GET registry.npmjs.org`. A malicious postinstall runs
-  *inside the VM* (contained) and can't phone home (no egress except inspected proxy).
-- **Exfil attempt via prompt injection:** no `~/.ssh` in the guest — the only host paths are
-  the mounts the user chose, each guarded and read-only by default, and a `--checkout` guest
-  holds committed content only, so an untracked `/workspace/.env` never entered it; reading a
-  secret that *was* handed in then POSTing it to `evil.com` is dropped at the proxy (not
-  allowlisted) and to `github.com` is blocked (size/method/SNI≠Host). Two independent
-  failures required.
-- **Git push:** safest default — agent commits to a branch *inside the VM*; the **human
-  pushes from the host** after reviewing the diff. For autonomy, allow push to one repo only,
-  with the PAT injected by the proxy and the request body capped (`max_body`). No SSH keys in
-  the guest.
+With a Console API key injected at the proxy, both modes work. Interactive Claude Code also
+probes `platform.claude.com/v1/oauth/hello` at startup and fails only if that host is
+blocked, so interactive runs allowlist `platform.claude.com/v1/oauth/**`.
 
-## Driving the agent — interactive vs programmatic
+## The session model
 
-The guest process's **stdio is the channel** back to the parent — a process pipe, not network
-egress, so it never touches the proxy boundary. The CLI relays that channel line by line as the
-guest writes it, keeping stdout and stderr apart and leaving the command non-interactive, so a
-parent can supervise a run and parse its output at the same time. The split is a convenience,
-not a property: the relay tags stderr lines in-band with a byte the guest can write itself, so
-everything on either stream — stderr included — is the guest's own report:
-- **Human (interactive TUI):** `silkgate attach <name>` (`msb exec -t … -- claude`) attaches
-  Claude Code's TUI to the terminal.
-- **Parent agent (programmatic):** `silkgate exec <name> -- claude -p --output-format stream-json`
-  emits a structured event stream the parent reads.
+**Sessions share one proxy process, and each session's listener port is its spoof-proof
+identity.** Each guest's Tier-1 rule allows only its own port, so the port a request arrives
+on proves which session sent it, below the guest. The proxy maps that port to the session's
+ruleset snapshot and fails closed on any gap. [PROXY.md](./PROXY.md) specifies the port
+pool, the control socket, the secrets flow, and the on-disk layout.
 
-**One `msb run` is one turn.** It boots and tears down the VM per command, so session state under
-`/root/.claude` dies with it and `--resume <id>` fails across runs. **Persistent sessions are the
-fix:** `silkgate up` creates the VM once in the background (`msb create`) and each turn is an
-`msb exec` into that live VM, so `/root/.claude` — and the cloned repo, `node_modules`, build
-cache — survive between turns, and `claude -p --resume <id>` works across execs. The one-shot
-`silkgate run` remains: it is now just `up` → `exec` → `down` in a finally block, keeping the
-per-command lifecycle (and the per-turn VM boot) on purpose, for scripts that want no residue.
+## Tier 1 enforcement
 
-With an Anthropic **Console/org API key** (injected at the proxy) *both* work — but interactive
-additionally probes `platform.claude.com/v1/oauth/hello` at startup and fails only if that host is
-**blocked**, so interactive runs allowlist `platform.claude.com/v1/oauth/**`. (No OAuth
-`setup-token` — that's Max/Pro-gated and unrelated to API-key auth.)
+**Tier 1 needs no nested VM, no `pf`, and no `nft`: microsandbox terminates the guest's
+network in its own host-side stack, under a default-deny policy.** Every frame the guest
+emits ends in that stack, whatever guest-root does, and policy runs before any real socket
+opens. Only a hypervisor escape bypasses it. [THREAT-MODEL.md](./THREAT-MODEL.md) holds the
+full mechanism, the DNS story, the ranked fallbacks, and the live-verification record
+(15/15 checks on both OSes, three outside oracles, a negative control).
 
-## The shared-proxy session model
+## Concrete stack
 
-Sessions share **one** mitmproxy process — not one proxy per VM. A single `mitmdump` listens on a
-**pool of ports** (16 consecutive, normally `8090..8105` — a squatter anywhere in a candidate
-range shifts the whole pool to the first fully-free range above it) via repeated
-`--mode regular@<addr>:<port>` args — bound to loopback only, both address families, never the
-LAN (`SILKGATE_PROXY_BIND` overrides it for a platform that routes guests through a real bridge
-address) — and each session claims one port from the pool. `silkgate up` starts this proxy the first
-time it's needed (detached, `start_new_session=True`), waits for every pool port to accept, and
-records it in `~/.silkgate/proxy.json`; `silkgate down` terminates it once the last session goes
-away.
-
-**The listener port *is* the session identity — and it's spoof-proof.** Each sandbox's Tier-1
-net-rule allows egress to *only its own* session's port (`--net-rule "allow@host:tcp:<port>"`,
-default-deny otherwise), enforced in microsandbox's host-side stack **below** the guest (see Tier 1
-enforcement). So the port a request arrives on cannot be forged by guest-root: reaching another
-session's port is dropped before a real socket ever opens. The addon reads the accepted port from
-`flow.client_conn.sockname[1]`, maps port → session → that session's RuleSet, and enforces it.
-That ruleset is a **per-session snapshot** composed at `up` time into
-`~/.silkgate/sessions/<name>/rules.txt` (cached per port; invalidated by the sessions-dir mtime and
-the per-session `rules.txt` mtime). Unknown port, missing session, or unparsable rules **fail
-closed** — deny with reason `"no session for port"`, never falling through to another session's
-rules. Audit lines gain a `"session"` field. No per-request tokens are needed or used: the network
-layer already proves identity, once, below the guest. The port being frozen into each guest — its
-proxy URL and its Tier-1 net-rule both name it — is also why the pool floats only on a
-session-free start: a proxy restart with any session or port claim surviving reuses the recorded
-pool verbatim (and dies if a port of it is now taken), because a pool that moved would strand
-every survivor on a port anything could later bind and answer.
-
-**Control plane: a unix socket, not an in-band HTTP endpoint.** The proxy also needs a channel for
-the host to push secrets and query health. It must **not** be a network endpoint on a proxy port:
-every guest can reach its proxy port (that is the whole point), so any in-band HTTP control plane
-would be reachable by an adversarial guest and would need its own authentication to be safe.
-Instead the addon serves a line-delimited-JSON protocol on a **unix socket**
-(`~/.silkgate/proxy.sock`, mode `0600`, started in its `running()` hook; a stale socket file is
-unlinked at start). A unix socket in the host filesystem is **unreachable from every guest by
-construction** — no host path is mounted into the guests and there is no network route to it —
-so it needs no auth. Ops: `ping`, `set_secret`, `list_secrets`; unknown ops and malformed lines are
-errors.
-
-**Secrets flow: env → CLI → socket → proxy memory, scoped per session.** The credential lives on
-the host only as `SILKGATE_EGRESS_SECRET_<NAME>`. `silkgate up` (and `silkgate secret set <name> --session
-<session>`) reads it from the local environment and pushes it over the control socket with
-`set_secret`, naming the session it belongs to; the addon holds it in an **in-memory** dict keyed by
-that session, and `inject_auth=<name>` resolves only within the session the request arrived for —
-the listener port being spoof-proof session identity is what makes that sound. One proxy serving
-many sessions therefore does not let a later session spend a key an earlier one pushed. The
-`SILKGATE_EGRESS_SECRET_*` environment the proxy was launched with serves the **standalone** case only
-(`silkgate proxy`, where there are no sessions).
-
-That is a deliberate loss of convenience: a session must be given its own secret rather than
-finding one already in the proxy, so `up` from a shell without the variable fails where it once
-succeeded. It fails at provision, naming the variable.
-
-The value is **never** passed as an argv (so it never shows in `ps`), **never** written to disk, and
-**never** logged or echoed back — `list_secrets` returns names only. After pushing, `up` verifies
-and dies listing any `inject_auth` name in the session ruleset still missing, so a session never
-starts believing it holds a key it doesn't.
-
-## Concrete starter stack
-
-- **Proxy:** mitmproxy with a small addon (allowlist rule engine, SNI==Host, header/body/
-  query enforcement, secret injection, audit log). See [DSL.md](./DSL.md) and the
-  [`mitmaddon/`](../mitmaddon/) code. (Hand-rolling TLS MITM is the wrong place to be minimal — reuse
-  mitmproxy; keep the rule engine dependency-free and portable.)
-- **microVM:** microsandbox for "one tool, both OSes" (Apache 2.0, libkrun); or Lima +
+- Proxy: mitmproxy plus a small addon — allowlist engine, SNI==Host, header/body/query
+  enforcement, secret injection, audit log. See [DSL.md](./DSL.md) and
+  [`mitmaddon/`](../mitmaddon/). Do not hand-roll TLS interception. Reuse mitmproxy, and
+  keep the rule engine dependency-free.
+- microVM: microsandbox for one tool on both OSes (Apache 2.0, libkrun), or Lima plus
   Firecracker for maturity.
-- **Guest image:** nothing hand-written. A base distro image plus one layer per **profile**,
-  synthesized at build time and cached by a hash of what went into it. A profile pairs the
-  install step for a capability with the egress rules that capability needs, so the image and
-  the policy are declared once, together — see [`profiles/`](../profiles/) and the README.
-  Runtimes and the agent harness are both just profiles: nothing about a particular agent is
-  baked into the base.
+- Guest image: nothing hand-written. A base distro image plus one layer per profile,
+  synthesized at build time and cached by a hash of its inputs. A profile pairs an install
+  step with the egress rules that capability needs, so image and policy are declared once,
+  together. Agent harnesses are profiles too: nothing agent-specific is baked into the base.
 
 ## Hardening checklist
 
-- [ ] Agent process tree runs entirely inside the guest; host runs only control CLI + proxy.
-- [ ] Only user-chosen virtiofs mounts, each guarded, read-only by default — or a `--checkout`
-      guest whose worktree is guest-local, committed content only. No creds/dotfiles mounted.
-- [ ] Guest default route = drop; only the session's proxy port reachable — DNS included:
-      port 53 is intercepted in the VMM (enforced **outside** the guest — see Tier 1).
-- [ ] Private CA: cert in guest trust store + all language env vars; **private key host-only**.
-- [ ] Proxy enforces SNI==Host, per-request method/path, header/body/query constraints, audit log.
-- [ ] LLM/git secrets injected by proxy; never written into the guest.
-- [ ] Package registries: download-only; publish blocked.
-- [ ] Git push gated on human review (or repo-scoped + size-capped).
-- [ ] Hypervisor and guest kernel patched (this is your residual escape surface).
+- [ ] The agent process tree runs entirely inside the guest. The host runs only the control
+      CLI and the proxy.
+- [ ] Exactly one virtiofs mount (the project directory). No credentials or dotfiles mounted.
+- [ ] Guest egress is default-deny with only the session's proxy port reachable, DNS
+      included, enforced outside the guest (Tier 1).
+- [ ] Private CA: certificate in the guest trust store and all language env vars. The
+      private key stays host-only.
+- [ ] The proxy enforces SNI==Host, per-request method and path, header, body, and query
+      constraints, and writes the audit log.
+- [ ] LLM and git secrets are injected by the proxy, never written into the guest.
+- [ ] Package registries are download-only. Publish is blocked.
+- [ ] Git push is gated on human review, or repo-scoped and size-capped.
+- [ ] Hypervisor and guest kernel are patched. This is the residual escape surface.
 
-## Residual risks (be honest)
+## Residual risks
 
-- **Hypervisor escape** — a KVM/HVF/virtio CVE breaks Boundary A. Mitigate by patching +
-  minimal device model; can't eliminate.
-- **Exfil within an allowed channel** — what bounds it today is per-request: a rule's
-  `max_body` caps each request body, and every decision is logged. There is **no content
-  inspection** (no DLP), no cap on response size, and no budget across requests — a guest can
-  leak through any allowed POST one capped body at a time. Tightening the allowlist is the
-  strongest lever.
-- **DNS tunneling** — closed: the guest does no external DNS (the proxy resolves), and
-  microsandbox intercepts port 53 in the VMM — UDP queries fail under default-deny, TCP/53
-  answers `REFUSED` from its stub.
-- **Mount tampering** — malicious code can corrupt files on a read-write mount; mounts are
-  read-only unless asked otherwise, a `--checkout` guest touches no host file at all, and a
-  human reviews diffs before push.
-- **Shared MITM CA** — by design you can read all guest TLS. Fine (you own both ends); don't
-  reuse that CA elsewhere.
-
-## Tier 1 enforcement (resolved — verified live; see the platform note at the end)
-
-Forcing *all* egress through the proxy on macOS+microsandbox **does not need a nested Linux
-VM, `pf`, or vsock plumbing.** microsandbox does not use libkrun's default TSI mode — it
-attaches a virtio-net device and terminates it in its **own host-side userspace TCP/IP stack
-(smoltcp) with a default-deny egress policy engine**, running natively on HVF.
-
-- The guest's only egress path is `eth0` → microsandbox's host-side stack → policy check →
-  a real socket opened *by the host process*. Root in the guest can reconfigure `eth0`, add
-  routes, run its own resolver, or craft raw frames — every frame still terminates in the
-  host stack, where policy is evaluated before any real socket opens. **Only a hypervisor
-  escape bypasses it.** This is the "enforce outside the guest" property Tier 1 needs.
-- Config: `msb run … --net-default-egress deny --net-rule "allow@host:tcp:<proxyport>"`.
-  Guest `HTTPS_PROXY=host.microsandbox.internal:<proxyport>`. DNS: microsandbox's gateway
-  intercepts all UDP/53, and the forwarder applies the egress policy per query, so with no DNS
-  allow rule the default-deny yields NXDOMAIN — no explicit DNS deny is needed. TCP/53 is
-  intercepted too: msb's own stub answers `REFUSED` for every destination, so port 53 is not an
-  egress channel in either protocol. The proxy alias resolves via the guest's `/etc/hosts`.
-
-So on both OSes, **microsandbox's stack is Tier 1; the mitmproxy + DSL is Tier 2.** No separate
-L3 firewall is built. (Linux fallback if that ever changes: tap + `nft` — see THREAT-MODEL.md.)
-
-**Fallbacks if microsandbox's policy proves insufficient** (ranked): (a)
-`VZFileHandleNetworkDeviceAttachment` userspace gateway (fork gvproxy) — strongest, but
-Virtualization.framework-only → drops libkrun; (b) no-NIC + vsock-to-host-proxy — equal
-containment, but needs a custom host relay (no host `AF_VSOCK` on macOS) + an in-guest
-TCP→vsock shim; (c) host `pf` on `bridge100` keyed by VM subnet — fragile (races Apple's
-InternetSharing daemon), belt-and-suspenders only.
-
-**Verified live:** a root guest reached nothing by TCP, UDP, DNS over either transport, IPv6 or
-ICMP — only its own proxy port; it could not escape by re-routing, by giving itself another
-address, or through any of the host's other ports; and the addon allowed the allowlisted host
-while refusing an unlisted one (`verify_guest.sh`, 15/15). Each denial is an answer from the
-boundary rather than a silence, three assertions made *outside* the guest agree — a listener the
-allowlist omits heard nothing from it, a recording endpoint saw the proxy replace a credential
-the guest sent and never add one it did not, and this run's audit log holds the decisions the
-checks provoked — and a deliberately leaking guest fails six of the checks, which is how they are
-known to be able to fail at all.
-
-On macOS (Apple Silicon/HVF, msb 0.5.4/0.5.7) by hand; on Linux (x86_64/KVM, msb 0.6.8, via the
-`test/linux/` container) by CI on every push. Coverage is not identical: that Linux guest has no
-working IPv6 and maps the proxy alias to v4 only, so the checks whose subject is a v6 path report
-having nothing to probe instead of claiming to have covered it. Caveat: **pin your
-`msb --version`** — rule-grammar scope names drift pre-1.0.
+- Hypervisor escape. A KVM, HVF, or virtio CVE breaks Boundary A. Patch, keep the device
+  model minimal, and accept that this cannot be eliminated.
+- Exfiltration within an allowed channel. The bound is per request: `max_body` caps each
+  request body, and every decision is logged. There is no content inspection, no cap on
+  response size, and no budget across requests, so a guest can leak through any allowed POST
+  one capped body at a time. The strongest lever is a tighter allowlist.
+- DNS tunneling. Closed: the guest does no external DNS, and the VMM answers port 53 itself
+  ([THREAT-MODEL.md](./THREAT-MODEL.md)).
+- Workspace tampering. Malicious code can corrupt mounted project files. A human reviews
+  diffs before push.
+- Shared MITM CA. By design the proxy reads all guest TLS. That is fine — you own both ends —
+  but do not reuse that CA anywhere else.
