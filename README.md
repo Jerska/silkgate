@@ -88,11 +88,12 @@ image. Change nothing and `run`/`up` reuse the cached one. Each profile is its o
 layer, so an edit to the last profile in a list rebuilds only that layer.
 
 There is no Dockerfile in this repo. An image is `debian:bookworm-slim`, plus a silkgate
-layer (the MITM CA in the trust store, the CA env vars runtimes read, `/workspace`), plus
-one layer per profile — all synthesized at build time. Nothing is baked in for a particular
-agent, so a different harness is just a different profile. Setup steps run inside
-`docker build` on the host, which has its own network, so a compiler install or an apt
-mirror never touches the proxy or the policy the session will run under.
+layer, plus one layer per profile — all synthesized at build time. The silkgate layer holds
+the MITM CA in the trust store, the CA env vars runtimes read, and `/workspace`. Nothing is
+baked in for a particular agent, so a different harness is just a different profile. Setup
+steps run inside `docker build` on the host, which has its own network. A compiler install
+or an apt mirror therefore never touches the proxy or the policy the session will run
+under.
 
 ## The guest context
 
@@ -175,18 +176,18 @@ because a session never inherits one already in the proxy. Add or rotate one wit
 ## The audit UI: `silkgate ui`
 
 **`silkgate ui` serves a live, filterable table over the whole audit trail at
-`http://127.0.0.1:8642/`.** `--port` overrides. The UI is loopback only with no auth, and it
-is safe for the same reason the control socket is: a guest's Tier-1 rule allows only its own
-proxy port, so no guest can ever reach it. It needs no live proxy — history and the session
-list stand on their own, and the live stream heartbeats until a proxy appears, then adopts a
-restarted proxy's new file without a reload.
+`http://127.0.0.1:8642/`.** `--port` overrides. The UI is loopback only with no auth. It is
+safe for the same reason the control socket is: a guest's Tier-1 rule allows only its own
+proxy port, so no guest can ever reach it. It needs no live proxy, because history and the
+session list stand on their own. The live stream heartbeats until a proxy appears, then
+adopts a restarted proxy's new file without a reload.
 
 One row is one request: the allow line joined with its conclusion (a deny is the whole
 story, and a CONNECT allow renders as a tunnel). Filters — session, decision, method, host,
 time window — live in the URL hash, so a view is shareable. The ACTIONS column shows what
-the proxy did to each request: `inj:<name>` or `skip:<name>` for the credential swap (the
-secret's name, never its value), `q:<n>` and `h:<n>` for stripped query params and headers,
-with the stripped names in the tooltip.
+the proxy did to each request. `inj:<name>` or `skip:<name>` marks the credential swap, with
+the secret's name and never its value. `q:<n>` and `h:<n>` count stripped query params and
+headers, with the stripped names in the tooltip.
 
 The UI reads only the machine-readable `events-*.jsonl` files ([doc/PROXY.md](doc/PROXY.md)).
 It never parses the older mixed-format `proxy-*.log` files, so its history starts with the

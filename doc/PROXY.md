@@ -31,10 +31,10 @@ port from the pool, and concurrent `up` commands get distinct ports
 (`test_concurrent_pick_port_yields_distinct_ports`).
 
 **A restart floats the pool only when no session survives.** A guest froze its port at
-creation: its proxy URL and its Tier-1 net-rule both name it, so a moved pool strands every
-survivor on a port that any later process can bind and answer. While any session or port claim
-survives, a proxy restart therefore reuses the recorded pool verbatim, and dies if a port of
-it is now taken (`test_restart_with_surviving_session_never_floats_the_pool`,
+creation, because its proxy URL and its Tier-1 net-rule both name it. A moved pool strands
+every survivor on a port that any later process can bind and answer. While any session or
+port claim survives, a proxy restart therefore reuses the recorded pool verbatim, and dies
+if a port of it is now taken (`test_restart_with_surviving_session_never_floats_the_pool`,
 `test_restart_dies_naming_the_session_whose_port_is_squatted`).
 
 ## Port as session identity
@@ -60,11 +60,11 @@ through to another session's rules. Every audit record carries a `session` field
 ## The control socket
 
 **The host controls the proxy over a unix socket, never over a network port.** Every guest
-can reach its own proxy port — that is the point of the proxy — so a control endpoint on a
-proxy port is reachable by an adversarial guest and needs its own authentication to be safe.
-A unix socket in the host filesystem is unreachable from every guest by construction: no host
-path is mounted into a guest, and no network route leads to it. It therefore needs no
-authentication.
+can reach its own proxy port — that is the point of the proxy. A control endpoint on a
+proxy port is therefore reachable by an adversarial guest, and needs its own authentication
+to be safe. A unix socket in the host filesystem is unreachable from every guest by
+construction: no host path is mounted into a guest, and no network route leads to it. It
+therefore needs no authentication.
 
 The addon serves line-delimited JSON on `~/.silkgate/proxy.sock` (mode `0600`) and unlinks a
 stale socket file at start. The operations are `ping`, `set_secret`, and `list_secrets`. An
@@ -88,10 +88,10 @@ Four properties, each pinned in `test/test_addon.py`:
   returns names only (`test_list_secrets_never_echoes_a_value`).
 - The `SILKGATE_EGRESS_SECRET_*` environment of the proxy process serves the standalone
   `silkgate proxy` only, where no sessions exist (`test_env_secrets_do_not_serve_named_sessions`).
-- A request that matches an `inject_auth` rule whose secret is absent or unusable is denied,
-  and the guest sees the same answer as for a policy miss — which secrets the host holds is
-  not the guest's to learn (`test_missing_secret_is_indistinguishable_from_a_policy_miss`).
-  The audit record keeps the real reason.
+- A request that matches an `inject_auth` rule whose secret is absent or unusable is
+  denied, and the guest sees the same answer as for a policy miss
+  (`test_missing_secret_is_indistinguishable_from_a_policy_miss`). Which secrets the host
+  holds is not the guest's to learn. The audit record keeps the real reason.
 
 **A missing or malformed secret warns at `up` and never blocks startup.** If a session's
 ruleset names `inject_auth=<name>` and the variable is absent or not one
@@ -105,17 +105,17 @@ a secret already in the proxy.
 
 **Every decision writes one JSON line to the audit log, and the proxy mirrors the same line
 into a machine-only events file.** A request tells its story in at most two records, joined
-by mitmproxy's flow id: the decision when it is made and, for an allow, a `response` record
-once the flow concludes. A deny record is the whole story, because nothing went upstream. The
-`host` and `port` fields name the destination the proxy dials, never the guest's claim about
-it, and a claim that contradicts the destination is recorded as `claimed`. Bodies and
-credential values are never written.
+by mitmproxy's flow id. The first is the decision when it is made. The second, for an allow,
+is a `response` record once the flow concludes. A deny record is the whole story, because
+nothing went upstream. The `host` and `port` fields name the destination the proxy dials,
+never the guest's claim about it. A claim that contradicts the destination is recorded as
+`claimed`. Bodies and credential values are never written.
 
-**Action fields carry names, never values.** An allow record holds what the proxy did on the
-way through: `injected` names the secret whose value replaced the header the guest sent, and
+**Action fields carry names, never values.** An allow record holds what the proxy did on
+the way through. `injected` names the secret whose value replaced the header the guest sent.
 `inject_skipped` names the secret the proxy left alone because the guest did not send that
-header — the two are exclusive. `stripped_query` and `stripped_headers` hold the sorted names
-that lost at least one pair, and `listen_port` rides every record kind, so even a
+header — the two fields are exclusive. `stripped_query` and `stripped_headers` hold the
+sorted names that lost at least one pair. `listen_port` rides every record kind, so even a
 `session: null` deny stays attributable to a port. The `response` record adds status, byte
 counts, and duration.
 

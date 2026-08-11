@@ -100,14 +100,14 @@ percent-decodes once (`%2e%2e` becomes `..`), then resolves `.` and `..` with
 | Option | Effect | Default |
 |---|---|---|
 | `GET POST …` | allowed methods (bare uppercase tokens) | GET only |
-| `max_body=<size>` | permit a request body up to `<size>` (bytes; `k`/`m` suffix) | no body |
+| `max_body=<size>` | permit a request body up to `<size>` (bytes, or a `k`/`m` suffix) | no body |
 | `q:*` | allow all query params (escape hatch — use sparingly) | params stripped |
-| `q:<name>=<value>` | keep query param `<name>` only if its value equals `<value>`; all others stripped | params stripped |
-| `q:<name>~<regex>` | keep query param `<name>` only if `<regex>` fullmatches; all others stripped | params stripped |
+| `q:<name>=<value>` | keep query param `<name>` only if its value equals `<value>` — all others stripped | params stripped |
+| `q:<name>~<regex>` | keep query param `<name>` only if `<regex>` fullmatches — all others stripped | params stripped |
 | `h:*` | allow all request headers, `Authorization` included (escape hatch — use sparingly) | headers stripped |
 | `h:<name>=<value>` | forward the header only if its value equals `<value>` | — |
-| `h:<name>~<regex>` | forward the header only if `<regex>` fullmatches (no spaces; use `\s`) | — |
-| `inject_auth=<name>` | if the request already carries the header named in `SILKGATE_EGRESS_SECRET_<NAME>` (`header: value`), replace its value with the host-held secret; never added when absent | — |
+| `h:<name>~<regex>` | forward the header only if `<regex>` fullmatches (no spaces — use `\s`) | — |
+| `inject_auth=<name>` | if the request already carries the header named in `SILKGATE_EGRESS_SECRET_<NAME>` (`header: value`), replace its value with the host-held secret — never added when absent | — |
 
 Two notes. Per-rule body content rules are deferred — only the `max_body` size exists.
 Option tokens are whitespace-split, so an option value cannot contain a space (use `\s` in
@@ -130,8 +130,8 @@ override per rule for a stricter posture:
 Opt in per rule with `h:` where a host needs them. `cookie`, `authorization`, and any
 `x-*` or unknown header are stripped by default — allow one explicitly with `h:` if a host
 needs it, because no header is special-cased. When a rule has `inject_auth`, the proxy
-*replaces* the named header's value with the host-held secret — but only when the request
-already carries it — so the real credential is never present in the guest.
+*replaces* the named header's value with the host-held secret, and only when the request
+already carries that header. The real credential is therefore never present in the guest.
 
 ## Locked design decisions
 

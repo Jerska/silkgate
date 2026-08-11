@@ -73,16 +73,16 @@ transport, IPv6, or ICMP. It did not escape through a new route, a new address, 
 host's other ports. The addon allowed the allowlisted host and refused an unlisted one. Each
 denial was an answer from the boundary, not a silence.
 
-The three outside oracles: a listener the allowlist omits heard nothing from the guest, a
-recorded endpoint saw the proxy replace a credential the guest sent and never add one the
-guest did not send, and the run's audit log holds the decisions the checks provoked. With
+The three outside oracles. A listener the allowlist omits heard nothing from the guest. A
+recorder endpoint saw the proxy replace a credential the guest sent, and never add one the
+guest did not send. The run's audit log holds the decisions the checks provoked. With
 `--negative-control`, a deliberately leaky guest fails six of the checks — the only proof
 that the checks can fail at all.
 
 Platforms: macOS (Apple Silicon, HVF, msb 0.5.4/0.5.7) by hand, and Linux (x86_64, KVM,
-msb 0.6.8, in the `test/linux/` container) by CI on every push. Coverage differs: the Linux
-guest has no working IPv6 and maps the proxy alias to v4 only, so a check whose subject is a
-v6 path reports that it had nothing to probe instead of a claim of coverage.
+msb 0.6.8, in the `test/linux/` container) by CI on every push. Coverage differs. The Linux
+guest has no working IPv6 and maps the proxy alias to v4 only, so a check whose subject is
+a v6 path reports that it had nothing to probe.
 
 The checks live in `test/verify_guest.sh`, run as root inside a guest by `silkgate verify`.
 `test/test_verify_checks.py` and `test/test_verify_oracles.py` pin the harness. Pin your
@@ -100,9 +100,9 @@ The checks live in `test/verify_guest.sh`, run as root inside a guest by `silkga
    daemon — and defense-in-depth only.
 
 The Linux fallback is a tap device plus an `nft` ruleset in the `inet` family on that
-interface: allow `ct state established,related`, allow new TCP to the proxy address and port
-only, and drop everything else. That covers all UDP, ICMP, IPv6, and other TCP, with no
-resolver in the guest. It is not needed while microsandbox's stack holds.
+interface. The rules: allow `ct state established,related`, allow new TCP to the proxy
+address and port only, and drop everything else. That covers all UDP, ICMP, IPv6, and other
+TCP, with no resolver in the guest. It is not needed while microsandbox's stack holds.
 
 ## Tier 2 — what the proxy enforces (and the traps)
 
@@ -112,9 +112,9 @@ in [DSL.md](./DSL.md).** Each trap below names the failure it guards against.
 - Domain fronting. The proxy rejects any request whose SNI and Host disagree.
 - Host-parsing discrepancies — the null-byte bug class (see the Claude Code SOCKS5 bypass in
   [SOTA.md](./SOTA.md)). The matcher must normalize the host identically to how the
-  connection layer resolves it: reject null bytes, `%`, CR-LF, and whitespace, strip the
-  trailing dot, lowercase, force punycode to kill homographs, reject `user@host`, brackets,
-  and raw IP literals. If the pattern is laxer than the resolver, the difference is a bypass.
+  connection layer resolves it. Reject null bytes, `%`, CR-LF, whitespace, `user@host`,
+  brackets, and raw IP literals. Strip the trailing dot, lowercase, and force punycode to
+  kill homographs. If the pattern is laxer than the resolver, the difference is a bypass.
   This is the most likely place this proxy gets broken, so normalization lives in the rule
   engine, applied to pattern and request host by the same function
   ([DSL.md](./DSL.md), host normalization).

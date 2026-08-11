@@ -92,7 +92,7 @@ ephemeral VM per command suits code-interpreter semantics only, so the one-shot
 gitdir mounted read-only. The CLI refuses any mount that hands the guest the host itself,
 and refuses a read-write mount that holds a `.git` directory — hooks and `core.fsmonitor`
 there are host code execution the next time a human runs git in it. The full mount rules,
-including the LFS exception, live in the [README](../README.md).
+the LFS exception included, live in the [README](../README.md).
 
 ## Boundary B — the proxy
 
@@ -201,10 +201,10 @@ full mechanism, the DNS story, the ranked fallbacks, and the live-verification r
 
 - Hypervisor escape. A KVM, HVF, or virtio CVE breaks Boundary A. Patch, keep the device
   model minimal, and accept that this cannot be eliminated.
-- Exfiltration within an allowed channel. `max_body` caps each request body and every
-  decision is logged, but nothing inspects content, caps responses, or budgets across
-  requests — a guest can leak through any allowed POST one capped body at a time. The
-  strongest lever is a tighter allowlist.
+- Exfiltration within an allowed channel. `max_body` caps each request body, and every
+  decision is logged. Nothing inspects content, caps responses, or budgets across requests,
+  so a guest can leak through any allowed POST one capped body at a time. The strongest
+  lever is a tighter allowlist.
 - DNS tunneling. Closed: the guest does no external DNS, and the VMM answers port 53 itself
   ([THREAT-MODEL.md](./THREAT-MODEL.md)).
 - Workspace tampering. Malicious code can corrupt mounted project files. A human reviews

@@ -12,7 +12,7 @@ command, not a stack trace.
 ## How to read the claims in this document
 
 **Every "the docs say" claim below was read from a mirror, because this investigation's
-sandbox could not reach the canonical docs.** The canonical Claude Code docs live at
+sandbox had no route to the canonical docs.** The canonical Claude Code docs live at
 `code.claude.com`, and both `docs.claude.com` and `docs.anthropic.com` answer `301` to
 `code.claude.com` for every Claude Code page. Each claim was therefore read from
 [ericbuess/claude-code-docs](https://github.com/ericbuess/claude-code-docs), last synced the
@@ -113,7 +113,7 @@ One repository serves as both in two documented ways:
 `/plugin install name@marketplace` copies the plugin into `~/.claude/plugins/cache`, one
 immutable directory per installed version (**doc**,
 [plugins-reference § Plugin caching](https://code.claude.com/docs/en/plugins-reference)).
-Three consequences worth internalizing:
+Three consequences matter:
 
 - Paths that traverse above the plugin root (`../`) are dead after install. Symlinks are
   kept if they resolve inside the plugin, dereferenced if they resolve elsewhere in the
@@ -153,9 +153,10 @@ So the skill can say `"${CLAUDE_PLUGIN_ROOT}"/cli/silkgate run …` and the path
 the moment Claude reads it. Second, `bin/` puts executables on the Bash tool's `PATH`
 (**doc**) — a relative symlink `bin/silkgate → ../cli/silkgate` makes the invocation just
 `silkgate` (**inferred + untested**: the combination of `bin/` with a symlink, and exec-bit
-preservation through the cache copy, are both undocumented; `bin/`'s existence implies that
+preservation through the cache copy, are both undocumented — `bin/`'s existence implies that
 executables survive install, and `python3 "${CLAUDE_PLUGIN_ROOT}/cli/silkgate"` sidesteps
-the exec bit entirely — the CLI is stdlib-only with a `#!/usr/bin/env python3` shebang).
+the exec bit entirely, because the CLI is stdlib-only with a `#!/usr/bin/env python3`
+shebang).
 Third, hooks execute arbitrary commands against the same root.
 
 And silkgate is already built for this. `cli/silkgate` locates everything it needs relative
@@ -174,8 +175,8 @@ One real edit is required, and it is not this document's to make: the skill's in
 say `./cli/silkgate`, relative to a checkout that a plugin user does not have. The skill
 already hedges ("from the repo root … or by absolute path"). Shipped as a plugin it needs
 one added sentence — *when installed as the silkgate plugin, the CLI is
-`"${CLAUDE_PLUGIN_ROOT}"/cli/silkgate`* — phrased as prose, because the same SKILL.md keeps
-serving repo checkouts as a project skill, where no substitution happens and the placeholder
+`"${CLAUDE_PLUGIN_ROOT}"/cli/silkgate`* — phrased as prose, because the same SKILL.md still
+serves repo checkouts as a project skill, where no substitution happens and the placeholder
 stays literal. The skill is under rewrite as this is written. This is a coordination note
 for that rewrite, not a patch.
 
@@ -265,10 +266,10 @@ curl -fsSL https://install.microsandbox.dev | sh`. Two installs later, they expo
 Then, in any project: *"run the failing tests in a sandbox and fix them"* — the skill fires
 as `silkgate:sandboxed-agent`, invokes the CLI out of the plugin root, builds the first
 image (about a minute, once), and the audit log path prints. `silkgate verify` on request.
-Total new concepts for the user: two slash commands and three host installs they were
-always going to need.
+Total new concepts for the user: two slash commands and three host installs they needed
+anyway.
 
-## What could not be determined from here
+## What was not determinable from here
 
 **Nothing below blocks the recommendation. Each is a checkbox for the first `--plugin-dir`
 session.**
