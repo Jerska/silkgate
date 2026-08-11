@@ -1358,8 +1358,8 @@ class TestCheckoutSessions(GitRepoCase):
         self.assertEqual(seen["meta"]["base"], "0" * 40)
         self.assertNotIn("branch", seen["meta"])
         self.assertNotIn("workspace_derived", seen["meta"])
-        self.assertIn("disposable checkout of the project at `v1`", seen["context"])
-        self.assertIn("printed output is the deliverable", seen["context"])
+        self.assertIn("disposable checkout of the project at\n`v1`", seen["context"])
+        self.assertIn("Put your results in printed output", seen["context"])
 
     # --- a branchless session at harvest/down -------------------------------------
 
@@ -1646,35 +1646,36 @@ class TestGuestBriefMounts(CliCase):
 
     def test_workspace_ro_text(self):
         ctx = self.ctx([("/h/p", "/workspace", "ro")])
-        self.assertIn("read-only host code", ctx)
-        self.assertIn("printed output is the deliverable", ctx)
+        self.assertIn("`/workspace` is read-only", ctx)
+        self.assertIn("is host code, and writes to it fail", ctx)
+        self.assertIn("Put your results in printed output", ctx)
 
     def test_no_mounts_text(self):
-        self.assertIn("nothing you write survives", self.ctx([]))
+        self.assertIn("Nothing you write survives this machine", self.ctx([]))
 
     def test_other_mounts_listed_with_modes(self):
         ctx = self.ctx([("/h/a", "/data", "ro"), ("/h/b", "/out", "rw")])
-        self.assertIn("No host directory is mounted at `/workspace`", ctx)
+        self.assertIn("no host directory is mounted there", ctx)
         self.assertIn("`/data` — read-only", ctx)
         self.assertIn("`/out` — read-write", ctx)
 
     def test_branch_text_wins_and_other_mounts_still_listed(self):
         ctx = self.ctx([("/h/a", "/data", "ro")], branch="agent/x")
-        self.assertIn("**`agent/x`**", ctx)
-        self.assertIn("Commits are the deliverable", ctx)
+        self.assertIn("Commit your work to branch `agent/x`", ctx)
+        self.assertIn("commits are the\ndeliverable", ctx)
         self.assertIn("`/data` — read-only", ctx)
 
     def test_checkout_text(self):
         ctx = self.ctx([], checkout="v1.2")
-        self.assertIn("disposable checkout of the project at `v1.2`", ctx)
-        self.assertIn("printed output is the deliverable", ctx)
-        self.assertIn("no\nremote accepts a push", ctx)
+        self.assertIn("disposable checkout of the project at\n`v1.2`", ctx)
+        self.assertIn("Put your results in printed output", ctx)
+        self.assertIn("No remote accepts a push", ctx)
         self.assertIn("`git fetch origin` and `git log` work", ctx)
 
     def test_branch_text_wins_over_the_checkout_base(self):
         # --branch --checkout REF: REF is the base, the session is still a branch one.
         ctx = self.ctx([], branch="agent/x", checkout="v1.2")
-        self.assertIn("**`agent/x`**", ctx)
+        self.assertIn("Commit your work to branch `agent/x`", ctx)
         self.assertNotIn("disposable checkout", ctx)
 
 
