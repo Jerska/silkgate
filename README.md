@@ -200,8 +200,8 @@ layers the return path on it.** Both need `--with git`, both run from inside a r
 and both own `/workspace` in the guest, so no `-v` mount can target it.
 
 Run `run` or `up` with `--with git --checkout` and the guest gets a disposable, writable
-checkout of the repo at REF (default `HEAD`) at `/workspace` — committed content only, so
-untracked files such as `.env` never enter the guest. The repo's `.git` is mounted read-only
+checkout of the repo at REF (default `HEAD`) at `/workspace`. The checkout holds committed
+content only, so untracked files such as `.env` never enter the guest. The repo's `.git` is mounted read-only
 at `/silkgate/base.git`, and the guest clones from it: a normal clone with its own `.git`
 inside `/workspace`. Hooks and reflogs are copied into the clone, the LFS store is mounted
 when the repo uses one, and a commit identity is set so local commits do not fail. The
@@ -218,7 +218,7 @@ silkgate run --with git --with claude --checkout -- \
 
 `--branch NAME` builds on that and changes exactly this: the worktree moves from a
 guest-only folder to a writable host-derived mount (`.silkgate/sandboxes/<name>` under the
-repo root), a named branch is created at the base — `HEAD`, or REF when `--checkout REF` is
+repo root). A named branch is created at the base — `HEAD`, or REF when `--checkout REF` is
 given beside it — and its commits return to the host fast-forward-only at harvest.
 `GIT_DIR` and `GIT_WORK_TREE` are exported into every exec, and teardown harvests the
 branch and reaps the derived workspace. The workspace mount holds no git metadata at all,
@@ -273,7 +273,7 @@ What the composed rules allow, per repo:
 
 The git rules are identical for both flags, because a fetch itself rides POST
 (`git-upload-pack`). The read/write split therefore lives in the API methods, the upload
-host, and above all the PAT: a read-only PAT covers clone, fetch, and LFS download, and a
+host, and above all the PAT. A read-only PAT covers clone, fetch, and LFS download. A
 read-write PAT covers push, LFS upload, and API writes. Pair `--github-read` with a
 read-only PAT — the token, not the proxy, is what stops a push on the git leg. The
 storage hosts are self-authorized (presigned URL or SigV4), so those rules carry no
@@ -411,10 +411,10 @@ proxy is advisory.
   where a remote URL can embed a token. Either mode is refused for `/`, your home
   directory, and silkgate's own checkout and state — credentials and configuration there
   must not be exposed even read-only.
-- Guest-side, a DST is refused when it is relative, `/`, at, under, or above `/silkgate`,
-  `/root/lfsstore`, or `/root/gitdir` (silkgate's own guest paths), a duplicate of another
-  mount's, or nested under one — nested virtiofs behavior is unverified, so it is refused
-  rather than trusted.
+- Guest-side, a DST is refused in five cases: it is relative, it is `/`, it sits at,
+  under, or above `/silkgate`, `/root/lfsstore`, or `/root/gitdir` (silkgate's own guest
+  paths), it duplicates another mount's DST, or it nests under one. Nested virtiofs
+  behavior is unverified, so it is refused rather than trusted.
 - A read-write mount that holds a `.git` directory anywhere under it is refused — hooks and
   config become guest-writable there, which is host code execution the next time a human
   runs git in it — unless `--allow-git-dir` accepts that risk explicitly. A linked

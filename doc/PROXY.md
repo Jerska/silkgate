@@ -41,8 +41,8 @@ one port from the pool the moment the port is picked, by a marker file, so concu
 commands get distinct ports (`test_concurrent_pick_port_yields_distinct_ports`).
 
 A restart re-picks the pool only when no session survives. A guest's port is fixed at
-creation, because its proxy URL and its Tier-1 net-rule both name it, and a moved pool
-strands every survivor on a port that any later process can bind and answer. While any
+creation: its proxy URL and its Tier-1 net-rule both name it. A moved pool strands every
+survivor on a port that any later process can bind and answer. While any
 session or port claim survives, a proxy restart therefore reuses the recorded pool verbatim,
 and dies if a port of it is now taken
 (`test_restart_with_surviving_session_never_floats_the_pool`,
@@ -123,9 +123,8 @@ value: a request that matches an `inject_auth` rule fails closed, with audit rea
 (`down`, then `up` — `up` re-pushes what its environment holds), or push into the live
 session with `silkgate secret set <name> --session <name>`. A launch with an empty
 allowlist pushes nothing, because no `inject_auth` name exists to serve. Two failure shapes
-tell the diagnosis apart: a 401 from the upstream means injection happened with a bad
-value, and a deny whose audit reason is `missing secret` means the proxy holds no value at
-all.
+tell the diagnosis apart. A 401 from the upstream means injection happened with a bad
+value. A deny whose audit reason is `missing secret` means the proxy holds no value at all.
 
 ## The audit trail
 
