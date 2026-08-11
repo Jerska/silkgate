@@ -2874,7 +2874,7 @@ def cmd_ls(args):
         for m in metas:
             parts = []
             if m.get("branch"):
-                parts.append(f"{m.get('workspace')} (branch {m['branch']})")
+                parts.append(f"{m.get('workspace') or '-'} (branch {m['branch']})")
             elif m.get("checkout"):
                 parts.append(f"(checkout {m['checkout']})")
             for entry in m.get("mounts") or []:
