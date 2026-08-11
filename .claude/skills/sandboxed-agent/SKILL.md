@@ -31,8 +31,8 @@ hang; later runs with the same profiles reuse it and start in under a second.
   repository can be mounted directly — which also means the guest reads all of `.git`,
   `.git/config` included, where a remote URL can embed a token; check that before mounting a
   repo. A read-write mount holding a `.git` directory is refused without `--allow-git-dir`.
-  A DST at `/`, at or under `/silkgate` or `/root/lfsstore`, duplicated, or nested under
-  another mount's is refused. For a writable copy of a plain directory there is no dedicated
+  A DST at `/`, one touching `/silkgate`, `/root/lfsstore` or `/root/gitdir` (at, under, or
+  above them), duplicated, or nested under another mount's is refused. For a writable copy of a plain directory there is no dedicated
   flag: mount it read-only and copy it in the guest — `-v DIR:/data:ro`, then
   `cp -a /data/. /workspace/`.
 - **Pick the mode by what the guest needs**: a read-only shelf of host files →

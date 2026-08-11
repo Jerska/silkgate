@@ -81,10 +81,10 @@ writable in either mode.) The CLI refuses mounts that would hand the guest the h
 `$HOME`, and silkgate's own checkout and state, in either mode; a read-write mount is also
 refused when a `.git` **directory** sits anywhere under it — hooks and `core.fsmonitor` there
 are host code execution the next time a human runs git in it. A linked worktree's `.git`
-**file** is allowed, with a printed note. Guest-side, a DST that is relative, `/`, at or
-under silkgate's own guest paths (`/silkgate`, `/root/lfsstore`), duplicated, or nested under
-another mount's is refused — nested virtiofs behavior is unverified, so it is refused rather
-than trusted.
+**file** is allowed, with a printed note. Guest-side, a DST that is relative, `/`, at,
+under, or above silkgate's own guest paths (`/silkgate`, `/root/lfsstore`, `/root/gitdir`),
+duplicated, or nested under another mount's is refused — nested virtiofs behavior is
+unverified, so it is refused rather than trusted.
 
 ## Boundary B — the TLS-terminating egress proxy
 

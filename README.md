@@ -330,9 +330,10 @@ unable to reach the network any other way — otherwise the proxy is advisory.
   read-only still exposes everything under it, `.git/config` included, where a remote URL can
   embed a token. Either mode is refused for `/`, your home directory, and silkgate's own
   checkout and state — credentials and configuration there must not be exposed even read-only.
-  Guest-side, a DST is refused when it is relative, `/`, at or under `/silkgate` or
-  `/root/lfsstore` (silkgate's own guest paths), a duplicate of another mount's, or nested
-  under one — nested virtiofs behavior is unverified, so it is refused rather than trusted.
+  Guest-side, a DST is refused when it is relative, `/`, at, under, or above `/silkgate`,
+  `/root/lfsstore` or `/root/gitdir` (silkgate's own guest paths), a duplicate of another
+  mount's, or nested under one — nested virtiofs behavior is unverified, so it is refused
+  rather than trusted.
   A read-write mount holding a `.git` **directory** anywhere under it is refused — hooks and
   config would become guest-writable, host code execution the next time a human runs git
   there — unless `--allow-git-dir` accepts that risk explicitly; a linked worktree's `.git`

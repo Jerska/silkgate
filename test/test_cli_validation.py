@@ -418,6 +418,22 @@ class TestMountGuards(CliCase):
         two = sg._mount_args([f"{a}:/data", f"{b}:/database"])  # a shared prefix is no nest
         self.assertEqual([guest for _, guest, _ in two], ["/data", "/database"])
 
+    def test_destination_above_a_reserved_path_is_refused(self):
+        src = self.tmp / "src"
+        src.mkdir()
+        for dst in ("/root",                                # above lfsstore and gitdir
+                    "/root/gitdir",                         # a branch session's clone
+                    "/root/gitdir/objects"):
+            self.refuses("silkgate's own", sg._mount_args, [f"{src}:{dst}"])
+        ok = sg._mount_args([f"{src}:/root/caches"])        # a sibling shares no fate
+        self.assertEqual([guest for _, guest, _ in ok], ["/root/caches"])
+
+    def test_allow_git_dir_without_a_rw_mount_is_refused(self):
+        src = self.tmp / "src"
+        src.mkdir()
+        for specs in ([], [f"{src}:/data"], [f"{src}:/data:ro"]):
+            self.refuses("does nothing", sg._mount_args, specs, allow_git_dir=True)
+
     def test_run_and_up_wire_mounts_and_allow_git_dir(self):
         project = self.tmp / "project"
         project.mkdir()
@@ -993,7 +1009,7 @@ class TestBranchGuards(GitRepoCase):
 
         with mock.patch.object(sys, "argv",
                                ["silkgate", "run", "--with", "git", "--branch", "nb",
-                                "-v", f"{data}:/data", "--allow-git-dir", "--", "true"]), \
+                                "-v", f"{data}:/data:rw", "--allow-git-dir", "--", "true"]), \
                 mock.patch.object(sg, "_branch_spec", lambda *a: fake_spec), \
                 mock.patch.object(sg, "_branch_workspace", spy), \
                 contextlib.redirect_stderr(io.StringIO()), \

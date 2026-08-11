@@ -1877,9 +1877,12 @@ def _find_git_dir(root):
 
 
 # Guest paths silkgate itself populates: the context file, scripts and the base.git mount
-# live under /silkgate, and the LFS store is mounted at /root/lfsstore. A -v mount at or
-# under either would shadow or expose them, so both are refused as destinations.
-_RESERVED_DSTS = ("/silkgate", "/root/lfsstore")
+# live under /silkgate, the LFS store is mounted at /root/lfsstore, and a branch session
+# clones into /root/gitdir. A -v mount at or under any of them would shadow or expose them;
+# one *above* them is as bad — it nests virtiofs over silkgate's mounts, and a branch
+# session's gitdir on a host directory hands the clone's hooks and config to that host
+# path. So the refusal runs in both directions.
+_RESERVED_DSTS = ("/silkgate", "/root/lfsstore", "/root/gitdir")
 
 
 def _split_mount(spec):
@@ -1919,7 +1922,7 @@ def _mount_pair(src, dst, mode, *, allow_git_dir=False):
     in those directories must not be exposed even read-only.
 
     Guest side: DST must be absolute, must not be the guest's whole filesystem, and must
-    not sit at or under what silkgate itself places in the guest (_RESERVED_DSTS).
+    not sit at, under, or above what silkgate itself places in the guest (_RESERVED_DSTS).
     """
     w = Path(src).resolve()
     if not w.is_dir():
@@ -1937,8 +1940,9 @@ def _mount_pair(src, dst, mode, *, allow_git_dir=False):
     if d == "/":
         die(f"refusing to mount {w} over the guest's whole filesystem")
     for reserved in _RESERVED_DSTS:
-        if d == reserved or d.startswith(reserved + "/"):
-            die(f"refusing to mount at {d}: {reserved} is silkgate's own path in the guest")
+        if d == reserved or d.startswith(reserved + "/") or reserved.startswith(d + "/"):
+            die(f"refusing to mount at {d}: it is (or contains) {reserved}, silkgate's own "
+                "path in the guest")
     if mode == "ro":
         if (w / ".git").is_file():
             say(f"note: {w} is a linked git worktree — the .git pointer file is in the "
@@ -1968,7 +1972,9 @@ def _mount_args(specs, *, allow_git_dir=False):
 
     The cross-mount guards live here: two mounts at one DST would be a silent
     last-mount-wins inside the VMM, and one DST nested under another is nested virtiofs,
-    whose behavior is unverified — both are refused rather than trusted.
+    whose behavior is unverified — both are refused rather than trusted. --allow-git-dir
+    with nothing read-write to apply to is refused too: a flag accepted and ignored reads
+    as honoured.
     """
     mounts = []
     for spec in specs or ():
@@ -1984,6 +1990,9 @@ def _mount_args(specs, *, allow_git_dir=False):
                 die(f"mount destinations {inner} and {outer} nest — nested virtiofs "
                     "behavior is unverified, so it is refused rather than trusted")
         mounts.append((host, guest, parsed[2]))
+    if allow_git_dir and not any(mode == "rw" for _, _, mode in mounts):
+        die("--allow-git-dir does nothing here — the .git risk it accepts only exists "
+            "for a read-write -v mount")
     return mounts
 
 
@@ -4665,8 +4674,9 @@ def main():
                    type=_mount_arg,
                    help="mount host directory SRC at DST in the guest, read-only unless the "
                         "spec says :rw (repeatable). Refused for $HOME and silkgate's own "
-                        "checkout and state, and for a DST at /, /silkgate or /root/lfsstore; "
-                        "an rw mount holding a .git directory needs --allow-git-dir")
+                        "checkout and state, and for a DST at / or touching /silkgate, "
+                        "/root/lfsstore or /root/gitdir; an rw mount holding a .git "
+                        "directory needs --allow-git-dir")
     p.add_argument("--allow-git-dir", action="store_true",
                    help="allow an rw mount that holds .git directories — their hooks and "
                         "config become guest-writable, which is host code execution the "
@@ -4704,8 +4714,9 @@ def main():
                    type=_mount_arg,
                    help="mount host directory SRC at DST in the guest, read-only unless the "
                         "spec says :rw (repeatable). Refused for $HOME and silkgate's own "
-                        "checkout and state, and for a DST at /, /silkgate or /root/lfsstore; "
-                        "an rw mount holding a .git directory needs --allow-git-dir")
+                        "checkout and state, and for a DST at / or touching /silkgate, "
+                        "/root/lfsstore or /root/gitdir; an rw mount holding a .git "
+                        "directory needs --allow-git-dir")
     p.add_argument("--allow-git-dir", action="store_true",
                    help="allow an rw mount that holds .git directories — their hooks and "
                         "config become guest-writable, which is host code execution the "
