@@ -145,15 +145,13 @@ gateway.** This is the piece neither Claude Code nor Codex ships.
 
 **A guest command's stdio is the channel to whoever drives it: a process pipe, not network
 egress, so it never touches the proxy boundary.** The CLI relays it live with stdout and
-stderr apart. The split is a convenience, not a property — it rides an in-band tag the guest
-can write itself, so everything on both streams is the guest's own report. A human attaches
-the TUI with `silkgate attach <name>`. A parent agent runs
-`silkgate exec <name> -- claude -p --output-format stream-json` and parses the stream. The
-README's [session section](../README.md#persistent-sessions) holds the operational detail.
-
-With a Console API key injected at the proxy, both modes work. Interactive Claude Code also
-probes `platform.claude.com/v1/oauth/hello` at startup and fails only if that host is
-blocked, so interactive runs allowlist `platform.claude.com/v1/oauth/**`.
+stderr apart — a convenience, not a property, because the split rides an in-band tag the
+guest can write itself. A human attaches the TUI with `silkgate attach`. A parent agent runs
+`silkgate exec <name> -- claude -p --output-format stream-json` and parses the stream
+([README](../README.md#persistent-sessions)). With a Console API key injected at the proxy,
+both modes work. Interactive Claude Code also probes `platform.claude.com/v1/oauth/hello` at
+startup and fails only if that host is blocked, so interactive runs allowlist
+`platform.claude.com/v1/oauth/**`.
 
 ## The session model
 
@@ -174,28 +172,27 @@ full mechanism, the DNS story, the ranked fallbacks, and the live-verification r
 
 ## Concrete stack
 
-- Proxy: mitmproxy plus a small addon — allowlist engine, SNI==Host, header/body/query
-  enforcement, secret injection, audit log. See [DSL.md](./DSL.md) and
-  [`mitmaddon/`](../mitmaddon/). Do not hand-roll TLS interception. Reuse mitmproxy, and
-  keep the rule engine dependency-free.
+- Proxy: mitmproxy plus a small addon ([DSL.md](./DSL.md), [`mitmaddon/`](../mitmaddon/)).
+  Do not hand-roll TLS interception. Reuse mitmproxy, and keep the rule engine
+  dependency-free.
 - microVM: microsandbox for one tool on both OSes (Apache 2.0, libkrun), or Lima plus
   Firecracker for maturity.
 - Guest image: nothing hand-written. A base distro image plus one layer per profile,
-  synthesized at build time and cached by a hash of its inputs. A profile pairs an install
-  step with the egress rules that capability needs, so image and policy are declared once,
-  together. Agent harnesses are profiles too: nothing agent-specific is baked into the base.
+  synthesized at build time and cached by a hash of its inputs, so image and policy are
+  declared once, together. Agent harnesses are profiles too: nothing agent-specific is
+  baked into the base ([README](../README.md#profiles)).
 
 ## Hardening checklist
 
-- [ ] The agent process tree runs entirely inside the guest. The host runs only the control
-      CLI and the proxy.
+- [ ] The whole agent process tree runs inside the guest. The host runs only the CLI and
+      the proxy.
 - [ ] Exactly one virtiofs mount (the project directory). No credentials or dotfiles mounted.
 - [ ] Guest egress is default-deny with only the session's proxy port reachable, DNS
       included, enforced outside the guest (Tier 1).
 - [ ] Private CA: certificate in the guest trust store and all language env vars. The
       private key stays host-only.
-- [ ] The proxy enforces SNI==Host, per-request method and path, header, body, and query
-      constraints, and writes the audit log.
+- [ ] The proxy enforces SNI==Host and the per-request method, path, header, body, and
+      query constraints, and writes the audit log.
 - [ ] LLM and git secrets are injected by the proxy, never written into the guest.
 - [ ] Package registries are download-only. Publish is blocked.
 - [ ] Git push is gated on human review, or repo-scoped and size-capped.
