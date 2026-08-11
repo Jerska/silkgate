@@ -150,12 +150,31 @@ The UI reads only the machine-readable `events-*.jsonl` files (see [Layout](#lay
 pre-feature mixed-format `proxy-*.log` files are never parsed, so its history begins
 with the first proxy started after the events mirror shipped.
 
-## Handing a guest real git: `--branch`
+## Handing a guest real git: `--checkout` and `--branch`
 
-Run `run` or `up` from inside a repository with `--with git --branch <new-name>` and the guest
-gets a working checkout on that branch at `/workspace`, cloned inside the VM from a **read-only**
-mount of the repo's `.git`. The workspace mount holds no git metadata at all, so there is nothing
-on it for a guest to rewrite; commits are the deliverable, and file modes ride in them.
+The git story is two layers. **`--checkout [REF]` is the primitive**: run `run` or `up` from
+inside a repository with `--with git --checkout` and the guest gets a disposable, writable
+checkout of the repo at REF (default `HEAD`) at `/workspace` — **committed content only**, so
+untracked files such as `.env` never enter the guest. The repo's `.git` is mounted read-only at
+`/silkgate/base.git` and the guest clones from it: hooks and reflogs are copied into the clone,
+the LFS store is mounted when the repo uses one, and a commit identity is set so local commits
+do not fail. The checkout is detached at REF — "no deliverable branch" is structural — and
+nothing written in the guest returns to the host, commits included: the worktree lives in the
+guest's own rootfs and dies with the VM, so **printed output is the deliverable**.
+
+```sh
+cd ~/projects/foo
+silkgate run --with git --with claude --checkout -- \
+  silkgate-claude -p "why does auth reject expired-but-refreshable tokens? cite files"
+```
+
+**`--branch NAME` builds on it** and changes exactly this: the worktree moves from a guest-only
+folder to the writable host-derived mount (`.silkgate/sandboxes/<name>` under the repo root); a
+named branch is created at the base — `HEAD`, or REF when `--checkout REF` is given beside it —
+and its commits return to the host via bundle/harvest, **fast-forward-only**;
+`GIT_DIR`/`GIT_WORK_TREE` are exported into every exec; and teardown harvests the branch and
+reaps the derived workspace. The workspace mount holds no git metadata at all, so there is
+nothing on it for a guest to rewrite; commits are the deliverable, and file modes ride in them.
 
 ```sh
 cd ~/projects/foo
@@ -317,8 +336,9 @@ unable to reach the network any other way — otherwise the proxy is advisory.
   A read-write mount holding a `.git` **directory** anywhere under it is refused — hooks and
   config would become guest-writable, host code execution the next time a human runs git
   there — unless `--allow-git-dir` accepts that risk explicitly; a linked worktree's `.git`
-  **file** passes either mode, with a printed note. Steering: an agent that only reads code
-  gets `-v DIR:/workspace` (ro is the default); one whose commits are the deliverable gets
-  `--branch`.
+  **file** passes either mode, with a printed note. Steering, by what the guest needs: a
+  read-only shelf of host files → `-v DIR:DST` (ro is the default); a writable scratch
+  checkout of the repo, printed output as the deliverable → `--checkout`; commits as the
+  deliverable → `--branch`.
 - The `probe` profile exists for `verify` only: it opens the Debian mirrors, so every other
   command refuses to compose it.

@@ -101,6 +101,33 @@ class CliCase(unittest.TestCase):
         machine with no docker/msb/mitmproxy installed."""
         return mock.patch.object(sg, "preflight", lambda *binaries: None)
 
+    def provision_capture(self, argv):
+        """Everything cmd_run/cmd_up hand _provision_session, captured at the call and
+        the run stopped there — before any proxy or msb work."""
+        seen = {}
+
+        def spy(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
+                context=None, context_paths=()):
+            seen.update(name=name, mounts=mounts, ws=ws, env=env, meta=meta_extra,
+                        context=context)
+            raise SystemExit(42)
+
+        with self.no_preflight(), \
+                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
+                mock.patch.object(sg, "_proxy_running", lambda: True), \
+                mock.patch.object(sg, "ensure_proxy",
+                                  lambda port: {"log": "/dev/null", "ports": [8090]}), \
+                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(sg, "_provision_session", spy), \
+                mock.patch.object(sg, "_release_port", lambda *a, **k: None), \
+                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(sys, "argv", ["silkgate"] + argv), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit) as caught:
+            sg.main()
+        self.assertEqual(caught.exception.code, 42, argv)
+        return seen
+
 
 class TestBuildArguments(CliCase):
     """Finding 5: a version and a base image reach a generated Dockerfile that docker
@@ -720,6 +747,8 @@ class TestPreflight(CliCase):
             (["up", "--name", "pf1"], {"docker", "msb", "mitmdump"}),
             (["run", "--image", "img:1", "--", "true"], {"msb", "mitmdump"}),
             (["up", "--name", "pf2", "--image", "img:1"], {"msb", "mitmdump"}),
+            (["run", "--checkout", "--", "true"], {"docker", "msb", "mitmdump", "git"}),
+            (["up", "--name", "pf4", "--checkout"], {"docker", "msb", "mitmdump", "git"}),
             (["verify"], {"msb", "mitmdump"}),
             (["down", "pf3"], {"msb"}),
         ]:
@@ -739,7 +768,7 @@ class TestPreflight(CliCase):
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
             sg.main()
         self.assertEqual(caught.exception.code, 1)
-        # A plain run's toolchain — git is hinted too, but only --branch demands it.
+        # A plain run's toolchain — git is hinted too, but only --checkout/--branch demand it.
         for binary in ("docker", "msb", "mitmdump"):
             self.assertIn(f"{binary} — {sg._TOOL_HINTS[binary]}", err.getvalue())
         # Bytes: str.splitlines would split on the (invisible) mark itself.
@@ -893,13 +922,14 @@ class TestMarkedArgparse(CliCase):
         proc = self.run_cli("run", "--", "true", path="/nonexistent-path-entry")
         self.assertEqual(proc.returncode, 1)
         self.assert_marked(proc.stderr)
-        # A plain run's toolchain — git is in _TOOL_HINTS too, but only --branch demands it.
+        # A plain run's toolchain — git is in _TOOL_HINTS too, but only --checkout/--branch demand it.
         for binary in ("docker", "msb", "mitmdump"):
             self.assertIn(f"{binary} — {sg._TOOL_HINTS[binary]}".encode(), proc.stderr)
 
 
-class TestBranchGuards(CliCase):
-    """--branch: what run/up refuse before any host process, and the derived-workspace locks."""
+class GitRepoCase(CliCase):
+    """Fixtures the --branch and --checkout suites share: a scratch repository, a cwd
+    guard, a stub git profile, and refusal-through-main()."""
 
     def argv_refuses(self, needle, argv):
         with mock.patch.object(sys, "argv", ["silkgate"] + argv), self.no_preflight():
@@ -920,6 +950,11 @@ class TestBranchGuards(CliCase):
                            env=_git_env())
         return root
 
+    def _rev(self, root, ref="HEAD"):
+        return subprocess.run(["git", "-C", str(root), "rev-parse", ref],
+                              capture_output=True, text=True, check=True,
+                              env=_git_env()).stdout.strip()
+
     @contextlib.contextmanager
     def _cwd(self, path):
         old = os.getcwd()
@@ -928,6 +963,10 @@ class TestBranchGuards(CliCase):
             yield
         finally:
             os.chdir(old)
+
+
+class TestBranchGuards(GitRepoCase):
+    """--branch: what run/up refuse before any host process, and the derived-workspace locks."""
 
     # --- flag surface, no git needed ------------------------------------------
 
@@ -1014,7 +1053,9 @@ class TestBranchGuards(CliCase):
         with self._cwd(empty):
             self.refuses("inside a git work tree", sg._branch_spec, "x", self.git_profile(), [])
         with self._cwd(self._repo(commit=False, name="unborn")):
-            self.refuses("no commits", sg._branch_spec, "x", self.git_profile(), [])
+            message = self.refuses("cannot resolve", sg._branch_spec, "x",
+                                   self.git_profile(), [])
+        self.assertIn("'HEAD'", message)            # the unresolvable ref is named
 
     @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
     def test_branch_spec_from_a_linked_worktree(self):
@@ -1141,6 +1182,201 @@ class TestBranchGuards(CliCase):
             self.assertEqual(seen["spec"], fake_spec)
             self.assertTrue(seen["name"] == "w1" if argv[0] == "up"
                             else sg._name_ok(seen["name"]))
+
+
+class TestCheckoutSessions(GitRepoCase):
+    """--checkout [REF]: a disposable, guest-local checkout of the enclosing repo, with
+    --branch layered on top of the same validation and mounts."""
+
+    # --- flag surface, no git needed ------------------------------------------
+
+    def test_checkout_needs_the_git_profile(self):
+        self.argv_refuses("--with git", ["run", "--checkout", "--", "true"])
+        self.argv_refuses("--with git", ["up", "--name", "co1", "--checkout"])
+
+    def test_checkout_owns_its_guest_env(self):
+        self.argv_refuses("conflicts with --checkout",
+                          ["run", "--with", "git", "--checkout",
+                           "-e", "GIT_DIR=/x", "--", "true"])
+        self.argv_refuses("conflicts with --checkout",
+                          ["up", "--name", "co2", "--with", "git", "--checkout",
+                           "-e", "GIT_WORK_TREE=/x"])
+
+    def test_checkout_owns_workspace_against_mounts(self):
+        d = str(self.tmp)
+        for dst in ("/workspace", "/workspace/sub"):
+            self.argv_refuses("owns /workspace",
+                              ["run", "--checkout", "-v", f"{d}:{dst}", "--", "true"])
+
+    def test_ref_charset_precheck_needs_no_git(self):
+        for bad in ("-x", "a b", "a\tb"):
+            self.refuses("invalid ref", sg._checkout_spec, bad, self.git_profile(), [])
+
+    def test_run_and_up_demand_host_git(self):
+        # preflight must name git before any repo probe runs.
+        for argv in (["run", "--checkout", "--", "true"],
+                     ["up", "--name", "co3", "--checkout"]):
+            seen = []
+
+            def spy(*binaries):
+                seen.extend(binaries)
+                raise SystemExit(42)
+
+            with mock.patch.object(sg, "preflight", spy), \
+                    mock.patch.object(sys, "argv", ["silkgate"] + argv), \
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as caught:
+                sg.main()
+            self.assertEqual(caught.exception.code, 42, argv)
+            self.assertIn("git", seen, argv)
+
+    # --- repo validation, real git --------------------------------------------
+
+    @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
+    def test_bare_flag_resolves_head_and_explicit_refs_resolve(self):
+        root = self._repo()
+        first = self._rev(root)
+        subprocess.run(["git", "-C", str(root), "tag", "v1"],
+                       check=True, capture_output=True, env=_git_env())
+        subprocess.run(["git", "-C", str(root), "branch", "keep"],
+                       check=True, capture_output=True, env=_git_env())
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=t",
+                        "-c", "user.email=t@t.invalid", "commit", "-q",
+                        "--allow-empty", "-m", "second"], check=True, capture_output=True,
+                       env=_git_env())
+        head = self._rev(root)
+        with self._cwd(root):
+            bare = sg._checkout_spec("HEAD", self.git_profile(), [])
+            self.assertEqual(bare["base"], head)
+            for ref in ("v1", "keep", first, first[:10]):    # tag, branch, sha, short sha
+                spec = sg._checkout_spec(ref, self.git_profile(), [])
+                self.assertEqual(spec["base"], first, ref)
+                self.assertEqual(spec["checkout"], ref)
+        self.assertEqual(Path(bare["git_dir"]), (root / ".git").resolve())
+        self.assertEqual(Path(bare["repo_root"]), root.resolve())
+        self.assertNotIn("branch", bare)
+        self.assertNotIn("workspace_derived", bare)
+
+    @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
+    def test_a_bad_ref_dies_naming_it(self):
+        with self._cwd(self._repo()):
+            message = self.refuses("cannot resolve", sg._checkout_spec, "nope",
+                                   self.git_profile(), [])
+        self.assertIn("'nope'", message)
+
+    @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
+    def test_checkout_spec_dies_outside_a_repo(self):
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        with self._cwd(empty):
+            self.refuses("inside a git work tree", sg._checkout_spec, "HEAD",
+                         self.git_profile(), [])
+
+    @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
+    def test_checkout_leaves_info_exclude_alone(self):
+        # No host directory is created, so no .silkgate/ exclusion either.
+        root = self._repo()
+        with self._cwd(root):
+            sg._checkout_spec("HEAD", self.git_profile(), [])
+        exclude = root / ".git" / "info" / "exclude"
+        self.assertNotIn(".silkgate/",
+                         exclude.read_text().splitlines() if exclude.is_file() else [])
+
+    # --- composition with --branch ---------------------------------------------
+
+    @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
+    def test_branch_base_is_the_checkout_ref_or_head(self):
+        root = self._repo()
+        first = self._rev(root)
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=t",
+                        "-c", "user.email=t@t.invalid", "commit", "-q",
+                        "--allow-empty", "-m", "second"], check=True, capture_output=True,
+                       env=_git_env())
+        head = self._rev(root)
+        with self._cwd(root):
+            based = sg._branch_spec("agent/x", self.git_profile(), [], first)
+            plain = sg._branch_spec("agent/y", self.git_profile(), [])
+        self.assertEqual(based["base"], first)
+        self.assertEqual(plain["base"], head)
+
+    def test_run_wires_the_checkout_ref_into_branch_spec(self):
+        seen = {}
+
+        def spy(branch, profiles, env, ref="HEAD"):
+            seen["branch"], seen["ref"] = branch, ref
+            raise SystemExit(42)
+
+        for argv, ref in ((["run", "--with", "git", "--branch", "nb",
+                            "--checkout", "abc123", "--", "true"], "abc123"),
+                          (["run", "--with", "git", "--branch", "nb", "--", "true"], "HEAD")):
+            with mock.patch.object(sys, "argv", ["silkgate"] + argv), \
+                    mock.patch.object(sg, "_branch_spec", spy), \
+                    self.no_preflight(), self.assertRaises(SystemExit) as caught:
+                sg.main()
+            self.assertEqual(caught.exception.code, 42, argv)
+            self.assertEqual((seen["branch"], seen["ref"]), ("nb", ref), argv)
+
+    # --- mounts and provisioning -------------------------------------------------
+
+    def test_checkout_workspace_mounts(self):
+        root = self.tmp / "proj"
+        (root / ".git").mkdir(parents=True)
+        spec = {"checkout": "HEAD", "git_dir": str(root / ".git"), "base": "0" * 40,
+                "repo_root": str(root)}
+        mounts = sg._checkout_workspace(spec)
+        self.assertEqual(mounts, [f"{root / '.git'}:/silkgate/base.git:ro"])
+        self.assertFalse(any("/workspace" in m for m in mounts), "no /workspace mount")
+        (root / ".git" / "lfs").mkdir()
+        self.assertIn(f"{root / '.git' / 'lfs'}:/root/lfsstore:rw",
+                      sg._checkout_workspace(spec))
+
+    def test_checkout_session_provisions_without_workspace(self):
+        fake = {"checkout": "v1", "git_dir": "/g/.git", "base": "0" * 40, "repo_root": "/g"}
+        with mock.patch.object(sg, "_checkout_spec", lambda *a: fake):
+            seen = self.provision_capture(["run", "--with", "git", "--checkout", "v1",
+                                           "--", "true"])
+        self.assertEqual(seen["mounts"], ["/g/.git:/silkgate/base.git:ro"])
+        self.assertIsNone(seen["ws"])
+        self.assertEqual(seen["env"], [], "no GIT_DIR/GIT_WORK_TREE pair for a checkout")
+        self.assertEqual(seen["meta"]["checkout"], "v1")
+        self.assertEqual(seen["meta"]["base"], "0" * 40)
+        self.assertNotIn("branch", seen["meta"])
+        self.assertNotIn("workspace_derived", seen["meta"])
+        self.assertIn("disposable checkout of the project at `v1`", seen["context"])
+        self.assertIn("printed output is the deliverable", seen["context"])
+
+    # --- a branchless session at harvest/down -------------------------------------
+
+    def plant_checkout_meta(self, name):
+        sdir = sg.SESSIONS_DIR / name
+        sdir.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sdir, ignore_errors=True)
+        (sdir / "meta.json").write_text(json.dumps(
+            {"name": name, "sandbox": f"sg-{name}", "port": 8090, "checkout": "HEAD",
+             "base": "0" * 40, "git_dir": "/nowhere/.git", "repo_root": "/nowhere"}))
+
+    def test_harvest_refuses_a_checkout_session(self):
+        self.plant_checkout_meta("co9aa")
+        args = mock.Mock()
+        args.name = "co9aa"
+        with self.no_preflight():
+            self.refuses("no --branch", sg.cmd_harvest, args)
+
+    def test_down_on_a_checkout_session_harvests_and_reaps_nothing(self):
+        self.plant_checkout_meta("co8bb")
+        calls = []
+        args = mock.Mock()
+        args.name = "co8bb"
+        with self.no_preflight(), \
+                mock.patch.object(sg, "_harvest_branch",
+                                  lambda meta: calls.append("harvest") or True), \
+                mock.patch.object(sg, "_reap_derived_workspace",
+                                  lambda meta: calls.append("reap")), \
+                mock.patch.object(sg, "_teardown_session",
+                                  lambda meta: calls.append("teardown")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            sg.cmd_down(args)
+        self.assertEqual(calls, ["teardown"])
 
 
 class TestGithubGrants(CliCase):
@@ -1358,33 +1594,6 @@ class TestMountProvisioning(CliCase):
     list is the whole enforcement, and the meta `mounts` list is what ls and the guest
     brief stand on — so both are proven through main(), not by calling _mount_args."""
 
-    def provision_capture(self, argv):
-        """Everything cmd_run/cmd_up hand _provision_session, captured at the call and
-        the run stopped there — before any proxy or msb work."""
-        seen = {}
-
-        def spy(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
-                context=None, context_paths=()):
-            seen.update(name=name, mounts=mounts, ws=ws, env=env, meta=meta_extra,
-                        context=context)
-            raise SystemExit(42)
-
-        with self.no_preflight(), \
-                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
-                mock.patch.object(sg, "_proxy_running", lambda: True), \
-                mock.patch.object(sg, "ensure_proxy",
-                                  lambda port: {"log": "/dev/null", "ports": [8090]}), \
-                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
-                mock.patch.object(sg, "_provision_session", spy), \
-                mock.patch.object(sg, "_release_port", lambda *a, **k: None), \
-                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
-                mock.patch.object(sys, "argv", ["silkgate"] + argv), \
-                contextlib.redirect_stderr(io.StringIO()), \
-                self.assertRaises(SystemExit) as caught:
-            sg.main()
-        self.assertEqual(caught.exception.code, 42, argv)
-        return seen
-
     def test_mounts_reach_msb_meta_and_brief(self):
         project = self.tmp / "project"
         project.mkdir()
@@ -1411,9 +1620,9 @@ class TestGuestBriefMounts(CliCase):
     """session_context keys the /workspace sentence on the mount at /workspace and lists
     every other mount with its mode."""
 
-    def ctx(self, mounts, branch=None):
+    def ctx(self, mounts, branch=None, checkout=None):
         return sg.session_context([], sg.load_ruleset(""), mounts=mounts,
-                                  persistent=False, branch=branch)
+                                  persistent=False, branch=branch, checkout=checkout)
 
     def test_workspace_rw_text(self):
         ctx = self.ctx([("/h/p", "/workspace", "rw")])
@@ -1438,6 +1647,19 @@ class TestGuestBriefMounts(CliCase):
         self.assertIn("**`agent/x`**", ctx)
         self.assertIn("Commits are the deliverable", ctx)
         self.assertIn("`/data` — read-only", ctx)
+
+    def test_checkout_text(self):
+        ctx = self.ctx([], checkout="v1.2")
+        self.assertIn("disposable checkout of the project at `v1.2`", ctx)
+        self.assertIn("printed output is the deliverable", ctx)
+        self.assertIn("no\nremote accepts a push", ctx)
+        self.assertIn("`git fetch origin` and `git log` work", ctx)
+
+    def test_branch_text_wins_over_the_checkout_base(self):
+        # --branch --checkout REF: REF is the base, the session is still a branch one.
+        ctx = self.ctx([], branch="agent/x", checkout="v1.2")
+        self.assertIn("**`agent/x`**", ctx)
+        self.assertNotIn("disposable checkout", ctx)
 
 
 if __name__ == "__main__":

@@ -104,7 +104,7 @@ _TOOL_HINTS = {
     "docker": "images are built with docker, then loaded into msb",
     "msb": "curl -fsSL https://install.microsandbox.dev | sh",
     "mitmdump": "pip install mitmproxy",
-    "git": "--branch drives the host repository with it",
+    "git": "--checkout/--branch drive the host repository with it",
 }
 
 
@@ -896,11 +896,12 @@ def ensure_image(profiles, image, *, base=BASE_IMAGE):
 # a courtesy to a cooperating agent — it saves turns wasted on things the sandbox forbids
 # — and never a control: an adversarial guest ignores it, so nothing may rely on it.
 
-def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None,
+def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, checkout=None,
                     github_read=(), github_write=()):
     """The markdown a guest is handed about its own sandbox. `mounts` is the validated
-    -v list as (host, guest, mode) triples; the mode of a mount at /workspace keys the
-    workspace sentence, and every other mount is listed with its own."""
+    -v list as (host, guest, mode) triples; the active mode — branch, checkout, or the
+    mode of a mount at /workspace — keys the workspace sentence, and every other mount
+    is listed with its own."""
     lines = [
         "# Where you are running: a silkgate sandbox",
         "",
@@ -939,6 +940,14 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None,
             "rewrite or amend commits you have already made: the branch only ever moves forward.",
             "Do not push: there is no remote that accepts one. If you need history, `git log` and",
             "`git fetch origin` work; the clone's origin is a read-only mount of the host repo.",
+        ]
+    elif checkout:
+        lines += [
+            f"`/workspace` is a disposable checkout of the project at `{checkout}` as of session",
+            "start, and git works: local commits are fine. Nothing you write leaves this machine —",
+            "commits included — so **printed output is the deliverable.** The clone's origin is a",
+            "read-only mount of the host repo, so `git fetch origin` and `git log` work; no",
+            "remote accepts a push.",
         ]
     elif ws_mode == "ro":
         lines += [
@@ -2097,13 +2106,15 @@ def _maybe_stop_proxy():
         stop_proxy(meta)
 
 
-# --- branch sessions: a clone in the guest, a branch back on the host -----------
-# The guest clones from a read-only mount of the host repo's gitdir into its own rootfs, works
-# a branch there, and hands commits back as a bundle the host fetches under fsck and promotes
-# fast-forward-only. The workspace mount holds zero git metadata (GIT_DIR is rootfs-side), so
-# there is nothing on the mount for a guest to rewrite; the one writable piece of host git
-# state is `.git/lfs` — content-addressed, SHA-verified on read, so a hostile guest costs
-# availability (a re-download), never integrity.
+# --- checkout/branch sessions: a clone in the guest, from the host repo ---------
+# The guest clones from a read-only mount of the host repo's gitdir. --checkout stops there:
+# the clone lives at /workspace in the guest's own rootfs, detached at the resolved REF, and
+# dies with the VM — nothing returns to the host. --branch layers the deliverable on top: it
+# works a named branch in a host-derived workspace and hands commits back as a bundle the host
+# fetches under fsck and promotes fast-forward-only. A branch workspace mount holds zero git
+# metadata (GIT_DIR is rootfs-side), so there is nothing on the mount for a guest to rewrite;
+# the one writable piece of host git state is `.git/lfs` — content-addressed, SHA-verified on
+# read, so a hostile guest costs availability (a re-download), never integrity.
 
 _BRANCH_ENV = ("GIT_DIR=/root/gitdir/.git", "GIT_WORK_TREE=/workspace")
 _GIT_TIMEOUT = 120                 # host git during harvest: bounded, per the deferral contract
@@ -2138,8 +2149,14 @@ def _git(git_dir, *argv):
 
 
 def _check_mount_flags(args):
-    """--branch owns /workspace, so a -v mount at or under it is refused with the flag."""
-    if not getattr(args, "branch", None):
+    """--checkout/--branch own /workspace, so a -v mount at or under it is refused with
+    them — under it too, because that would be nested virtiofs on a branch workspace and
+    a directory the checkout clone needs empty."""
+    if getattr(args, "branch", None):
+        owner = "--branch"
+    elif getattr(args, "checkout", None) is not None:
+        owner = "--checkout"
+    else:
         return
     for spec in args.mount or ():
         parsed = _split_mount(spec)
@@ -2147,44 +2164,69 @@ def _check_mount_flags(args):
             continue                        # argparse already refused it; _mount_args re-dies
         dst = _normalize_dst(parsed[1])
         if dst == "/workspace" or dst.startswith("/workspace/"):
-            die(f"-v {spec} collides with --branch, which owns /workspace in the guest")
+            die(f"-v {spec} collides with {owner}, which owns /workspace in the guest")
 
 
-def _branch_spec(branch, profiles, env):
-    """Validate --branch against the enclosing repo; the meta extras a branch session records.
+def _checkout_repo(flag, ref, profiles, env):
+    """The validation --checkout and --branch share -> (git_dir, repo_root, base sha).
 
-    Everything here dies before any host process starts: the guest needs git in the image, the
-    name must be a legal single-level ref, the enclosing repo must have a commit to base on,
-    and the branch is this session's deliverable — an existing one is refused, never moved.
+    Everything here dies before any host process starts: the guest needs git in the image,
+    the enclosing repo must exist, and REF must name a commit to base the checkout on. The
+    -e refusal covers both modes — an inherited GIT_DIR/GIT_WORK_TREE would point every
+    guest git call away from the checkout this session exists to provide.
     """
     if not any(p.name == "git" for p in profiles):
-        die("--branch needs git in the guest — add --with git")
+        die(f"{flag} needs git in the guest — add --with git")
     for pair in env:
         if pair.partition("=")[0] in ("GIT_DIR", "GIT_WORK_TREE"):
-            die(f"-e {pair.partition('=')[0]} conflicts with --branch, which owns it in the guest")
-    if branch.startswith("-") or any(c.isspace() or ord(c) < 0x20 for c in branch):
-        die(f"invalid branch name {branch!r}")
-    if subprocess.run([which("git"), "check-ref-format", "--branch", branch],
-                      capture_output=True, env=_host_git_env()).returncode:
-        die(f"invalid branch name {branch!r} (git check-ref-format refused it)")
+            die(f"-e {pair.partition('=')[0]} conflicts with {flag}, which owns the guest's "
+                "git environment")
+    if ref.startswith("-") or any(c.isspace() or ord(c) < 0x20 for c in ref):
+        die(f"invalid ref {ref!r}")
     probe = subprocess.run([which("git"), "rev-parse", "--path-format=absolute",
                             "--git-common-dir", "--show-toplevel"],
                            capture_output=True, text=True, env=_host_git_env())
     if probe.returncode:
-        die("--branch needs the current directory to be inside a git work tree — cd into the "
-            "repo whose branch this session should produce")
+        die(f"{flag} needs the current directory to be inside a git work tree — cd into "
+            "the repo this session should check out")
     git_dir, repo_root = probe.stdout.splitlines()[:2]
+    base = subprocess.run([which("git"), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+                          capture_output=True, text=True, env=_host_git_env())
+    if base.returncode:
+        die(f"cannot resolve {ref!r} to a commit in this repository — {flag} needs a "
+            "base commit")
+    return git_dir, repo_root, base.stdout.strip()
+
+
+def _checkout_spec(ref, profiles, env):
+    """Validate --checkout against the enclosing repo; the meta extras a plain-checkout
+    session records. No branch parts and no host directory is created: the checkout lives
+    and dies in the guest's own rootfs."""
+    git_dir, repo_root, base = _checkout_repo("--checkout", ref, profiles, env)
+    return {"checkout": ref, "git_dir": git_dir, "base": base, "repo_root": repo_root}
+
+
+def _branch_spec(branch, profiles, env, ref="HEAD"):
+    """Validate --branch against the enclosing repo; the meta extras a branch session records.
+
+    The repo and base-commit half is _checkout_repo's, shared with --checkout; `ref` is the
+    branch base (--checkout REF beside --branch names it, HEAD otherwise). The branch parts
+    die before any host process starts too: the name must be a legal single-level ref, and
+    the branch is this session's deliverable — an existing one is refused, never moved.
+    """
+    if branch.startswith("-") or any(c.isspace() or ord(c) < 0x20 for c in branch):
+        die(f"invalid branch name {branch!r}")
+    git_dir, repo_root, base = _checkout_repo("--branch", ref, profiles, env)
+    if subprocess.run([which("git"), "check-ref-format", "--branch", branch],
+                      capture_output=True, env=_host_git_env()).returncode:
+        die(f"invalid branch name {branch!r} (git check-ref-format refused it)")
     if not subprocess.run([which("git"), "--git-dir", git_dir, "show-ref", "--verify",
                            "--quiet", f"refs/heads/{branch}"], capture_output=True,
                           env=_host_git_env()).returncode:
         die(f"branch {branch!r} already exists — the branch is this session's deliverable; "
             "pick a new name")
-    head = subprocess.run([which("git"), "rev-parse", "--verify", "HEAD^{commit}"],
-                          capture_output=True, text=True, env=_host_git_env())
-    if head.returncode:
-        die("the repository has no commits — --branch needs a base commit")
     _exclude_silkgate(Path(git_dir))
-    return {"branch": branch, "git_dir": git_dir, "base": head.stdout.strip(),
+    return {"branch": branch, "git_dir": git_dir, "base": base,
             "repo_root": repo_root, "workspace_derived": True}
 
 
@@ -2226,6 +2268,19 @@ def _branch_workspace(spec, name):
     return ws, mounts
 
 
+def _checkout_workspace(spec):
+    """The mounts of a plain-checkout session: _branch_workspace minus the derived dir.
+
+    No /workspace mount at all — /workspace already exists in the rootfs (WORKDIR) as a
+    writable guest-local directory, so the checkout dies with the VM and nothing the guest
+    writes there can reach the host."""
+    mounts = [f"{spec['git_dir']}:/silkgate/base.git:ro"]
+    # The whole of .git/lfs, for the same EXDEV reason as _branch_workspace above.
+    if (Path(spec["git_dir"]) / "lfs").is_dir():
+        mounts.append(f"{spec['git_dir']}/lfs:/root/lfsstore:rw")
+    return mounts
+
+
 # Runs once per branch session, between the Tier-1 gate and the handover, with GIT_DIR unset
 # for the clone: the create-time -e pair is inherited by every exec, this one included, and
 # would point the clone at its own destination. lfs.storage is set before the checkout so the
@@ -2250,6 +2305,33 @@ def _setup_branch_guest(sandbox, branch, base, session):
     """Clone + checkout in the guest, streamed (a big repo's clone must show progress)."""
     rc = run_guest(lambda c: msb_exec_argv(sandbox, c),
                    ["sh", "-c", _BRANCH_SETUP_SH, "_", branch, base, session], tty=False)
+    if rc:
+        die("guest git setup failed — session torn down")
+
+
+# Runs once per plain-checkout session, between the Tier-1 gate and the handover. /workspace
+# is not a mount here, so this is a normal clone with .git inside it — no GIT_DIR/GIT_WORK_TREE
+# env pair anywhere. Identity is set so local commits do not fail; the detached HEAD makes
+# "no deliverable branch" structural rather than advisory. lfs.storage is set before the
+# checkout so the smudge of an LFS-tracked tree reads the mounted store.
+_CHECKOUT_SETUP_SH = """\
+set -eu
+base=$1; session=$2
+git clone --quiet --no-checkout /silkgate/base.git /workspace
+if [ -d /silkgate/base.git/hooks ]; then cp -a /silkgate/base.git/hooks/. /workspace/.git/hooks/; fi
+if [ -d /silkgate/base.git/logs ]; then mkdir -p /workspace/.git/logs && cp -a /silkgate/base.git/logs/. /workspace/.git/logs/; fi
+git -C /workspace config lfs.storage /root/lfsstore
+if command -v git-lfs >/dev/null 2>&1; then git -C /workspace lfs install --skip-repo >/dev/null; fi
+git -C /workspace config user.name "Claude (silkgate/$session)"
+git -C /workspace config user.email "claude-$session@silkgate.invalid"
+git -C /workspace checkout --detach --quiet "$base"
+"""
+
+
+def _setup_checkout_guest(sandbox, base, session):
+    """Clone + detached checkout in the guest, streamed like _setup_branch_guest."""
+    rc = run_guest(lambda c: msb_exec_argv(sandbox, c),
+                   ["sh", "-c", _CHECKOUT_SETUP_SH, "_", base, session], tty=False)
     if rc:
         die("guest git setup failed — session torn down")
 
@@ -2497,20 +2579,27 @@ def cmd_run(args):
     # host process. An explicit --image is run as-is, never built, so docker is not its
     # business.
     preflight(*(() if args.image else _build_tools()), "msb", "mitmdump",
-              *(("git",) if args.branch else ()))
+              *(("git",) if args.branch or args.checkout is not None else ()))
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
-    spec = _branch_spec(args.branch, profiles, args.env) if args.branch else None
+    if args.branch:
+        spec = _branch_spec(args.branch, profiles, args.env, args.checkout or "HEAD")
+    elif args.checkout is not None:
+        spec = _checkout_spec(args.checkout, profiles, args.env)
+    else:
+        spec = None
     name = uuid4().hex[:6]
     vmounts = _mount_args(args.mount, allow_git_dir=args.allow_git_dir)
     mounts = [f"{host}:{guest}:{mode}" for host, guest, mode in vmounts]
     ws = None
-    if spec:
+    if args.branch:
         ws, extra = _branch_workspace(spec, name)
         mounts += extra
+    elif spec:
+        mounts += _checkout_workspace(spec)
     image = ensure_image(profiles, args.image, base=args.base)
     proxy_was_running = _proxy_running()        # --port is the base port iff WE start it
     rc, provisioned, branch_ready, proxy = 1, False, False, None
-    create_env = list(args.env) + (list(_BRANCH_ENV) if spec else [])
+    create_env = list(args.env) + (list(_BRANCH_ENV) if args.branch else [])
     github_meta = {"github_read": github_read, "github_write": github_write} \
         if (github_read or github_write) else {}
     try:
@@ -2528,9 +2617,11 @@ def cmd_run(args):
             die(fault)                      # the finally below tears the session down
         if github_read or github_write:
             _setup_github_guest(sandbox_name(name))
-        if spec:
+        if args.branch:
             _setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
             branch_ready = True
+        elif spec:
+            _setup_checkout_guest(sandbox_name(name), spec["base"], name)
         say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
         rc = run_guest(lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
                        cmd, tty=tty)
@@ -2601,7 +2692,7 @@ def _context_for(args, profiles, ruleset, mounts, *, persistent):
     paths = [GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
                                if p.conf.get("context_path")]
     return session_context(profiles, ruleset, mounts=mounts, persistent=persistent,
-                           branch=args.branch,
+                           branch=args.branch, checkout=args.checkout,
                            github_read=getattr(args, "github_read", None) or (),
                            github_write=getattr(args, "github_write", None) or ()), paths
 
@@ -2620,17 +2711,24 @@ def cmd_up(args):
     # host process. An explicit --image is run as-is, never built, so docker is not its
     # business.
     preflight(*(() if args.image else _build_tools()), "msb", "mitmdump",
-              *(("git",) if args.branch else ()))
-    spec = _branch_spec(args.branch, profiles, args.env) if args.branch else None
+              *(("git",) if args.branch or args.checkout is not None else ()))
+    if args.branch:
+        spec = _branch_spec(args.branch, profiles, args.env, args.checkout or "HEAD")
+    elif args.checkout is not None:
+        spec = _checkout_spec(args.checkout, profiles, args.env)
+    else:
+        spec = None
     vmounts = _mount_args(args.mount, allow_git_dir=args.allow_git_dir)
     mounts = [f"{host}:{guest}:{mode}" for host, guest, mode in vmounts]
     ws = None
-    if spec:
+    if args.branch:
         ws, extra = _branch_workspace(spec, name)
         mounts += extra
+    elif spec:
+        mounts += _checkout_workspace(spec)
     image = ensure_image(profiles, args.image, base=args.base)
     provisioned = False
-    create_env = list(args.env) + (list(_BRANCH_ENV) if spec else [])
+    create_env = list(args.env) + (list(_BRANCH_ENV) if args.branch else [])
     github_meta = {"github_read": github_read, "github_write": github_write} \
         if (github_read or github_write) else {}
     try:
@@ -2649,8 +2747,10 @@ def cmd_up(args):
             die(fault)
         if github_read or github_write:
             _setup_github_guest(sandbox_name(name))
-        if spec:
+        if args.branch:
             _setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
+        elif spec:
+            _setup_checkout_guest(sandbox_name(name), spec["base"], name)
     except BaseException:
         # A session `up` never handed over is unwound whole, interrupt included:
         # nothing of the user's is in the guest yet — work accrues only once
@@ -2775,6 +2875,8 @@ def cmd_ls(args):
             parts = []
             if m.get("branch"):
                 parts.append(f"{m.get('workspace')} (branch {m['branch']})")
+            elif m.get("checkout"):
+                parts.append(f"(checkout {m['checkout']})")
             for entry in m.get("mounts") or []:
                 path, _, mode = str(entry).rpartition(":")
                 parts.append(f"{path} ({mode})")
@@ -4569,10 +4671,14 @@ def main():
                    help="allow an rw mount that holds .git directories — their hooks and "
                         "config become guest-writable, which is host code execution the "
                         "next time a human runs git there")
+    p.add_argument("--checkout", nargs="?", const="HEAD", default=None, metavar="REF",
+                   help="give the guest a disposable, writable checkout of the enclosing "
+                        "repo at REF (default HEAD) at /workspace — guest-local, nothing "
+                        "returns to the host (needs --with git)")
     p.add_argument("--branch", metavar="NAME",
-                   help="give the guest a git checkout of the enclosing repo on new branch "
-                        "NAME; its commits land in the host repo as that branch at teardown "
-                        "(needs --with git; owns /workspace, so no -v may target it)")
+                   help="like --checkout, but on new branch NAME whose commits land in the "
+                        "host repo at teardown; beside --checkout REF, REF is the branch "
+                        "base (needs --with git; owns /workspace, so no -v may target it)")
     p.add_argument("--github-read", action="append", metavar="OWNER/REPO",
                    type=_github_repo_arg,
                    help="grant clone/fetch/LFS-download/API-GET for OWNER/REPO; "
@@ -4604,9 +4710,13 @@ def main():
                    help="allow an rw mount that holds .git directories — their hooks and "
                         "config become guest-writable, which is host code execution the "
                         "next time a human runs git there")
+    p.add_argument("--checkout", nargs="?", const="HEAD", default=None, metavar="REF",
+                   help="give the guest a disposable, writable checkout of the enclosing "
+                        "repo at REF (default HEAD) at /workspace — guest-local, nothing "
+                        "returns to the host (needs --with git)")
     p.add_argument("--branch", metavar="NAME",
-                   help="give the guest a git checkout of the enclosing repo on new branch "
-                        "NAME; its commits land in the host repo as that branch at down "
+                   help="like --checkout, but on new branch NAME whose commits land in the "
+                        "host repo at down; beside --checkout REF, REF is the branch base "
                         "(needs --with git; owns /workspace, so no -v may target it)")
     p.add_argument("--github-read", action="append", metavar="OWNER/REPO",
                    type=_github_repo_arg,

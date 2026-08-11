@@ -73,9 +73,11 @@ make the network the only thing it can do — under inspection.
 
 **Mounts:** user-chosen, each guarded, read-only by default. `-v SRC:DST[:ro|rw]`
 (repeatable) mounts host directory SRC at guest DST via virtiofs, read-only unless the spec
-says `:rw`. (`--branch` instead derives its workspace under the repo's
-`.silkgate/sandboxes/` and mounts the host gitdir read-only — plus, with LFS in use, the host
-LFS store writable.) The CLI refuses mounts that would hand the guest the host itself: `/`,
+says `:rw`. (The git modes shape their own mounts: `--checkout` mounts just the host gitdir,
+read-only at `/silkgate/base.git` — the guest's worktree is its own rootfs, holds committed
+content only, and dies with the VM; `--branch` adds a workspace derived under the repo's
+`.silkgate/sandboxes/`, mounted read-write — plus, with LFS in use, the host LFS store
+writable in either mode.) The CLI refuses mounts that would hand the guest the host itself: `/`,
 `$HOME`, and silkgate's own checkout and state, in either mode; a read-write mount is also
 refused when a `.git` **directory** sits anywhere under it — hooks and `core.fsmonitor` there
 are host code execution the next time a human runs git in it. A linked worktree's `.git`
@@ -141,9 +143,11 @@ Claude Code nor Codex ships, and the whole reason for the exercise.
 - **`npm install`:** guest → proxy → `GET registry.npmjs.org`. A malicious postinstall runs
   *inside the VM* (contained) and can't phone home (no egress except inspected proxy).
 - **Exfil attempt via prompt injection:** no `~/.ssh` in the guest — the only host paths are
-  the mounts the user chose, each guarded and read-only by default; and reading
-  `/workspace/.env` then POSTing to `evil.com` is dropped at the proxy (not allowlisted) and
-  to `github.com` is blocked (size/method/SNI≠Host). Two independent failures required.
+  the mounts the user chose, each guarded and read-only by default, and a `--checkout` guest
+  holds committed content only, so an untracked `/workspace/.env` never entered it; reading a
+  secret that *was* handed in then POSTing it to `evil.com` is dropped at the proxy (not
+  allowlisted) and to `github.com` is blocked (size/method/SNI≠Host). Two independent
+  failures required.
 - **Git push:** safest default — agent commits to a branch *inside the VM*; the **human
   pushes from the host** after reviewing the diff. For autonomy, allow push to one repo only,
   with the PAT injected by the proxy and the request body capped (`max_body`). No SSH keys in
@@ -252,8 +256,8 @@ starts believing it holds a key it doesn't.
 ## Hardening checklist
 
 - [ ] Agent process tree runs entirely inside the guest; host runs only control CLI + proxy.
-- [ ] Only user-chosen virtiofs mounts, each guarded, read-only by default. No creds/dotfiles
-      mounted.
+- [ ] Only user-chosen virtiofs mounts, each guarded, read-only by default — or a `--checkout`
+      guest whose worktree is guest-local, committed content only. No creds/dotfiles mounted.
 - [ ] Guest default route = drop; only the session's proxy port reachable — DNS included:
       port 53 is intercepted in the VMM (enforced **outside** the guest — see Tier 1).
 - [ ] Private CA: cert in guest trust store + all language env vars; **private key host-only**.
@@ -276,7 +280,8 @@ starts believing it holds a key it doesn't.
   microsandbox intercepts port 53 in the VMM — UDP queries fail under default-deny, TCP/53
   answers `REFUSED` from its stub.
 - **Mount tampering** — malicious code can corrupt files on a read-write mount; mounts are
-  read-only unless asked otherwise, and a human reviews diffs before push.
+  read-only unless asked otherwise, a `--checkout` guest touches no host file at all, and a
+  human reviews diffs before push.
 - **Shared MITM CA** — by design you can read all guest TLS. Fine (you own both ends); don't
   reuse that CA elsewhere.
 

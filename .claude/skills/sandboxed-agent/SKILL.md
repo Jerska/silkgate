@@ -35,6 +35,16 @@ hang; later runs with the same profiles reuse it and start in under a second.
   another mount's is refused. For a writable copy of a plain directory there is no dedicated
   flag: mount it read-only and copy it in the guest — `-v DIR:/data:ro`, then
   `cp -a /data/. /workspace/`.
+- **Pick the mode by what the guest needs**: a read-only shelf of host files →
+  `-v DIR:DST` (ro is the default); a writable scratch checkout of the enclosing repo,
+  printed output as the deliverable → `--checkout [REF]` (needs `--with git`); commits as
+  the deliverable → `--branch NAME`. `--branch` is `--checkout` plus a return path: the
+  worktree moves from a guest-only folder to a host-derived mount, a named branch is created
+  at the base (REF when `--checkout REF` is given beside it), and commits come back
+  fast-forward-only at `down`/`harvest`. A plain `--checkout` guest holds committed content
+  only — untracked files such as `.env` never enter it — and nothing it writes returns,
+  commits included. `--checkout` works from the silkgate repo itself: only the repo's `.git`
+  is mounted, read-only, the same shape `--branch` has always used.
 - The base image has **no language runtimes** — no node, no python, no git. A guest has exactly
   what its profiles installed, so `--with claude` alone cannot run `node --test`.
 - **Secrets:** `inject_auth=<name>` in a rules file maps to `SILKGATE_EGRESS_SECRET_<NAME>` in
@@ -221,18 +231,20 @@ reported as requests instead of retried in a loop.
 - **`-t` changes how the command behaves**, not just how it looks: it hands the guest a real
   terminal, so programs colorize, emit cursor control, and merge stdout into stderr — which
   corrupts a JSON stream. Leave it off for anything you intend to parse.
-- **An agent that needs git gets `--branch`, not a repo mount.** `run`/`up` from inside the
-  repo with `--with git --branch <new-name>` hands the guest a real clone checked out on that
-  branch at `/workspace`; its commits land in the host repo as that branch at `down` (or on
-  demand with `silkgate harvest NAME`), fast-forward-only, fetched under fsck. Commits are the
-  deliverable: uncommitted files are deleted with the session, and file modes ride in the
-  commits, so the old exec-bit ritual is gone. The host repo's `.git` is mounted read-only;
-  with LFS in use, `.git/lfs` is the one host-writable piece — a hostile guest can cost you a
-  re-download there, never content substitution (SHA-256 verifies on read). Two guest-side
-  surprises: host hooks are copied into the clone verbatim, so a hook referencing host paths
-  fails in the guest (`--no-verify`, or fix the hook); and `GIT_DIR`/`GIT_WORK_TREE` are in
-  every exec's environment, so an unrelated clone inside the guest needs
-  `env -u GIT_DIR -u GIT_WORK_TREE git clone …`.
+- **An agent that needs git gets `--checkout` or `--branch`, not a repo mount.** Both run from
+  inside the repo with `--with git` and hand the guest a real clone at `/workspace`. Plain
+  `--checkout [REF]` is disposable — read the code, run the tests, commit locally, nothing
+  returns. `--branch <new-name>` is for deliverable commits: they land in the host repo as
+  that branch at `down` (or on demand with `silkgate harvest NAME`), fast-forward-only,
+  fetched under fsck; uncommitted files are deleted with the session, and file modes ride in
+  the commits, so the old exec-bit ritual is gone. In both, the host repo's `.git` is mounted
+  read-only; with LFS in use, `.git/lfs` is the one host-writable piece — a hostile guest can
+  cost you a re-download there, never content substitution (SHA-256 verifies on read). Host
+  hooks are copied into the clone verbatim, so a hook referencing host paths fails in the
+  guest (`--no-verify`, or fix the hook). One `--branch`-only surprise: `GIT_DIR`/
+  `GIT_WORK_TREE` are in every exec's environment, so an unrelated clone inside that guest
+  needs `env -u GIT_DIR -u GIT_WORK_TREE git clone …` — a `--checkout` guest's clone is a
+  normal one, with `.git` inside `/workspace` and no env pair.
 - **git does not work in a mounted worktree** — its `.git` file points at a host path outside
   the mount. Mounting the whole repo read-write would hand the guest rw access to `.git` —
   host code execution via hooks or `core.fsmonitor` the next time a human runs git there — so
