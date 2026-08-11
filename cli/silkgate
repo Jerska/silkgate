@@ -1004,7 +1004,7 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
             lines.append(f"- `{rule.raw.split()[0]}` — {methods}")
         lines += [
             "",
-            "GET is enough to install packages from a registry that appears above. The",
+            "If a package registry appears above, GET is enough to install from it. The",
             "proxy refuses anything not listed. Over plain http the refusal is a 403 whose",
             "body says `no matching rule`. Over https the refusal comes before the tunnel",
             "opens. Most clients report that as a failed CONNECT that names 403 rather than",
