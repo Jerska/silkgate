@@ -251,6 +251,8 @@ the skill rewrite), and optionally the `bin/` symlink. No hook, and no file move
 
 ### A user's first five minutes
 
+**Two slash commands install everything the repo can deliver.**
+
 ```text
 /plugin marketplace add <owner>/silkgate         # or the git URL; append #v0.X to pin a tag
 /plugin install silkgate@silkgate                # scope: user → available in every project

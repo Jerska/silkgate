@@ -15,7 +15,7 @@ skipped (see [Verify containment](#verify-containment)).
 
 ## Quickstart
 
-Install the three prerequisites: `pip install mitmproxy`, docker, and msb (see
+**Install the three prerequisites: `pip install mitmproxy`, docker, and msb** (see
 [Install microsandbox](#install-microsandbox)). `./cli/silkgate doctor` names whichever are
 missing, and how to install each.
 
@@ -254,6 +254,8 @@ and their machine-only `events-*.jsonl` mirrors. The full table — every path, 
 
 ## Install microsandbox
 
+**One script, or brew, installs msb — then pin the version you verified.**
+
 ```sh
 curl -fsSL https://install.microsandbox.dev | sh   # or: brew install superradcompany/tap/microsandbox
 ```
@@ -337,6 +339,8 @@ is Tier 1, so the workload must be unable to reach the network any other way —
 proxy is advisory.
 
 ## Notes
+
+**The residual risk lives in what you allowlist and what you mount.**
 
 - The proxy decrypts via a private CA you own. The private key never leaves the host, and
   nothing in silkgate hands a guest more than the certificate. Do not reuse that CA

@@ -59,7 +59,7 @@ The configuration is `msb run … --net-default-egress deny --net-rule
 "allow@host:tcp:<proxyport>"`, with `HTTPS_PROXY=host.microsandbox.internal:<proxyport>` in
 the guest.
 
-**Port 53 is not an egress channel in either protocol.** microsandbox's gateway intercepts
+Port 53 is not an egress channel in either protocol. microsandbox's gateway intercepts
 all UDP/53, and its forwarder applies the egress policy per query, so with no DNS allow rule
 the default-deny yields NXDOMAIN — no explicit DNS deny is needed. Its stub answers `REFUSED`
 for TCP/53 to every destination. The proxy alias resolves through the guest's `/etc/hosts`,
@@ -163,6 +163,8 @@ operations, not by code.**
   back. Egress control limits damage. It does not prevent the turn.
 
 ## Scope summary
+
+**Each tier has one owner, and only the first two are code.**
 
 | Tier | Owner | In this design |
 |---|---|---|

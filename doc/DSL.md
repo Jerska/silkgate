@@ -97,6 +97,9 @@ percent-decodes once (`%2e%2e` becomes `..`), then resolves `.` and `..` with
 
 ## Options
 
+**Every option widens one dimension: methods, body size, query params, headers, or a
+credential.**
+
 | Option | Effect | Default |
 |---|---|---|
 | `GET POST …` | allowed methods (bare uppercase tokens) | GET only |
@@ -134,6 +137,8 @@ needs it, because no header is special-cased. When a rule has `inject_auth`, the
 already carries that header. The real credential is therefore never present in the guest.
 
 ## Locked design decisions
+
+**Six decisions are locked. Do not reopen them without a test that proves the change safe.**
 
 1. A bare host (no `/`) matches any path. ✓
 2. The default method is GET only. `POST` and the rest must be explicit. ✓

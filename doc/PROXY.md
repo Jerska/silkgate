@@ -15,7 +15,7 @@ It waits until every pool port accepts connections, then records the proxy in
 `test/test_proxy_lifecycle.py` pins the lifecycle: start, readiness, teardown, and the races
 between them.
 
-**The proxy binds loopback only, never the LAN.** It listens on both address families
+The proxy binds loopback only, never the LAN. It listens on both address families
 (`127.0.0.1` and `::1`). If your platform routes guests through a real bridge address, set
 `SILKGATE_PROXY_BIND=<address>[,<address>]`. The proxy also starts with `--set rawtcp=false`,
 so a tunnel it cannot read as TLS is refused instead of passed through
@@ -30,7 +30,7 @@ whole pool to the first fully-free range above it
 port from the pool, and concurrent `up` commands get distinct ports
 (`test_concurrent_pick_port_yields_distinct_ports`).
 
-**A restart floats the pool only when no session survives.** A guest froze its port at
+A restart floats the pool only when no session survives. A guest froze its port at
 creation, because its proxy URL and its Tier-1 net-rule both name it. A moved pool strands
 every survivor on a port that any later process can bind and answer. While any session or
 port claim survives, a proxy restart therefore reuses the recorded pool verbatim, and dies
@@ -52,7 +52,7 @@ that claims that port, and applies that session's ruleset. The ruleset is a per-
 snapshot, composed at `up` time into `~/.silkgate/sessions/<name>/rules.txt` and cached per
 port. The sessions-directory mtime and the per-session `rules.txt` mtime invalidate the cache.
 
-**Session resolution fails closed.** An unknown port, a missing session, or an unparsable
+Session resolution fails closed. An unknown port, a missing session, or an unparsable
 ruleset denies the request with reason `no session for port`, and the addon never falls
 through to another session's rules. Every audit record carries a `session` field.
 `test/test_addon.py` pins the resolution and each fail-closed path.
@@ -93,7 +93,7 @@ Four properties, each pinned in `test/test_addon.py`:
   (`test_missing_secret_is_indistinguishable_from_a_policy_miss`). Which secrets the host
   holds is not the guest's to learn. The audit record keeps the real reason.
 
-**A missing or malformed secret warns at `up` and never blocks startup.** If a session's
+A missing or malformed secret warns at `up` and never blocks startup. If a session's
 ruleset names `inject_auth=<name>` and the variable is absent or not one
 `"<Header>: <value>"` line, `_push_secrets` in [`cli/silkgate`](../cli/silkgate) prints a
 warning and continues. The session comes up, requests that match that rule are denied, and
@@ -111,7 +111,7 @@ nothing went upstream. The `host` and `port` fields name the destination the pro
 never the guest's claim about it. A claim that contradicts the destination is recorded as
 `claimed`. Bodies and credential values are never written.
 
-**Action fields carry names, never values.** An allow record holds what the proxy did on
+Action fields carry names, never values. An allow record holds what the proxy did on
 the way through. `injected` names the secret whose value replaced the header the guest sent.
 `inject_skipped` names the secret the proxy left alone because the guest did not send that
 header — the two fields are exclusive. `stripped_query` and `stripped_headers` hold the
@@ -119,7 +119,7 @@ sorted names that lost at least one pair. `listen_port` rides every record kind,
 `session: null` deny stays attributable to a port. The `response` record adds status, byte
 counts, and duration.
 
-**The events file is the machine-readable contract.** Each proxy start creates one
+The events file is the machine-readable contract. Each proxy start creates one
 `events-<stamp>.jsonl` beside the log: pure JSONL, byte-identical to the logged records, free
 of mitmdump's own output. Control-socket records are never mirrored
 (`test_control_records_not_mirrored` in `test/test_addon.py`). A mirror write that fails
@@ -127,7 +127,7 @@ blocks the request, exactly like a broken log (`EventsFileTest`). `silkgate ui` 
 live, filterable view over these files on `127.0.0.1:8642`. It never parses the mixed-format
 `proxy-*.log` files, so its history is exactly what the retained events files record.
 
-**Retention keeps the newest 20 files of each kind and deletes older files after 30 days.**
+Retention keeps the newest 20 files of each kind and deletes older files after 30 days.
 A file is deleted only when it is both older than 30 days and beyond the newest 20 of its
 kind. The live file is never pruned, because a file under write keeps its mtime inside the
 retention age. Set `SILKGATE_LOG_RETAIN_DAYS=0` to keep everything.

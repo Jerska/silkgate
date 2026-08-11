@@ -41,6 +41,8 @@ the network the only thing it can do — under inspection.**
 
 ## At a glance
 
+**One diagram shows both boundaries and the only path out.**
+
 ```
 ┌──────────────────────── Developer laptop (host / trusted) ────────────────────────┐
 │                                                                                    │
@@ -82,12 +84,12 @@ guest kernel.** The cross-platform runtime, per OS:
 | FS share | virtiofs | virtiofs / 9p |
 | Guest image | one minimal Linux image, identical on both OSes | same |
 
-**A session keeps one warm VM, because agent workspaces are stateful.** The cloned repo,
+A session keeps one warm VM, because agent workspaces are stateful. The cloned repo,
 `node_modules`, and build caches survive between turns, and `claude --resume` works. An
 ephemeral VM per command suits code-interpreter semantics only, so the one-shot
 `silkgate run` keeps that shape for scripts that want no residue.
 
-**At most one project directory is mounted.** `--workspace` mounts it read-write,
+At most one project directory is mounted. `--workspace` mounts it read-write,
 `--workspace-ro` read-only, and `--branch` derives a workspace from the repo with the host
 gitdir mounted read-only. The CLI refuses any mount that hands the guest the host itself,
 and refuses a read-write mount that holds a `.git` directory — hooks and `core.fsmonitor`
@@ -171,6 +173,8 @@ full mechanism, the DNS story, the ranked fallbacks, and the live-verification r
 
 ## Concrete stack
 
+**Every part is reused or synthesized — nothing security-critical is hand-rolled.**
+
 - Proxy: mitmproxy plus a small addon ([DSL.md](./DSL.md), [`mitmaddon/`](../mitmaddon/)).
   Do not hand-roll TLS interception. Reuse mitmproxy, and keep the rule engine
   dependency-free.
@@ -182,6 +186,8 @@ full mechanism, the DNS story, the ranked fallbacks, and the live-verification r
   baked into the base ([README](../README.md#profiles)).
 
 ## Hardening checklist
+
+**A hardened deployment satisfies every line below.**
 
 - [ ] The whole agent process tree runs inside the guest. The host runs only the CLI and
       the proxy.
@@ -198,6 +204,8 @@ full mechanism, the DNS story, the ranked fallbacks, and the live-verification r
 - [ ] Hypervisor and guest kernel are patched. This is the residual escape surface.
 
 ## Residual risks
+
+**Five risks survive both boundaries. Name them, and do not pretend the design closes them.**
 
 - Hypervisor escape. A KVM, HVF, or virtio CVE breaks Boundary A. Patch, keep the device
   model minimal, and accept that this cannot be eliminated.
