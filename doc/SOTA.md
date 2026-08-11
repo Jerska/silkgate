@@ -1,8 +1,12 @@
 # Agent Sandboxing — State of the Art
 
+Read this to see what the field ships for agent sandboxes, and which gap this repo fills.
+
+Last verified: June 2026.
+
 > Snapshot from a deep-research pass (20 sources fetched, 25 key claims adversarially
-> verified: 23 confirmed, 2 killed). Anchored to **late 2025 / 2026** — fast-moving area,
-> verify version specifics before acting. Managed cloud sandboxes (E2B, Modal, Daytona,
+> verified: 23 confirmed, 2 killed). Anchored to **late 2025 / 2026** — a fast-moving area,
+> so verify version specifics before you act. Managed cloud sandboxes (E2B, Modal, Daytona,
 > Cloudflare, Fly.io) were intentionally **out of scope**.
 
 ## TL;DR — one isolation hierarchy
@@ -21,8 +25,8 @@ virtualization** (VMs, unikernels, Kata) — not kernel-sharing sandboxes. gViso
 "preferable to fully shared solutions but offers potentially weaker guarantees than full
 virtualization." (verified 3-0)
 
-\* *gVisor "milliseconds" is the marketing framing; real `runsc` spawn is often 50–100 ms.
-The "no VM boot" claim is unambiguously true; the absolute number is optimistic.*
+\* *gVisor "milliseconds" is the marketing framing — real `runsc` spawn is often 50–100 ms.
+The "no VM boot" claim is unambiguously true. The absolute number is optimistic.*
 
 ## Summary comparison
 
@@ -51,7 +55,7 @@ The "no VM boot" claim is unambiguously true; the absolute number is optimistic.
 - **Kernel-sharing primitives** — namespaces, seccomp-bpf, cgroups, Landlock,
   AppArmor/SELinux, capabilities on Linux; **Seatbelt/`sandbox-exec`** on macOS. The
   building blocks agent frameworks actually ship on. Cheap and ubiquitous, but a single
-  host-kernel CVE is game over.
+  host-kernel CVE defeats the whole layer.
 
 **Overhead is modest where it matters:** NVIDIA's point is VM startup is "modest compared
 to LLM calls" — a 200 ms microVM boot is noise next to per-inference latency. This is what
@@ -99,17 +103,17 @@ Microsoft's `vscode-sandbox-runtime`).
 | **Linux / WSL2** | **bubblewrap** (filesystem) + network-namespace isolation (`--unshare-net`) + seccomp-BPF blocking `AF_UNIX` socket creation; **socat** relays to the host proxy |
 | **Native Windows** | ❌ Not supported — run inside WSL2 (WSL1 also unsupported) |
 
-**Filesystem default (the sharp edge):**
+**Filesystem default (the biggest risk):**
 - **Write:** working dir + subdirs + session `$TMPDIR` only.
 - **Read:** the **entire computer** — docs warn this "still allows reading credential files
   such as `~/.aws/credentials` and `~/.ssh/`." Must add to **`denyRead`** to block the Bash
   route. (verified 3-0)
 
-**Network egress:** host-side allowlist **proxy** (nothing pre-allowed; default-deny).
-Critical self-documented limitation: **enforces the allowlist by client-supplied hostname
-only and does NOT terminate or inspect TLS** → open to **domain fronting** and exfil via
-broadly-allowed domains (e.g. `github.com`). Docs recommend a custom **TLS-terminating
-proxy** for stronger threat models. (verified 3-0)
+**Network egress:** host-side allowlist **proxy** (nothing pre-allowed, default-deny).
+Critical self-documented limitation: it **enforces the allowlist by client-supplied hostname
+only and does NOT terminate or inspect TLS**, so it is open to **domain fronting** and to
+exfiltration via broadly-allowed domains (for example `github.com`). Docs recommend a custom
+**TLS-terminating proxy** for stronger threat models. (verified 3-0)
 
 **Known exploited weakness (patched):** SOCKS5 hostname null-byte injection —
 `attacker-host.com\x00.google.com` — JS `endsWith('.google.com')` passes but libc
@@ -120,7 +124,8 @@ hostname-only allowlisting without TLS inspection is architecturally fragile. (v
 **Hardening a Claude Code deployment:**
 1. Add `~/.aws`, `~/.ssh`, `~/.config/gh`, `.env` files to **`denyRead`**.
 2. Keep the **egress allowlist narrow** — avoid broad domains like `github.com`.
-3. Put a **TLS-terminating egress proxy** in front for any real exfil threat model.
+3. Put a **TLS-terminating egress proxy** in front for any real exfiltration threat model —
+   the layer this repo builds ([ARCHITECTURE.md](./ARCHITECTURE.md)).
 4. Stay on **≥ 2.1.90**.
 5. For untrusted repos/MCP servers, run the whole thing inside a **microVM/Kata** — the
    built-in sandbox shares the host kernel.
@@ -136,8 +141,8 @@ hostname-only allowlisting without TLS inspection is architecturally fragile. (v
   **"default-ask posture + enterprise denylists that cannot be overridden by local users."**
   Weak spot everywhere: hostname-only filtering — you want TLS-terminating inspection.
 - **Multi-tenancy / blast radius** → per-tenant **microVMs** are clean; **Sysbox** is the
-  hardened shared-kernel compromise. (Behaviour at true scale — side channels, noisy
-  neighbours, host-kernel CVE exposure like the 2025 `runc` CVEs — was *not* quantified.)
+  hardened shared-kernel compromise. (Behavior at true scale — side channels, noisy
+  neighbors, host-kernel CVE exposure like the 2025 `runc` CVEs — was *not* quantified.)
 
 ## Recommendation for self-hosting
 
@@ -145,16 +150,21 @@ Defense-in-depth, ranked by what does the heavy lifting:
 
 1. **Strong isolation foundation** — a **microVM** per agent session. `microsandbox`
    (Apache 2.0, libkrun, SDKs) for batteries-included self-hosted; **Kata** if
-   container/K8s-native; **Firecracker** for own orchestration at scale.
+   container/K8s-native; **Firecracker** for own orchestration at scale. Adopted here as
+   Boundary A ([ARCHITECTURE.md](./ARCHITECTURE.md)).
 2. **Default-deny egress with a TLS-terminating proxy** — the capability *none* of the
-   built-in framework proxies ship. This is what actually stops exfiltration.
+   built-in framework proxies ship. This is what actually stops exfiltration. Adopted here
+   as Boundary B ([ARCHITECTURE.md](./ARCHITECTURE.md)), with operations in
+   [PROXY.md](./PROXY.md).
 3. **OS-level sandbox inside the VM** — `sandbox-runtime`, Codex's bwrap/Seatbelt, or Sysbox
    — cheap second layer and for credential-file `denyRead`.
-4. **Don't rely on a single layer** — the Claude Code SOCKS5 bypass is the lesson.
+4. **Do not rely on a single layer** — the Claude Code SOCKS5 bypass is the lesson. It
+   drives the host normalization in [DSL.md](./DSL.md).
 
 **Two gaps you must solve yourself** (no shipped product covers them):
-- Combining a **microVM runtime + TLS-terminating egress proxy** into one reference
-  architecture — everyone says you need it; nobody ships it.
+- A **microVM runtime + TLS-terminating egress proxy** combined into one reference
+  architecture — everyone says you need it, and nobody ships it. This repo is that
+  combination ([ARCHITECTURE.md](./ARCHITECTURE.md)).
 - **Steady-state runtime overhead** (compilers, `npm install`, test suites) of gVisor vs
   Kata vs Firecracker — only *boot* latency is well-documented. Benchmark your own workload.
 
@@ -165,16 +175,18 @@ Defense-in-depth, ranked by what does the heavy lifting:
   primary docs).
 - Two Codex implementation claims came via the DeepWiki secondary source (2-1 votes), though
   both were verified against Codex source.
-- Time-sensitive: SOCKS5 null-byte patched in v2.1.90; new hostname-allowlist bypasses are
-  plausible since the proxy doesn't inspect TLS (architectural, not a one-off bug).
+- Time-sensitive: the SOCKS5 null byte was patched in v2.1.90, and new hostname-allowlist
+  bypasses are plausible because the proxy does not inspect TLS (architectural, not a
+  one-off bug).
 
 ## Open questions (unresolved by the research)
 
 1. Measured **steady-state** CPU/IO/syscall overhead of gVisor vs Kata vs Firecracker for
    coding-agent workloads (only boot latency is documented).
-2. A concrete reference architecture combining a **microVM/Kata runtime + TLS-terminating
-   egress proxy** (the layer everyone says you need but nobody ships).
-3. True multi-tenancy at scale: per-tenant blast-radius, side-channel/noisy-neighbour risk,
+2. A concrete reference architecture that combines a **microVM/Kata runtime +
+   TLS-terminating egress proxy** (the layer everyone says you need but nobody ships).
+   Answered since by this repo ([ARCHITECTURE.md](./ARCHITECTURE.md)).
+3. True multi-tenancy at scale: per-tenant blast-radius, side-channel/noisy-neighbor risk,
    host-kernel CVE exposure.
 4. GPU/accelerator passthrough story for microVM sandboxes — and whether it reintroduces
    host-kernel exposure.
