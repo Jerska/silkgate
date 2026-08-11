@@ -24,6 +24,12 @@ The proxy also starts with `--set rawtcp=false`, so a tunnel it cannot read as T
 refused instead of passed through
 (`test_start_shared_proxy_binds_loopback_and_disables_rawtcp`).
 
+If you edit the addon or rename one of its env vars, retire the live proxy deliberately —
+end the last session with `down`, or stop the pid recorded in `proxy.json` — so the next
+launch starts a fresh process. mitmdump hot-reloads `-s` scripts when their mtime changes,
+so a long-lived proxy silently picks up addon edits into a process that keeps its old
+environment and its old `sys.modules`.
+
 ## The port pool
 
 **The proxy listens on 16 consecutive ports, normally 8090 to 8105.** Each pool port gets
@@ -109,6 +115,18 @@ the guest reads the credential status in `/silkgate/CONTEXT.md`. The session sco
 a cost: each `up` needs the variable in its own environment, because a session never inherits
 a secret already in the proxy.
 
+The store's lifetime is the proxy process. Secrets are pushed per launch and live in proxy
+memory only, so they die when the proxy exits, while sessions and their ruleset snapshots
+survive on disk. A proxy restart under a live session therefore leaves injection with no
+value: a request that matches an `inject_auth` rule fails closed, with audit reason
+`missing secret for inject_auth=<name>`. Recover on either path: relaunch the session
+(`down`, then `up` — `up` re-pushes what its environment holds), or push into the live
+session with `silkgate secret set <name> --session <name>`. A launch with an empty
+allowlist pushes nothing, because no `inject_auth` name exists to serve. Two failure shapes
+tell the diagnosis apart: a 401 from the upstream means injection happened with a bad
+value, and a deny whose audit reason is `missing secret` means the proxy holds no value at
+all.
+
 ## The audit trail
 
 **Every decision writes one JSON line to the audit log, and the proxy mirrors the same line
@@ -152,7 +170,7 @@ the prune skips them, and a file under write keeps its mtime fresh anyway. Set
 | `proxy.json` | Shared-proxy metadata: pid, base port, the port pool, log path, events path, socket path |
 | `proxy.sock` | The control socket (mode `0600`) |
 | `proxy.lock` | The lock that serializes proxy start and stop |
-| `sessions/<name>/meta.json` | Session metadata: sandbox name, port, image, profiles, command, workspace |
+| `sessions/<name>/meta.json` | Session metadata: sandbox name, port, image, profiles, command, mounts |
 | `sessions/<name>/rules.txt` | The composed ruleset snapshot the proxy reads for that session |
 | `sessions/<name>/context.md` | The guest context, copied into the guest at `/silkgate/CONTEXT.md` |
 | `ca/egress-ca.pem` | The MITM certificate, baked into guest images and trusted by guests — never the private key |
