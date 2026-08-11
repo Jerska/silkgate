@@ -950,11 +950,11 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         ]
     elif checkout:
         lines += [
-            f"`/workspace` is a disposable checkout of the project at `{checkout}` as of session",
-            "start, and git works: local commits are fine. Nothing you write leaves this machine —",
-            "commits included — so **printed output is the deliverable.** The clone's origin is a",
-            "read-only mount of the host repo, so `git fetch origin` and `git log` work; no",
-            "remote accepts a push.",
+            "**Put your results in printed output — nothing you write leaves this machine,",
+            "commits included.** `/workspace` is a disposable checkout of the project at",
+            f"`{checkout}` as of session start, and git works: local commits are fine. The",
+            "clone's origin is a read-only mount of the host repository, so",
+            "`git fetch origin` and `git log` work. No remote accepts a push.",
         ]
     elif ws_mode == "ro":
         lines += [
@@ -970,10 +970,16 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
             "outlast this machine.",
         ]
     elif others:
-        lines.append("No host directory is mounted at `/workspace` — it is writable scratch "
-                     "that dies with this machine.")
+        lines.append("**`/workspace` is writable scratch that dies with this machine — no"
+                     " host directory is mounted there.**")
     else:
         lines.append("**Nothing you write survives this machine.** No host directory is mounted.")
+    if others:
+        lines += ["", "Beyond `/workspace`, these host directories are mounted:", ""]
+        for dst, mode in others:
+            lines.append(f"- `{dst}` — " + ("read-only. Writes to it fail."
+                                            if mode == "ro" else
+                                            "read-write. What you leave there lands on the host."))
     lines += [
         "",
         "This machine is " + ("kept alive between commands, so state you leave behind persists."
