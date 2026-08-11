@@ -27,7 +27,7 @@ the network the only thing it can do — under inspection.**
 
 ## Glossary
 
-**These terms are defined here and nowhere else.**
+**These terms are introduced here once, and no document uses a synonym for them.**
 
 | Term | Definition |
 |---|---|
@@ -36,8 +36,8 @@ the network the only thing it can do — under inspection.**
 | session | One warm microVM plus the proxy port it claims and the ruleset composed for it. `silkgate up` creates it, `silkgate down` ends it. |
 | profile | One capability under [`profiles/`](../profiles/): the install step and the egress rules that capability needs, declared together. |
 | proxy | The TLS-terminating egress proxy on the host: one shared mitmproxy process that is every guest's only route to the network. |
-| Tier 1 | The network boundary outside the guest: microsandbox's host-side stack forces all guest egress to the session's own proxy port. Defined in [THREAT-MODEL.md](./THREAT-MODEL.md). |
-| Tier 2 | Per-request enforcement at the proxy: allowlist, header, body, and query constraints, secret injection. Defined in [THREAT-MODEL.md](./THREAT-MODEL.md). |
+| Tier 1 | The network boundary outside the guest: microsandbox's host-side stack forces all guest egress to the session's own proxy port. The full definition is in [THREAT-MODEL.md](./THREAT-MODEL.md). |
+| Tier 2 | Per-request enforcement at the proxy: allowlist, header, body, and query constraints, secret injection. The full definition is in [THREAT-MODEL.md](./THREAT-MODEL.md). |
 
 ## At a glance
 
