@@ -23,7 +23,7 @@ missing, and how to install each.
 ./cli/silkgate profiles                    # what capabilities are available
 ./cli/silkgate verify                      # Tier-1 containment check (--full for the proxy path)
 export SILKGATE_EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"   # host-only; never enters the guest or argv
-./cli/silkgate run --with claude --workspace ~/projects/foo -- \
+./cli/silkgate run --with claude -v ~/projects/foo:/workspace:rw -- \
   claude --bare -p "task…" --permission-mode bypassPermissions
 ```
 
@@ -100,7 +100,7 @@ under.
 **Each session describes itself to the guest, so a cooperative agent wastes no turns on
 discovery.** Without it, the agent reaches for a runtime that is not installed, or retries a
 host that policy never allows. The description is generated from the session's own profiles,
-ruleset, and mount, and reaches the guest two ways:
+ruleset, and mounts, and reaches the guest two ways:
 
 ```sh
 # inline, for any harness — the variable holds the text itself, not a path
@@ -127,12 +127,12 @@ stays cheap — but `claude --resume` cannot work across turns, because the VM a
 `/root/.claude` die with the command. A session persists both:
 
 ```sh
-./cli/silkgate up --name foo --with claude --workspace ~/projects/foo
+./cli/silkgate up --name foo --with claude -v ~/projects/foo:/workspace:rw
 ./cli/silkgate exec foo -- claude -p "scaffold a Flask app" --output-format json
 # ↑ prints a session_id; the VM persists, so resume that conversation next turn:
 ./cli/silkgate exec foo -- claude -p --resume <id> "add a /health route and a test"
 ./cli/silkgate attach foo                 # same VM, interactive, runs the profile's command
-./cli/silkgate ls                         # sessions (status/port/workspace/age) + proxy health
+./cli/silkgate ls                         # sessions (status/port/mounts/age) + proxy health
 ./cli/silkgate down foo                   # frees the port; last one out stops the proxy
 ```
 
@@ -193,12 +193,37 @@ The UI reads only the machine-readable `events-*.jsonl` files ([doc/PROXY.md](do
 It never parses the older mixed-format `proxy-*.log` files, so its history starts with the
 first proxy that wrote an events file.
 
-## Real git for a guest: `--branch`
+## Real git for a guest: `--checkout` and `--branch`
 
-**With `--with git --branch <new-name>`, the guest gets a working checkout at `/workspace`,
-cloned inside the VM from a read-only mount of the repo's `.git`.** Run `run` or `up` from
-inside a repository. The workspace mount holds no git metadata at all, so there is nothing
-on it for a guest to rewrite. Commits are the deliverable, and file modes ride in them.
+**The git story is two layers: `--checkout [REF]` is the primitive, and `--branch NAME`
+layers the return path on it.** Both need `--with git`, both run from inside a repository,
+and both own `/workspace` in the guest, so no `-v` mount can target it.
+
+Run `run` or `up` with `--with git --checkout` and the guest gets a disposable, writable
+checkout of the repo at REF (default `HEAD`) at `/workspace` — committed content only, so
+untracked files such as `.env` never enter the guest. The repo's `.git` is mounted read-only
+at `/silkgate/base.git`, and the guest clones from it: a normal clone with its own `.git`
+inside `/workspace`. Hooks and reflogs are copied into the clone, the LFS store is mounted
+when the repo uses one, and a commit identity is set so local commits do not fail. The
+checkout is detached at REF, so "no deliverable branch" is structural. Nothing written in
+the guest returns to the host, commits included: the worktree lives in the guest's own
+rootfs and dies with the VM, so printed output is the deliverable. It works from the
+silkgate repo itself.
+
+```sh
+cd ~/projects/foo
+silkgate run --with git --with claude --checkout -- \
+  silkgate-claude -p "why does auth reject expired-but-refreshable tokens? cite files"
+```
+
+`--branch NAME` builds on that and changes exactly this: the worktree moves from a
+guest-only folder to a writable host-derived mount (`.silkgate/sandboxes/<name>` under the
+repo root), a named branch is created at the base — `HEAD`, or REF when `--checkout REF` is
+given beside it — and its commits return to the host fast-forward-only at harvest.
+`GIT_DIR` and `GIT_WORK_TREE` are exported into every exec, and teardown harvests the
+branch and reaps the derived workspace. The workspace mount holds no git metadata at all,
+so there is nothing on it for a guest to rewrite. Commits are the deliverable, and file
+modes ride in them.
 
 ```sh
 cd ~/projects/foo
@@ -219,12 +244,42 @@ except when a harvest was unable to bank everything, in which case it is kept an
 Commits made after the last harvest live only in the VM, so `harvest` long sessions at
 milestones.
 
-With LFS in use, `.git/lfs` is mounted read-write — the one piece of host git state a guest
-can touch. That is an availability risk only, accepted by design: objects are
-content-addressed and git-lfs verifies SHA-256 on read, so a hostile guest can force a
-re-download, never substitute content. It can also read any LFS object in the store, so
-treat the store as visible to the guest. Hooks are copied into the clone verbatim and run in
-the guest. A hook that references host paths fails there (`--no-verify`, or fix the hook).
+With LFS in use, `.git/lfs` is mounted read-write in either mode — the one piece of host
+git state a guest can touch. That is an availability and terminal-rendering risk, never
+content substitution: objects are content-addressed and git-lfs verifies SHA-256 on read,
+so a hostile guest can force a re-download, never swap content. The guest can also read any
+LFS object in the store, so treat the store as visible to the guest. And `.git/lfs/logs` is
+not content-addressed — `git lfs logs last` renders guest-written bytes in a host terminal,
+so treat that output as untrusted. Hooks are copied into the clone verbatim and run in the
+guest. A hook that references host paths fails there (`--no-verify`, or fix the hook).
+
+## GitHub egress: `--github-read` and `--github-write`
+
+**`--github-read OWNER/REPO` and `--github-write OWNER/REPO` grant a guest scoped GitHub
+access, with a host-held PAT the proxy injects.** Both flags are repeatable and need
+`--with git`. The secret is `SILKGATE_EGRESS_SECRET_GITHUB`, one full header line:
+`Authorization: Basic base64(x-access-token:<PAT>)`. As with every secret, a missing value
+warns at launch, and the guest sees the credential status in its context file.
+
+What the composed rules allow, per repo:
+
+| Leg | `--github-read` | `--github-write` |
+|---|---|---|
+| git smart-HTTP on `github.com/OWNER/REPO` (both the bare and `.git` path forms) | GET, POST | GET, POST |
+| LFS batch API (`lfs.github.com`, and the same paths on `github.com`) | GET, POST | GET, POST |
+| REST API (`api.github.com/repos/OWNER/REPO`) | GET | GET, POST, PATCH, DELETE |
+| LFS object download (`github-cloud.githubusercontent.com`, presigned query) | GET, no injection | GET, no injection |
+| LFS object upload (`github-cloud.s3.amazonaws.com`, SigV4 header) | — | PUT, no injection |
+
+The git rules are identical for both flags, because a fetch itself rides POST
+(`git-upload-pack`). The read/write split therefore lives in the API methods, the upload
+host, and above all the PAT: a read-only PAT covers clone, fetch, and LFS download, and a
+read-write PAT covers push, LFS upload, and API writes. Pair `--github-read` with a
+read-only PAT — the token, not the proxy, is what stops a push on the git leg. The
+storage hosts are self-authorized (presigned URL or SigV4), so those rules carry no
+`inject_auth` — a second `Authorization` header there makes S3 answer 501. The grants are
+recorded in `meta.json` and described to the guest in its context file. `_github_rules` in
+[`cli/silkgate`](cli/silkgate) composes the rules.
 
 ## Layout
 
@@ -247,7 +302,8 @@ the guest. A hook that references host paths fails there (`--no-verify`, or fix 
   binaries
 
 Host state lives under `~/.silkgate/`, created on the first `run` or `up`. The short
-version: `sessions/<name>/` holds each session's ruleset snapshot and metadata,
+version: `sessions/<name>/` holds each session's ruleset snapshot and metadata (mounts
+included),
 `ca/egress-ca.pem` is the MITM certificate (never the key), and `logs/` holds the audit logs
 and their machine-only `events-*.jsonl` mirrors. The full table — every path, plus retention
 — is in [doc/PROXY.md](doc/PROXY.md).
@@ -348,15 +404,23 @@ proxy is advisory.
 - Allowlisted destinations remain exfiltration carriers. Keep each profile's rules minimal,
   never allowlist an endpoint that reflects headers or bodies, and prefer download-only
   (GET).
-- `--workspace DIR` mounts DIR read-write. `--workspace-ro DIR` mounts the same path
-  read-only: `/workspace` is then browsable, but writes to it fail. The read-only form skips
-  the `.git`-directory refusal (a whole repository is mountable), so an agent that only
-  reads code can be pointed directly at the repo. Read-only still exposes everything under
-  the mount, `.git/config` included, where a remote URL can embed a token. Both forms are
-  refused for `/`, your home directory, and silkgate's own checkout and state — credentials
-  and configuration there must not be exposed even read-only. A linked worktree's `.git`
-  file passes either form, with a printed note. `--workspace-ro` is exclusive with
-  `--workspace`, `--allow-git-dir`, and `--branch`. For a repository where the guest must
-  also commit, use `--branch` instead.
+- `-v SRC:DST[:ro|rw]` (repeatable) mounts host directory SRC at DST in the guest,
+  read-only unless the spec says `:rw`. Read-only skips the `.git`-directory refusal (a
+  whole repository is mountable), so an agent that only reads code can be pointed directly
+  at the repo. Read-only still exposes everything under the mount, `.git/config` included,
+  where a remote URL can embed a token. Either mode is refused for `/`, your home
+  directory, and silkgate's own checkout and state — credentials and configuration there
+  must not be exposed even read-only.
+- Guest-side, a DST is refused when it is relative, `/`, at, under, or above `/silkgate`,
+  `/root/lfsstore`, or `/root/gitdir` (silkgate's own guest paths), a duplicate of another
+  mount's, or nested under one — nested virtiofs behavior is unverified, so it is refused
+  rather than trusted.
+- A read-write mount that holds a `.git` directory anywhere under it is refused — hooks and
+  config become guest-writable there, which is host code execution the next time a human
+  runs git in it — unless `--allow-git-dir` accepts that risk explicitly. A linked
+  worktree's `.git` file passes either mode, with a printed note.
+- Steer by what the guest needs. A read-only shelf of host files: `-v DIR:DST` (read-only
+  is the default). A writable scratch checkout with printed output as the deliverable:
+  `--checkout`. Commits as the deliverable: `--branch`.
 - The `probe` profile exists for `verify` only: it opens the Debian mirrors, so every other
   command refuses to compose it.
