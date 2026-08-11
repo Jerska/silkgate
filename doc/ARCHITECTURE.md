@@ -53,7 +53,7 @@ the network the only thing it can do — under inspection.**
 │  │  toolchain: node, python, git, build tools                                    │ │
 │  │  trust store + NODE_EXTRA_CA_CERTS/REQUESTS_CA_BUNDLE ➜ private CA cert        │ │
 │  │  HTTPS_PROXY=<session port>  ·   NO direct internet route                      │ │
-│  │  mount (virtiofs):  /workspace ⇄ ~/projects/foo   (rw, the ONLY host path)    │ │
+│  │  mounts (virtiofs): user-chosen, ro default (/workspace ⇄ ~/projects/foo rw)  │ │
 │  │                     ✗ no ~/.ssh  ✗ no ~/.aws  ✗ no dotfiles  ✗ no host creds  │ │
 │  └──────────────────────────────┬─────────────────────────────────────────────┘  │
 │     all egress default-deny ─────┘ except TCP to the session's own proxy port;     │
@@ -89,12 +89,20 @@ A session keeps one warm VM, because agent workspaces are stateful. The cloned r
 ephemeral VM per command suits code-interpreter semantics only, so the one-shot
 `silkgate run` keeps that shape for scripts that want no residue.
 
-At most one project directory is mounted. `--workspace` mounts it read-write,
-`--workspace-ro` read-only, and `--branch` derives a workspace from the repo with the host
-gitdir mounted read-only. The CLI refuses any mount that hands the guest the host itself,
-and refuses a read-write mount that holds a `.git` directory — hooks and `core.fsmonitor`
-there are host code execution the next time a human runs git in it. The full mount rules,
-the LFS exception included, live in the [README](../README.md).
+Mounts are user-chosen, each guarded, and read-only by default. `-v SRC:DST[:ro|rw]`
+(repeatable) mounts host directory SRC at guest DST via virtiofs, read-only unless the spec
+says `:rw`. The git modes shape their own mounts: `--checkout` mounts just the host gitdir,
+read-only at `/silkgate/base.git` — the guest's worktree is its own rootfs, holds committed
+content only, and dies with the VM — and `--branch` adds a workspace derived under the
+repo's `.silkgate/sandboxes/`, mounted read-write. With LFS in use, the host LFS store is
+writable in either mode. The CLI refuses any mount that hands the guest the host itself
+(`/`, `$HOME`, silkgate's own checkout and state), and refuses a read-write mount that
+holds a `.git` directory — hooks and `core.fsmonitor` there are host code execution the
+next time a human runs git in it. A linked worktree's `.git` file is allowed, with a
+printed note. Guest-side, a DST that is relative, `/`, at, under, or above silkgate's own
+guest paths (`/silkgate`, `/root/lfsstore`, `/root/gitdir`), duplicated, or nested under
+another mount's is refused — nested virtiofs behavior is unverified, so it is refused
+rather than trusted. The full mount rules live in the [README](../README.md).
 
 ## Boundary B — the proxy
 
@@ -139,7 +147,7 @@ gateway.** This is the piece neither Claude Code nor Codex ships.
 |---|---|---|
 | LLM call | guest → proxy → `api.anthropic.com` | The guest sends a dummy key and the proxy injects the real one. The key survives full guest compromise, because the guest never holds it. |
 | `npm install` | guest → proxy → `GET registry.npmjs.org` | A malicious postinstall runs inside the VM, contained, and reaches nothing except the inspected proxy. |
-| Exfiltration under prompt injection | guest → proxy → denied | There is no `~/.ssh` in the guest. A POST of `/workspace/.env` to `evil.com` is denied (not allowlisted), and to `github.com` is blocked on method, size, or SNI-Host mismatch. Two independent failures are required. |
+| Exfiltration under prompt injection | guest → proxy → denied | There is no `~/.ssh` in the guest — the only host paths are the mounts the user chose, each guarded and read-only by default, and a `--checkout` guest holds committed content only, so an untracked `/workspace/.env` never entered it. A POST of a secret that was handed in to `evil.com` is denied (not allowlisted), and to `github.com` is blocked on method, size, or SNI-Host mismatch. Two independent failures are required. |
 | Git push | guest commits → human reviews → host pushes | The safest default: the agent commits inside the VM and the human pushes after review. For autonomy, allow push to one repo only, with the PAT injected and the body capped (`max_body`). No SSH keys exist in the guest. |
 
 ## The agent's channel back to the parent
@@ -191,7 +199,9 @@ full mechanism, the DNS story, the ranked fallbacks, and the live-verification r
 
 - [ ] The whole agent process tree runs inside the guest. The host runs only the CLI and
       the proxy.
-- [ ] Exactly one virtiofs mount (the project directory). No credentials or dotfiles mounted.
+- [ ] Only user-chosen virtiofs mounts, each guarded, read-only by default — or a
+      `--checkout` guest whose worktree is guest-local, committed content only. No
+      credentials or dotfiles mounted.
 - [ ] Guest egress is default-deny with only the session's proxy port reachable, DNS
       included, enforced outside the guest (Tier 1).
 - [ ] Private CA: certificate in the guest trust store and all language env vars. The
@@ -205,7 +215,7 @@ full mechanism, the DNS story, the ranked fallbacks, and the live-verification r
 
 ## Residual risks
 
-**Five risks survive both boundaries. Name them, and do not pretend the design closes them.**
+**Six risks survive both boundaries. Name them, and do not pretend the design closes them.**
 
 - Hypervisor escape. A KVM, HVF, or virtio CVE breaks Boundary A. Patch, keep the device
   model minimal, and accept that this cannot be eliminated.
@@ -215,7 +225,12 @@ full mechanism, the DNS story, the ranked fallbacks, and the live-verification r
   lever is a tighter allowlist.
 - DNS tunneling. Closed: the guest does no external DNS, and the VMM answers port 53 itself
   ([THREAT-MODEL.md](./THREAT-MODEL.md)).
-- Workspace tampering. Malicious code can corrupt mounted project files. A human reviews
-  diffs before push.
+- Mount tampering. Malicious code can corrupt files on a read-write mount. Mounts are
+  read-only unless asked otherwise, a `--checkout` guest touches no host file at all, and a
+  human reviews diffs before push.
+- LFS store bytes on the host. With LFS in use, `.git/lfs` is host-writable from `--branch`
+  and `--checkout` guests, and `.git/lfs/logs` is not content-addressed — `git lfs logs
+  last` renders guest-written bytes in a host terminal. An availability and
+  terminal-rendering risk, never content substitution: SHA-256 verifies objects on read.
 - Shared MITM CA. By design the proxy reads all guest TLS. That is fine — you own both
   ends — but do not reuse that CA anywhere else.
