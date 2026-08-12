@@ -22,6 +22,23 @@ import { newCallsView } from "./calls.js";
 
 const TABS = ["activity", "calls", "diff", "config", "brief", "output", "metrics"];
 
+// Which brief the brief tab shows, per the frozen per-exec contract: `briefs`
+// maps exec id → brief, with the session default under "default" and the live
+// guest-writable fallback under "workspace". The selected exec's entry wins,
+// else default, else workspace; null for an empty map. Keys are record data,
+// so only own enumerable entries answer — an exec named "constructor" must
+// not surface Object.prototype. Pure for the tests.
+export function selectBrief(briefs, selectedExec) {
+  if (!briefs || typeof briefs !== "object") return null;
+  const entry = (key) => {
+    if (key == null) return null;
+    const b = Object.prototype.hasOwnProperty.call(briefs, key)
+      ? briefs[key] : null;
+    return b && typeof b === "object" ? { key, brief: b } : null;
+  };
+  return entry(selectedExec) ?? entry("default") ?? entry("workspace");
+}
+
 // The config tab's extra sections render a string verbatim — rules is the
 // composed ruleset text, and JSON.stringify would print it as one line of
 // literal \n — and anything structured as indented JSON. Pure for the tests;
@@ -58,6 +75,9 @@ export function newSessionView() {
   let ident = null;
   let session = null;              // the name data is keyed under
   let tab = null;
+  let selectedExec = null;         // exec id the activity selector names, or
+                                   // null — outlives tab flips so the brief
+                                   // tab can follow the activity selection
   let ticker = null;
   const head = {};                 // dot, label, branch, metrics
   let ctlBar = null;
@@ -298,6 +318,7 @@ export function newSessionView() {
       });
       feed.selected = "";
       feed.execSel.value = "";
+      selectedExec = null;         // the set moved under the selection
     }
     feed.execSel.parentElement.hidden = buckets.length < 2;
 
@@ -561,13 +582,23 @@ export function newSessionView() {
         + " with the backend"));
       return;
     }
-    const b = detail.brief;
-    if (b == null) {
+    // The per-exec map when the backend sends one; an older backend still
+    // answers the singular brief, which reads as the session default.
+    const sel = detail.briefs !== undefined
+      ? selectBrief(detail.briefs, selectedExec)
+      : (detail.brief != null && typeof detail.brief === "object"
+         ? { key: "default", brief: detail.brief } : null);
+    if (sel === null) {
       briefPane.append(el("p", { class: "state-msg" },
                           "no brief recorded for this session"));
       return;
     }
+    const b = sel.brief;
     briefPane.append(el("div", { class: "pane-bar" },
+      el("span", { class: "pane-note" },
+         sel.key === "default" ? "session default"
+           : sel.key === "workspace" ? "workspace fallback"
+           : `exec ${sel.key}`),
       el("span", { class: "pane-note" }, `source: ${b.source ?? "?"}`),
       b.source === "workspace"
         ? el("span", { class: "badge untrusted" }, "guest-writable — untrusted")
@@ -697,6 +728,11 @@ export function newSessionView() {
       const execSel = el("select");
       execSel.addEventListener("change", () => {
         feed.selected = execSel.value;
+        // The brief tab follows this selection (briefs key by exec id);
+        // "all execs" and the unattributed bucket select no exec.
+        const scope = scopeBuckets();
+        selectedExec = feed.selected !== "" && scope.length === 1
+          && scope[0][0] != null ? String(scope[0][0]) : null;
         renderFeed();
       });
       // Kill escalates less than down but still confirms; it aims at the one
