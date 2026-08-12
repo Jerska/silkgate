@@ -1265,7 +1265,10 @@ class UiControlTest(UiServerTest):
 
 _BANNED_SINKS = re.compile(
     r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|srcdoc")
-_JS_REFS = re.compile(r"""(?:import|from)\s*\(?\s*["']([^"']+)["']""")
+# Path-like specifiers only (./, ../, /): those are the references this server must
+# route. A bare specifier cannot be fetched from here whatever the map says, and the
+# unanchored form also matched prose like `"rename from", "…"` inside string literals.
+_JS_REFS = re.compile(r"""(?:import|from)\s*\(?\s*["'](\.{0,2}/[^"']+)["']""")
 _HTML_REFS = re.compile(r"""(?:src|href)\s*=\s*["']([^"']+)["']""")
 
 
