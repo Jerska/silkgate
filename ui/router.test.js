@@ -57,6 +57,15 @@ test("search routes carry q; an empty q is omitted on build", () => {
                "navigate() callers pass params like every other view");
 });
 
+test("a malformed percent-escape falls back to the raw ident, never throws", () => {
+  assert.deepEqual(parseRoute("#/session/100%"),
+                   { view: "session", ident: "100%", tab: "activity" });
+  assert.deepEqual(parseRoute("#/session/%E0"),
+                   { view: "session", ident: "%E0", tab: "activity" });
+  assert.equal(parseRoute("#/session/%E0?tab=calls").tab, "calls",
+               "the tab still parses beside a junk ident");
+});
+
 test("session idents survive URL encoding both ways", () => {
   const ident = "a b/c%d";
   const hash = buildRoute({ view: "session", ident });

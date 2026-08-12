@@ -49,7 +49,16 @@ export function parseRoute(hash) {
   const m = /^\/session\/([^/]+)$/.exec(path);
   if (m) {
     const tab = query.get("tab");
-    return { view: "session", ident: decodeURIComponent(m[1]),
+    // decodeURIComponent throws URIError on a malformed escape ("100%",
+    // "%E0"); a pasted hash must never blank the app, so the raw match is
+    // the fallback ident.
+    let ident = m[1];
+    try {
+      ident = decodeURIComponent(m[1]);
+    } catch {
+      // keep the raw match
+    }
+    return { view: "session", ident,
              tab: TABS.has(tab) ? tab : "activity" };
   }
   return { view: "overview" };
