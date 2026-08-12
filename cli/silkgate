@@ -1053,8 +1053,9 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         "## If you need a destination that is not listed",
         "",
         "**Name the destination you need in your answer to whoever set your task.** Name",
-        "the host, the path, the method and the reason. Nobody inside this machine can",
-        "widen the list, so that report is the only thing that can.",
+        "the host, the path, the method and the reason. Printed output reaches whoever",
+        "set your task — that is the channel. Nobody inside this machine can widen the",
+        "list, so that report is the only thing that can.",
     ]
     if github_read or github_write:
         write_set = set(github_write)

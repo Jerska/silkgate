@@ -1711,6 +1711,10 @@ class TestGuestBriefEgress(CliCase):
         # No rules, no patterns — a legend under an empty list would explain nothing.
         self.assertNotIn("DNS label", self.ctx(""))
 
+    def test_the_report_channel_is_defined(self):
+        self.assertIn("Printed output reaches whoever\nset your task — that is the "
+                      "channel", self.ctx())
+
 
 if __name__ == "__main__":
     unittest.main()
