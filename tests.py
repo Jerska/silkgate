@@ -99,6 +99,9 @@ def assign(tests):
 
     The union of the shards must equal discovery exactly: a test no entry
     claims, or an entry no test matches, kills the run before any test runs.
+    A module that raises SkipTest at import (test_addon without mitmproxy)
+    reaches discovery as one synthetic ModuleSkipped case named after the
+    module, so the module's entry claims that case and the gate still holds.
     """
     entry_to_shard = {}
     for shard, entries in SHARDS.items():
@@ -111,7 +114,11 @@ def assign(tests):
     problems = []
     for test in tests:
         cls = test.__class__
-        for key in (f"{cls.__module__}.{cls.__qualname__}", cls.__module__):
+        keys = (f"{cls.__module__}.{cls.__qualname__}", cls.__module__)
+        if cls.__module__ == "unittest.loader":
+            # A skipped module's synthetic case; its method name is the module.
+            keys = (test.id().rsplit(".", 1)[-1],)
+        for key in keys:
             if key in entry_to_shard:
                 assignment[test.id()] = entry_to_shard[key]
                 matched.add(key)
