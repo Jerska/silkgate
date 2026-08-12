@@ -11,6 +11,7 @@
 
 import { newStore, fold } from "./store.js";
 import { newCapture, foldCapture } from "./capture.js";
+import { newHistory, pushSamples } from "./metrics.js";
 import { parseRoute, buildRoute, legacyRedirect } from "./router.js";
 import { newCallsView } from "./views/calls.js";
 import { newOverviewView } from "./views/overview.js";
@@ -41,7 +42,9 @@ const ctx = {
   captureState: "unknown",       // unknown | live | unavailable
   sessions: null,                // the last /api/sessions payload, verbatim
   metrics: null,                 // the last /api/metrics payload, or null
+  metricsHistory: newHistory(),  // 30-sample rings behind the sparklines
   navigate(route) { location.hash = buildRoute(route); },
+  refreshSessions,               // views nudge the poll after a control POST
 };
 
 // --- flush: one clock, two dirty sets ------------------------------------------
@@ -100,6 +103,24 @@ async function reloadEvents() {
   return hist.cursor;
 }
 
+// The badge answers for BOTH streams: "live" only when everything that should
+// be open is open, a suffix when capture has no backend yet, "reconnecting…"
+// the moment either trail drops — a gap in either is a gap in the picture.
+let eventsUp = null;             // null until the first open
+let captureUp = null;
+
+function updateStreamBadge() {
+  const capExpected = ctx.captureState === "live";
+  if (eventsUp === false || (capExpected && captureUp === false)) {
+    streamState.textContent = "reconnecting…";
+  } else if (eventsUp) {
+    streamState.textContent = capExpected && captureUp
+      ? "live" : "live — no capture";
+  } else {
+    streamState.textContent = "…";
+  }
+}
+
 let stream = null;
 
 function openStream(cursor) {
@@ -109,8 +130,8 @@ function openStream(cursor) {
   const url = "/api/stream"
     + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : "");
   stream = new EventSource(url);
-  stream.onopen = () => { streamState.textContent = "live"; };
-  stream.onerror = () => { streamState.textContent = "reconnecting…"; };
+  stream.onopen = () => { eventsUp = true; updateStreamBadge(); };
+  stream.onerror = () => { eventsUp = false; updateStreamBadge(); };
   stream.onmessage = (e) => {
     let rec;
     try {
@@ -151,9 +172,7 @@ function foldCaptureRec(rec) {
 async function reloadCapture() {
   const hist = await fetchJSON(`/api/capture?limit=${CAPTURE_LIMIT}`);
   ctx.capture = newCapture();
-  // The contract fixes the endpoint and the cursor, not the list's key — the
-  // backend lands in parallel, so accept either spelling.
-  for (const rec of hist.records ?? hist.events ?? []) {
+  for (const rec of hist.events ?? []) {   // the envelope froze on `events`
     foldCapture(ctx.capture, rec);
   }
   if (view) view.rebuild();
@@ -168,6 +187,7 @@ async function bootCapture() {
     cursor = await reloadCapture();
   } catch {
     ctx.captureState = "unavailable";
+    updateStreamBadge();
     return;
   }
   ctx.captureState = "live";
@@ -181,6 +201,8 @@ function openCaptureStream(cursor) {
   const url = "/api/capture/stream"
     + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : "");
   captureStream = new EventSource(url);
+  captureStream.onopen = () => { captureUp = true; updateStreamBadge(); };
+  captureStream.onerror = () => { captureUp = false; updateStreamBadge(); };
   captureStream.onmessage = (e) => {
     let rec;
     try {
@@ -238,6 +260,7 @@ async function refreshMetrics() {
     return;
   }
   ctx.metrics = data;
+  pushSamples(ctx.metricsHistory, data);
   for (const m of data.metrics ?? []) {
     if (m && m.session != null) {
       dirtySessions.add(m.session);
@@ -311,6 +334,12 @@ function dispatch() {
   if (view && key === viewKey) {
     view.onRoute(route);
     syncNav(route);
+    // wantsMetrics can flip on a tab change (only the metrics tab and the
+    // overview poll): re-decide without remounting.
+    stopMetricsPoll();
+    if (document.visibilityState !== "hidden") {
+      startMetricsPoll();
+    }
     return;
   }
   if (view) view.unmount();
