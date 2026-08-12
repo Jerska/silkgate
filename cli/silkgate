@@ -60,6 +60,7 @@ SESSIONS_DIR = SILK_DIR / "sessions"
 CA_DIR = SILK_DIR / "ca"                      # public MITM cert only, never the key
 DOCKER_CFG_DIR = SILK_DIR / "docker"          # our own DOCKER_CONFIG — see docker_env()
 GUEST_CONTEXT = "/silkgate/CONTEXT.md"        # what the guest is told about its sandbox
+GUEST_EXECS = "/silkgate/execs"               # one pidfile per exec, <exec_id>.pid
 PROXY_JSON = SILK_DIR / "proxy.json"          # shared-proxy meta (pid/ports/log/sock)
 PROXY_SOCK = SILK_DIR / "proxy.sock"          # control socket (line-delimited JSON)
 POOL_SIZE = 16                                 # base_port .. base_port+15
@@ -1928,6 +1929,23 @@ _OUT_TAG = b"\x1f"          # US: a stdout line
 _EXPORT_CONTEXT = ('[ -f %s ] && SILKGATE_CONTEXT=$(cat %s) && export SILKGATE_CONTEXT; '
                    % (GUEST_CONTEXT, GUEST_CONTEXT))
 
+# What a journaled exec leaves behind in the guest, prepended to the wrapper shell.
+# The header rides ANTHROPIC_CUSTOM_HEADERS — the SDK's escape hatch for extra request
+# headers — so the proxy can attribute an agent's API traffic to this exec; a value the
+# caller already set keeps its lines and the marker lands appended on a new one, never
+# clobbering. The pidfile is what a later kill endpoint signals the process group by.
+# Both are best-effort: a guest that cannot take them still runs its command, so the
+# whole snippet swallows its own errors.
+def _exec_marker_sh(exec_id):
+    if not exec_id:
+        return ""
+    return ('ANTHROPIC_CUSTOM_HEADERS="${ANTHROPIC_CUSTOM_HEADERS:+'
+            '${ANTHROPIC_CUSTOM_HEADERS}\n'
+            f'}}X-Silkgate-Exec: {exec_id}"; export ANTHROPIC_CUSTOM_HEADERS; '
+            f'{{ mkdir -p {GUEST_EXECS} && printf %s "$$" >{GUEST_EXECS}/{exec_id}.pid; }} '
+            '2>/dev/null || :; ')
+
+
 _RELAY_SH = (_EXPORT_CONTEXT
              + 'd=$(mktemp -d); mkfifo "$d/o" "$d/e"; '
              f'while IFS= read -r l || [ -n "$l" ]; do printf "\\{ord(_OUT_TAG):03o}%s\\n" "$l"; done <"$d/o" & po=$!; '
@@ -1935,7 +1953,7 @@ _RELAY_SH = (_EXPORT_CONTEXT
              '"$@" </dev/null >"$d/o" 2>"$d/e"; rc=$?; wait $po $pe; rm -rf "$d"; exit $rc')
 
 
-def run_guest(build_argv, cmd, *, tty, on_line=None):
+def run_guest(build_argv, cmd, *, tty, on_line=None, exec_id=None):
     """Run a guest command and return its exit code.
 
     Default (`--no-tty`): the command runs non-interactively with pipes for stdout/stderr,
@@ -1944,10 +1962,14 @@ def run_guest(build_argv, cmd, *, tty, on_line=None):
     the screen: nothing sits between it and the reader, so it can draw anything there,
     including a line styled like say()'s. The voice mark only means something where the
     guest's bytes pass through this process.
+
+    `exec_id` threads the exec marker into whichever wrapper shell runs (see
+    _exec_marker_sh); None runs unmarked, as silkgate's own setup execs do.
     """
+    marker = _exec_marker_sh(exec_id)
     if tty:
         # A terminal run gets no relay, so the context export needs its own tiny shell.
-        cmd = ["sh", "-c", _EXPORT_CONTEXT + 'exec "$@"', "_"] + list(cmd)
+        cmd = ["sh", "-c", _EXPORT_CONTEXT + marker + 'exec "$@"', "_"] + list(cmd)
         if sys.stdout.isatty():
             # Inheriting a real terminal is what keeps a TUI fully interactive — and
             # what lets an interrupted TUI leave that terminal in raw mode, so the
@@ -1960,8 +1982,8 @@ def run_guest(build_argv, cmd, *, tty, on_line=None):
                 finally:
                     stop(proc)
         return _pty_relay(build_argv(cmd), demux=False, on_line=on_line)
-    return _pty_relay(build_argv(["sh", "-c", _RELAY_SH, "_"] + list(cmd)), demux=True,
-                      on_line=on_line)
+    return _pty_relay(build_argv(["sh", "-c", marker + _RELAY_SH, "_"] + list(cmd)),
+                      demux=True, on_line=on_line)
 
 
 def _pty_relay(argv, *, demux, on_line=None):
@@ -2806,8 +2828,12 @@ def cmd_run(args):
         elif spec:
             _setup_checkout_guest(sandbox_name(name), spec["base"], name)
         say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
+        exec_id = uuid4().hex[:8]
+        _journal(name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
+                 env_names=sorted({p.partition("=")[0] for p in args.env}), via="run")
         rc = run_guest(lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
-                       cmd, tty=tty)
+                       cmd, tty=tty, exec_id=exec_id)
+        _journal(name, "exec_end", exec_id=exec_id, rc=rc)
     finally:
         # One-shot means one-shot even interrupted: the unwind runs with the stop
         # signals deferred, so a second Ctrl-C cannot leave the session half-removed.
@@ -2949,8 +2975,13 @@ def cmd_exec(args):
     if not cmd:
         die("nothing to run — usage: silkgate exec NAME [-t] [-e K=V]... -- CMD ...")
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
-    sys.exit(run_guest(lambda c: msb_exec_argv(meta["sandbox"], c, tty=tty, env=args.env),
-                       cmd, tty=tty))
+    exec_id = uuid4().hex[:8]
+    _journal(args.name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
+             env_names=sorted({p.partition("=")[0] for p in args.env}), via="exec")
+    rc = run_guest(lambda c: msb_exec_argv(meta["sandbox"], c, tty=tty, env=args.env),
+                   cmd, tty=tty, exec_id=exec_id)
+    _journal(args.name, "exec_end", exec_id=exec_id, rc=rc)   # before sys.exit takes rc
+    sys.exit(rc)
 
 
 def cmd_attach(args):
@@ -2960,7 +2991,13 @@ def cmd_attach(args):
     cmd = meta.get("command")
     if not cmd:
         die(f"session {args.name!r} has no default command — use: silkgate exec {args.name} -t -- CMD")
-    sys.exit(run_guest(lambda c: msb_exec_argv(meta["sandbox"], c, tty=True), cmd, tty=True))
+    exec_id = uuid4().hex[:8]
+    _journal(args.name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=True,
+             env_names=[], via="attach")
+    rc = run_guest(lambda c: msb_exec_argv(meta["sandbox"], c, tty=True), cmd, tty=True,
+                   exec_id=exec_id)
+    _journal(args.name, "exec_end", exec_id=exec_id, rc=rc)
+    sys.exit(rc)
 
 
 def cmd_down(args):
