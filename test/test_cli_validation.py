@@ -1749,6 +1749,70 @@ class TestMountProvisioning(CliCase):
         self.assertIn("No host directory is mounted", seen["context"])
 
 
+class TestMemoryFlag(CliCase):
+    """--memory sizes the guest microVM. The size must land in the msb create argv as
+    -m SIZE — nothing ever recreates a sandbox from session metadata, so that argv is
+    the flag's whole effect — and a size msb would not parse must die at the command
+    line, before any sandbox work starts."""
+
+    def create_argv(self, argv):
+        """The exact msb create argv a run/up composes, captured at the call and the
+        run stopped there — before any msb process."""
+        seen = {}
+        real = sg.msb_create_argv
+
+        def spy(*a, **kw):
+            seen["argv"] = real(*a, **kw)
+            raise SystemExit(42)
+
+        with self.no_preflight(), \
+                mock.patch.object(sg, "_msb", lambda: "msb"), \
+                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
+                mock.patch.object(sg, "_proxy_running", lambda: True), \
+                mock.patch.object(sg, "ensure_proxy",
+                                  lambda port: {"log": "/dev/null", "ports": [8090]}), \
+                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(sg, "msb_create_argv", spy), \
+                mock.patch.object(sg, "_remove_sandbox", lambda *a, **k: True), \
+                mock.patch.object(sg, "_release_port", lambda *a, **k: None), \
+                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(sys, "argv", ["silkgate"] + argv), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit) as caught:
+            sg.main()
+        self.assertEqual(caught.exception.code, 42, argv)
+        return seen["argv"]
+
+    def test_memory_lands_in_msb_create_for_run_and_up(self):
+        for argv in (["run", "--memory", "512M", "--", "true"],
+                     ["up", "--memory", "512M"]):
+            created = self.create_argv(argv)
+            self.assertIn(("-m", "512M"), list(zip(created, created[1:])), argv)
+
+    def test_no_flag_passes_no_dash_m(self):
+        for argv in (["run", "--", "true"], ["up"]):
+            self.assertNotIn("-m", self.create_argv(argv), argv)
+
+    def test_the_builder_itself_defaults_to_no_dash_m(self):
+        with mock.patch.object(sg, "_msb", lambda: "msb"):
+            created = sg.msb_create_argv("sg-x", "img", 8090, memory="1G")
+            self.assertIn(("-m", "1G"), list(zip(created, created[1:])))
+            self.assertNotIn("-m", sg.msb_create_argv("sg-x", "img", 8090))
+
+    def test_the_shape_msb_documents_survives_parsing(self):
+        for size in ("512M", "1G", "8G", "16384M"):
+            self.assertEqual(sg._memory_arg(size), size)
+
+    def test_a_malformed_size_dies_at_the_command_line(self):
+        # Exit code 2 is argparse's, raised while parsing — structurally before any
+        # proxy, image, or msb work, which is why nothing here needs a mock.
+        for bad in ("512", "1g", "1.5G", "G", "512MB", "1 G", "-1G", ""):
+            self.refuses_argv("invalid memory size", "--memory",
+                              ["run", f"--memory={bad}", "--", "true"])
+            self.refuses_argv("invalid memory size", "--memory",
+                              ["up", f"--memory={bad}"])
+
+
 class TestGuestBriefMounts(CliCase):
     """session_context keys the /workspace sentence on the mount at /workspace and lists
     every other mount with its mode."""
