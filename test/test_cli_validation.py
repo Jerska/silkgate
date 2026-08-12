@@ -633,6 +633,43 @@ class TestProfileInstanceDedup(ArgProfileCase):
         self.assertEqual([p.spec for p in profiles], ["tmpl:a/b", "tmpl:c/d"])
 
 
+class TestProfileSupersedes(ArgProfileCase):
+    """`supersedes = NAME` drops the NAME instance with the same arg, and says so.
+    There is no dependency feature to pair with it — grants stay tight."""
+
+    WIDE = {"profile.conf": "arg_pattern = [a-z]+/[a-z]+\nsupersedes = tmpl\n",
+            "rules.txt": "example.com/{arg}/** GET POST PUT\n"}
+
+    def setUp(self):
+        super().setUp()
+        self.profile_dir({"tmpl": self.TMPL, "wide": self.WIDE})
+
+    def resolves(self, specs):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            profiles = sg.resolve_profiles(specs)
+        return [p.spec for p in profiles], err.getvalue()
+
+    def test_same_arg_instance_dropped_and_announced(self):
+        for specs in (["tmpl:a/b", "wide:a/b"], ["wide:a/b", "tmpl:a/b"]):
+            survivors, said = self.resolves(specs)
+            self.assertEqual(survivors, ["wide:a/b"], specs)
+            self.assertIn("wide:a/b supersedes tmpl:a/b", said)
+
+    def test_other_args_survive(self):
+        survivors, said = self.resolves(["tmpl:c/d", "wide:a/b"])
+        self.assertEqual(survivors, ["tmpl:c/d", "wide:a/b"])
+        self.assertEqual(said, "")
+
+    def test_superseded_rules_never_compose(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            text = sg.compose_rules(sg.resolve_profiles(["tmpl:a/b", "wide:a/b"]))
+        governing = sg.load_ruleset(text).match("example.com", "/a/b/x", "GET")
+        self.assertIn("PUT", governing.methods)
+        self.assertEqual(text.count("# --- profile"), 1, text)
+
+
 class TestProfileArgExpansion(ArgProfileCase):
     """{arg} expands into rules.txt alone, at composition time, after validation."""
 

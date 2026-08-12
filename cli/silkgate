@@ -328,6 +328,17 @@ def resolve_profiles(specs, *, allow_verify_only=False):
                 f"that fully matches its arg_pattern {p.arg_pattern!r}")
         if all((p.name, p.version, p.arg) != (q.name, q.version, q.arg) for q in profiles):
             profiles.append(p)
+    # `supersedes = NAME` in profile.conf: an instance of the declaring profile drops
+    # any NAME instance carrying the same arg — the wider grant absorbs the narrower
+    # one, announced so the operator sees the list they asked for shrink.
+    for p in list(profiles):
+        target = p.conf.get("supersedes")
+        if not target or p not in profiles:
+            continue
+        for q in [q for q in profiles if q is not p
+                  and q.name == target and q.arg == p.arg]:
+            say(f"profile {p.spec} supersedes {q.spec} — dropping {q.spec}")
+            profiles.remove(q)
     have = {p.name for p in profiles}
     for p in profiles:
         missing = [r for r in re.split(r"[,\s]+", p.conf.get("requires", "")) if r and r not in have]
