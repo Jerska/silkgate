@@ -141,6 +141,40 @@ class TestJournal(JournalCase):
     def test_read_journal_missing_file_is_empty(self):
         self.assertEqual(sg._read_journal(self.tmp / "absent.jsonl"), [])
 
+    def test_argv_is_capped_per_record(self):
+        """argv holds the operator's whole prompt and was the journal's one unbounded
+        field — the archive inherits the journal whole, so one record must stay a few
+        KiB however large the prompt."""
+        self.write_session("j4")
+        prompt = "p" * (sg._JOURNAL_ARGV_LIMIT * 3)
+        sg._journal("j4", "exec_start", exec_id="cafe1234",
+                    argv=["claude", "-p", prompt], tty=False, env_names=[], via="exec")
+        rec = sg._read_journal(sg.session_dir("j4") / "journal.jsonl")[0]
+        recorded = sum(len(a) for a in rec["argv"])
+        self.assertLessEqual(recorded, sg._JOURNAL_ARGV_LIMIT + len("..."))
+        self.assertEqual(rec["argv"][:2], ["claude", "-p"],
+                         "whole leading elements survive")
+        self.assertTrue(rec["argv"][-1].endswith("..."),
+                        "the cut element carries the truncation mark")
+        self.assertTrue(rec["argv"][-1].startswith("ppp"),
+                        "the prompt's head is what stays readable")
+
+    def test_argv_at_or_under_the_cap_is_recorded_whole(self):
+        self.write_session("j5")
+        argv = ["claude", "-p", "q" * 100]
+        sg._journal("j5", "exec_start", exec_id="cafe1234", argv=argv)
+        rec = sg._read_journal(sg.session_dir("j5") / "journal.jsonl")[0]
+        self.assertEqual(rec["argv"], argv)
+
+    def test_argv_elements_past_the_cut_are_dropped(self):
+        self.write_session("j6")
+        argv = ["a" * sg._JOURNAL_ARGV_LIMIT, "never-recorded", "nor-this"]
+        sg._journal("j6", "exec_start", exec_id="cafe1234", argv=argv)
+        rec = sg._read_journal(sg.session_dir("j6") / "journal.jsonl")[0]
+        self.assertEqual(rec["argv"], [argv[0], "..."],
+                         "the first element spends the whole budget; the mark says "
+                         "more followed")
+
 
 # -- session ids ------------------------------------------------------------------
 

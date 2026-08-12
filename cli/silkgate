@@ -1284,6 +1284,29 @@ def _new_sid(name):
     return f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{name}-{uuid4().hex[:6]}"
 
 
+# How much argv text one journal record may hold. The journal is the one archive
+# member with no cap of its own, and argv is its unbounded field (the operator's
+# whole prompt), so the record is bounded here the way the addon's _clip bounds
+# guest header text: cut at the limit with a "..." tail. A few KiB keeps any real
+# prompt's head readable while a supervisor loop of huge prompts costs megabytes,
+# never gigabytes.
+_JOURNAL_ARGV_LIMIT = 8192
+
+
+def _clip_argv(argv):
+    """argv for one journal record: whole elements until the limit, the element that
+    crosses it cut with a '...' tail, everything after dropped."""
+    out, spent = [], 0
+    for arg in argv:
+        s = str(arg)
+        if spent + len(s) > _JOURNAL_ARGV_LIMIT:
+            out.append(s[:_JOURNAL_ARGV_LIMIT - spent] + "...")
+            break
+        out.append(s)
+        spent += len(s)
+    return out
+
+
 def _journal(name, event, **fields):
     """Append one event record to a session's journal (journal.jsonl in its dir).
 
@@ -1294,7 +1317,8 @@ def _journal(name, event, **fields):
     concurrent execs interleave whole records, never bytes.
 
     Privacy: an exec's argv contains the operator's prompt — recording it is the
-    feature. Environment variables appear as names only, never values.
+    feature, and _clip_argv bounds it so it cannot also be a growth path. Environment
+    variables appear as names only, never values.
     """
     _journal_into(session_dir(name), event, **fields)
 
@@ -1303,6 +1327,8 @@ def _journal_into(sdir, event, **fields):
     """_journal against an explicit directory — for the one record (`created`) that
     must land in the staging dir, before the rename makes the session appear."""
     try:
+        if isinstance(fields.get("argv"), (list, tuple)):
+            fields["argv"] = _clip_argv(fields["argv"])
         record = json.dumps({"ts": now_iso(), "event": event, **fields})
         fd = os.open(sdir / "journal.jsonl",
                      os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
