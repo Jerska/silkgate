@@ -60,7 +60,8 @@ class ReproVerdicts(ScriptCase):
         self.assertExitsZero(run(sys.executable, REPO / "test" / "repro" / "build_injection.py"))
 
     def test_git_profile_rules_hold(self):
-        """The static half of the §6 repro: profiles/git/rules.txt must match both
+        """The static half of the §6 repro: profiles/git/rules.txt must parse to zero
+        rules, and the composed github floor plus a github-read grant must match both
         smart-HTTP fetch phases and deny push. The live half needs msb and the network."""
         self.assertExitsZero(run("sh", REPO / "test" / "repro" / "git_profile_clone.sh",
                                  "--static"))

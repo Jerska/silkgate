@@ -17,7 +17,7 @@ allow/deny decision is actually made.
 | `build_injection.py` | shell/Dockerfile injection through `--with name@VERSION` and `--base` | nothing |
 | `host_spoof_live.sh` | the same critical finding end to end, through a real proxy | mitmproxy; binds :8099 |
 | `connect_probe.sh` | `CONNECT` is accepted with no policy decision and no audit line | mitmproxy; binds :8099 |
-| `git_profile_clone.sh` | `--with git` cannot clone from GitHub | docker, msb, a built image |
+| `git_profile_clone.sh` | the git profile holds zero rules, and the github floor plus a github-read grant clone and fetch, never push | docker, msb, a built image |
 
 No script here needs a real API key: `addon_host_spoof.py` uses a sentinel secret so that what
 leaks in the demonstration is a string with no value.
