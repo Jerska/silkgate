@@ -6,7 +6,10 @@
 # spelling. The LFS batch API lives at /{repo}(.git)/info/lfs/objects/batch; its
 # content-type and accept pins are regexes because git-lfs appends `; charset=utf-8`
 # and an option token cannot contain a space. lfs.github.com stays listed beside it —
-# the LFS endpoint derivation is unstable, so both hosts stay. Object downloads are
+# the LFS endpoint derivation is unstable, so both hosts stay. The api.github.com
+# grant is two lines for the same both-forms reason: repos/{arg}/** compiles to a
+# pattern whose literal slash must be present, so the bare repos/{arg} line is what
+# admits the repo-root call itself. Object downloads are
 # presigned in the query string and carry no credential. The raw and codeload lines
 # are anonymous too: a private file there answers 404, not 403.
 github.com/{arg}/info/refs            GET   q:service=git-upload-pack  h:git-protocol=version=2  inject_auth=github
@@ -16,6 +19,7 @@ github.com/{arg}.git/git-upload-pack  POST  max_body=1m  h:content-type=applicat
 github.com/{arg}/info/lfs/objects/batch      POST  max_body=1m  h:content-type~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:accept~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  inject_auth=github
 github.com/{arg}.git/info/lfs/objects/batch  POST  max_body=1m  h:content-type~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:accept~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  inject_auth=github
 lfs.github.com/{arg}/**               GET POST  max_body=1m  inject_auth=github
+api.github.com/repos/{arg}            GET   q:*  inject_auth=github
 api.github.com/repos/{arg}/**         GET   q:*  inject_auth=github
 raw.githubusercontent.com/{arg}/**    GET
 codeload.github.com/{arg}/**          GET

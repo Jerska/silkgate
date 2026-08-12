@@ -1893,6 +1893,12 @@ class TestGithubProfiles(CliCase):
             for method in ("POST", "PUT", "PATCH", "DELETE"):
                 self.assertIsNone(
                     rs.match("api.github.com", "/repos/some/repo/contents/x", method))
+            root = rs.match("api.github.com", "/repos/some/repo", "GET")
+            self.assertEqual(root.methods, {"GET"})
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                self.assertIsNone(
+                    rs.match("api.github.com", "/repos/some/repo", method),
+                    f"{method} on the bare repo root must stay read-only")
 
     def test_read_grant_covers_fetch_with_the_credential(self):
         rs = self.compose("github-read:some/repo")
@@ -1934,6 +1940,22 @@ class TestGithubProfiles(CliCase):
         api = rs.match("api.github.com", "/repos/some/repo/pulls/1/merge", "PUT")
         self.assertEqual(api.methods, {"GET", "POST", "PUT", "PATCH", "DELETE"})
         self.assertEqual(api.inject_auth, "github")
+
+    # --- the REST API legs ---
+
+    def test_api_repo_root_matches_without_a_trailing_segment(self):
+        # repos/{arg}/** compiles to a pattern whose literal slash must be present,
+        # so GET api.github.com/repos/OWNER/REPO rides the bare repos/{arg} line.
+        root = self.compose("github-read:some/repo").match(
+            "api.github.com", "/repos/some/repo", "GET")
+        self.assertIsNotNone(root, "the bare repo root must match under read")
+        self.assertEqual(root.methods, {"GET"})
+        self.assertEqual(root.inject_auth, "github")
+        rw = self.compose("github-write:some/repo")
+        for method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+            got = rw.match("api.github.com", "/repos/some/repo", method)
+            self.assertIsNotNone(got, f"{method} on the bare repo root under write")
+            self.assertEqual(got.inject_auth, "github", method)
 
     def test_every_body_bearing_rule_pins_max_body(self):
         for specs in (("git", "github", "github-read:some/repo"),
