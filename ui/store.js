@@ -163,15 +163,30 @@ export function fold(store, rec) {
   return rec.id;
 }
 
+// The filter's session value doubles as a sentinel: "null" selects unattributed
+// rows (the /api/events vocabulary, and what old bookmarks carry). But "null" is
+// also a legal session name, so in filter space that real name is spelled
+// "(null)" — parentheses cannot appear in a name (letters, digits, '-', '_'
+// only), so the two never collide. These two functions are the only crossing
+// points between names and filter values; every other name is itself.
+export function sessionToFilter(name) {
+  return name === "null" ? "(null)" : name;
+}
+
+export function filterToSession(value) {
+  return value === "(null)" ? "null" : value;
+}
+
 // Whether a row survives the filters, mirroring the server's /api/events
-// semantics: `session` compares exactly with "null" selecting unattributed rows,
-// `decision` exactly, `method` case-folded, `host` as a case-folded substring,
-// and `since` (epoch ms) excludes a row whose ts cannot be placed in time.
+// semantics: `session` compares exactly — with "null" selecting unattributed
+// rows and "(null)" a session named null (see sessionToFilter) — `decision`
+// exactly, `method` case-folded, `host` as a case-folded substring, and
+// `since` (epoch ms) excludes a row whose ts cannot be placed in time.
 export function rowPasses(row, f) {
   if (f.session) {
     if (f.session === "null") {
       if (row.session !== null) return false;
-    } else if (row.session !== f.session) {
+    } else if (row.session !== filterToSession(f.session)) {
       return false;
     }
   }

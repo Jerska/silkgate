@@ -10,7 +10,8 @@
 // <tr> per row id and which of them a filter admits. All record data reaches
 // the DOM as textContent.
 
-import { rowPasses, statusText, fmtTime, fmtBytes, fmtDur, badges } from "../store.js";
+import { rowPasses, sessionToFilter, statusText, fmtTime, fmtBytes, fmtDur,
+         badges } from "../store.js";
 import { el } from "../render.js";
 
 const WINDOWS = { "15m": 15 * 60e3, "1h": 3600e3, "24h": 86400e3 };
@@ -30,7 +31,10 @@ export function newCallsView({ fixedSession = null } = {}) {
   function currentFilters() {
     const w = controls.window.value;
     return {
-      session: fixedSession ?? (controls.session.value || null),
+      // Filter space, not names: a pinned session named "null" must not read
+      // as the unattributed sentinel.
+      session: fixedSession != null ? sessionToFilter(fixedSession)
+        : (controls.session.value || null),
       decision: controls.decision.value || null,
       method: controls.method.value.trim() || null,
       host: controls.host.value.trim() || null,
@@ -90,7 +94,7 @@ export function newCallsView({ fixedSession = null } = {}) {
       controls.session.remove(2);
     }
     for (const meta of ctx.sessions?.sessions || []) {
-      if (meta && meta.name) ensureSessionOption(meta.name);
+      if (meta && meta.name) ensureSessionOption(sessionToFilter(meta.name));
     }
     ensureSessionOption(current);
     controls.session.value = current;
@@ -113,7 +117,7 @@ export function newCallsView({ fixedSession = null } = {}) {
     cell(tr, fmtTime(row.ts), "time", row.ts || "");
     const s = cell(tr, row.session === null ? "·" : row.session, "session",
                    fixedSession ? "" : "click to filter by this session");
-    s.dataset.session = row.session === null ? "null" : row.session;
+    s.dataset.session = row.session === null ? "null" : sessionToFilter(row.session);
     cell(tr, row.decision, "decision", row.reason || "");
     cell(tr, row.method, "method");
     cell(tr, row.host + (row.port != null ? ":" + row.port : ""), "host",

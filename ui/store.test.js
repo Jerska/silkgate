@@ -2,7 +2,8 @@
 // they lean on. Never served, never imported by served files.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { newStore, fold } from "./store.js";
+import { newStore, fold, rowPasses, sessionToFilter, filterToSession }
+  from "./store.js";
 
 function rec(over = {}) {
   return { ts: "2026-08-12T12:00:00.000+00:00", decision: "allow", id: "f1",
@@ -76,4 +77,36 @@ test("duplicate records never touch the tallies", () => {
   fold(s, rec({ id: "a" }));
   fold(s, rec({ id: "a" }));
   assert.equal(s.tallies.get("demo").requests, 1);
+});
+
+// --- the session filter's sentinel vs a session literally named "null" ---------
+
+test("filter space spells the name null as (null), and only that name", () => {
+  assert.equal(sessionToFilter("null"), "(null)");
+  assert.equal(sessionToFilter("demo"), "demo");
+  assert.equal(filterToSession("(null)"), "null");
+  assert.equal(filterToSession("demo"), "demo");
+  assert.equal(filterToSession(sessionToFilter("null")), "null");
+});
+
+test('the "null" filter admits only unattributed rows', () => {
+  const unattributed = { ...rec(), session: null };
+  const named = { ...rec(), session: "null" };   // a legal name
+  assert.equal(rowPasses(unattributed, { session: "null" }), true);
+  assert.equal(rowPasses(named, { session: "null" }), false);
+});
+
+test('the "(null)" filter admits only the session named null', () => {
+  const unattributed = { ...rec(), session: null };
+  const named = { ...rec(), session: "null" };
+  assert.equal(rowPasses(named, { session: "(null)" }), true);
+  assert.equal(rowPasses(unattributed, { session: "(null)" }), false);
+  assert.equal(rowPasses({ ...rec(), session: "demo" }, { session: "(null)" }),
+               false);
+});
+
+test("an ordinary name still filters as itself", () => {
+  assert.equal(rowPasses({ ...rec(), session: "demo" }, { session: "demo" }), true);
+  assert.equal(rowPasses({ ...rec(), session: "other" }, { session: "demo" }),
+               false);
 });
