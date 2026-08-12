@@ -1007,7 +1007,8 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         ]
         for rule in ruleset.rules:
             methods = " ".join(sorted(rule.methods))
-            lines.append(f"- `{rule.raw.split()[0]}` — {methods}")
+            inject = f" — injects `{rule.inject_auth}`" if rule.inject_auth else ""
+            lines.append(f"- `{rule.raw.split()[0]}` — {methods}{inject}")
         lines += [
             "",
             "If a package registry appears above, GET is enough to install from it. The",

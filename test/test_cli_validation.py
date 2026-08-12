@@ -1683,5 +1683,20 @@ class TestGuestBriefMounts(CliCase):
         self.assertNotIn("disposable checkout", ctx)
 
 
+class TestGuestBriefEgress(CliCase):
+    """The egress half of the guest brief: the injected-rule marker, the glob legend,
+    the 500 action, and the report channel."""
+
+    def ctx(self, rules="api.anthropic.com/v1/** POST inject_auth=anthropic\n"):
+        return sg.session_context([], sg.load_ruleset(rules), persistent=False)
+
+    def test_injected_rule_carries_the_marker(self):
+        self.assertIn("- `api.anthropic.com/v1/**` — POST — injects `anthropic`",
+                      self.ctx())
+
+    def test_plain_rule_carries_no_marker(self):
+        self.assertNotIn("injects", self.ctx("api.anthropic.com/v1/** POST\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
