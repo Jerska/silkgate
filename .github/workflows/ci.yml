@@ -32,18 +32,22 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      # The whole host suite is one discovery run, the same command a human runs
-      # locally. Discovery, not a list: a new test/test_*.py joins CI by existing.
+      # The whole host suite through the sharded runner, the same command a human runs
+      # locally. A list, gated against discovery: the runner exits 2 before any test
+      # starts unless SHARDS covers discovery exactly, so a new test/test_*.py that
+      # nobody named in SHARDS is a loud red here, never a file CI silently skips.
       # test/test_scripts.py carries the checks that are not unittest files — the
       # engine's in-module self-tests, the asserting test/repro/ scripts (a per-file
       # decision, never a glob), and `bash -n` on the guest script — and a syntax error
       # in cli/silkgate fails the four modules that load it. mitmproxy is deliberately
-      # absent here, so test_addon.py must appear in this log as
-      # `skipped 'mitmproxy is not installed …'`: a silent omission or an import error
-      # is a bug in the suite, and the addon jobs below run it for real. Every test
-      # runs even after one fails, so a red run names all of the broken files at once.
+      # absent here, so the whole test_addon module records as one skip: the summary
+      # table's skip column must show it on the shard that holds test_addon, and the OK
+      # line must count it. An import error in that module is not a skip — discovery
+      # reports it and the runner exits 2 — and the addon jobs below run those tests for
+      # real. Every shard process runs even after one fails, and each shard runs all of
+      # its tests, so a red run still names all of the broken files at once.
       - name: host suite, addon tests skipping for want of mitmproxy
-        run: python3 -m unittest discover -s test -v
+        run: python3 tests.py
 
   # The addon reaches into mitmproxy internals — flow.request.host_header, the
   # http_connect hook, .stream semantics — so it is tested against the exact version the
