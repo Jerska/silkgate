@@ -12,6 +12,8 @@ const PRICES = {
   "claude-fable-5":           [10,        50,   1,          12.5,        1_000_000],
   "claude-mythos-5":          [10,        50,   1,          12.5,        1_000_000],
   "claude-opus-5":            [5,         25,   0.5,        6.25,        1_000_000],
+  // INTRODUCTORY rate, expires 2026-08-31 (verified 2026-08-12): becomes
+  // [3, 15, 0.3, 3.75, 1_000_000] after that date.
   "claude-sonnet-5":          [2,         10,   0.2,        2.5,         1_000_000],
   "claude-opus-4-8":          [5,         25,   0.5,        6.25,        1_000_000],
   "claude-opus-4-7":          [5,         25,   0.5,        6.25,        1_000_000],
@@ -31,14 +33,18 @@ const PRICES = {
 };
 
 // The longest prefix that matches wins, so "claude-opus-4-5-20251101" finds
-// claude-opus-4-5, never the shorter claude-opus-4 row.
+// claude-opus-4-5, never the shorter claude-opus-4 row. A prefix only matches
+// at a segment boundary: the next character must be "-" or the end — without
+// that, "claude-sonnet-4-60" would take the claude-sonnet-4-6 row.
 export function priceFor(model) {
   if (typeof model !== "string" || !model) {
     return null;
   }
   let best = null;
   for (const prefix of Object.keys(PRICES)) {
-    if (model.startsWith(prefix) && (best === null || prefix.length > best.length)) {
+    if (model.startsWith(prefix)
+        && (model.length === prefix.length || model[prefix.length] === "-")
+        && (best === null || prefix.length > best.length)) {
       best = prefix;
     }
   }
