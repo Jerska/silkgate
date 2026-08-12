@@ -124,7 +124,7 @@ class Fault(unittest.TestCase):
     (the msb 0.5.4 relay race), and no retry for anything that is an answer."""
 
     def setUp(self):
-        self.runs, self.notes = [], []
+        self.runs, self.run_kwargs, self.notes = [], [], []
         self._orig = (subprocess.run, sg._msb, sg.say)
         sg._msb = lambda: "msb"
         sg.say = self.notes.append
@@ -139,6 +139,7 @@ class Fault(unittest.TestCase):
         it = iter(outcomes)
         def run(argv, **kw):
             self.runs.append(argv)
+            self.run_kwargs.append(kw)
             out = next(it)
             if isinstance(out, BaseException):
                 raise out
@@ -178,6 +179,14 @@ class Fault(unittest.TestCase):
         self.assertIsNone(self.fault([self.done()]))
         self.assertEqual(len(self.runs), 1)
         self.assertEqual(self.notes, [])
+
+    def test_probe_never_inherits_the_callers_stdin(self):
+        """msb exec streams the caller's stdin to the guest and waits for EOF; the
+        probe reads none, and a detached caller (a background shell) hands over a
+        pipe that never closes — every attempt must run with stdin closed."""
+        self.assertIsNone(self.fault([self.timeout(), self.done()]))
+        self.assertEqual([kw.get("stdin") for kw in self.run_kwargs],
+                         [subprocess.DEVNULL, subprocess.DEVNULL])
 
 
 if __name__ == "__main__":

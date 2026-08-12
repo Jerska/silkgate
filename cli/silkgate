@@ -2032,6 +2032,10 @@ def tier1_fault(sandbox, port):
     of containment is the exact failure mode this exists to close.
     """
     argv = msb_exec_argv(sandbox, tier1_probe_cmd(port))
+    # stdin is closed: msb exec streams the caller's stdin to the guest and waits for
+    # EOF, the probe reads nothing, and a detached caller (a background shell, a cron
+    # job) hands over a pipe that never closes — the exec would sit out both timeouts
+    # below while the guest is healthy.
     # In-guest waits are bounded at 1s each; 15s covers msb exec itself stalling. One
     # stall has a known benign cause: msb 0.5.4's relay can silently swallow the FIRST
     # exec after a sandbox create — it hands the new client slot 0 and the id range of
@@ -2043,10 +2047,12 @@ def tier1_fault(sandbox, port):
     # nonzero exit, or a bad verdict token are answers, not swallowed requests, and are
     # not retried.
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=15)
     except subprocess.TimeoutExpired:
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+            proc = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, timeout=15)
         except subprocess.TimeoutExpired:
             return tier1_verdict("", port, error="msb exec did not return within 15s")
         say("note: the first Tier-1 probe exec timed out — the msb relay race (msb 0.5.4 "
@@ -2862,11 +2868,13 @@ def _bundle_in_guest(meta):
     """(token, detail) from the guest: NO_BRANCH, NO_COMMITS, BUNDLED <tip>, or ERROR <why>."""
     since = meta.get("branch_ingested") or meta["base"]
     try:
+        # stdin closed: the script reads none, and msb exec waits on an inherited
+        # stdin for EOF (see tier1_fault) — a detached caller's would never close.
         proc = subprocess.run(msb_exec_argv(meta["sandbox"],
                                             ["sh", "-c", _BUNDLE_SH, "_", meta["branch"],
                                              since, meta["base"]]),
-                              capture_output=True, text=True, start_new_session=True,
-                              timeout=_GIT_TIMEOUT)
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              start_new_session=True, timeout=_GIT_TIMEOUT)
     except subprocess.TimeoutExpired:
         return "SILKGATE_ERROR", "the guest did not answer the bundle request in time"
     for line in reversed(proc.stdout.splitlines()):
@@ -4189,11 +4197,14 @@ def _diff_in_guest(meta):
     else:
         script, env = _DIFF_SH.format(cd="cd /workspace\n"), ()
     try:
+        # stdin closed: the script reads none, and msb exec waits on an inherited
+        # stdin for EOF (see tier1_fault) — a detached caller's would never close.
         proc = subprocess.run(msb_exec_argv(meta["sandbox"],
                                             ["sh", "-c", script, "_", meta["base"]],
                                             env=env),
-                              capture_output=True, text=True, errors="replace",
-                              start_new_session=True, timeout=_DIFF_TIMEOUT)
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              errors="replace", start_new_session=True,
+                              timeout=_DIFF_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         return None, None, "the guest did not answer the diff request in time"
     if proc.returncode:
@@ -4385,9 +4396,12 @@ def _kill_in_guest(meta, exec_id):
     """(token, detail) from the guest: SILKGATE_KILLED, SILKGATE_NO_PIDFILE (the exec
     already ended — its wrapper's trap removed the pidfile), or SILKGATE_ERROR."""
     try:
+        # stdin closed: the script reads none, and msb exec waits on an inherited
+        # stdin for EOF (see tier1_fault) — a detached caller's would never close.
         proc = subprocess.run(msb_exec_argv(meta["sandbox"],
                                             ["sh", "-c", _KILL_SH, "_", exec_id]),
-                              capture_output=True, text=True, start_new_session=True,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              start_new_session=True,
                               timeout=_KILL_GRACE + _MSB_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         return "SILKGATE_ERROR", "the guest did not answer the kill request in time"
