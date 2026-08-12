@@ -794,6 +794,44 @@ class TestCompositionOrder(ArgProfileCase):
         self.assertIn("github.com/a/b/**", text)
 
 
+class TestProfilesListingAndRender(ArgProfileCase):
+    """`profiles` lists each declared arg pattern, and --render prints the composed
+    rules for one or more specs — a parameterized policy audits like a static one."""
+
+    def setUp(self):
+        super().setUp()
+        self.profile_dir({"tmpl": self.TMPL, "plain": self.PLAIN})
+
+    def profiles_cmd(self, render=None):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            sg.cmd_profiles(mock.Mock(render=render))
+        return out.getvalue()
+
+    def test_listing_shows_the_arg_pattern(self):
+        out = self.profiles_cmd()
+        self.assertIn("ARG", out.splitlines()[0])
+        tmpl = next(ln for ln in out.splitlines() if ln.startswith("tmpl "))
+        self.assertIn("[a-z]+/[a-z]+", tmpl)
+        plain = next(ln for ln in out.splitlines() if ln.startswith("plain "))
+        self.assertNotIn("[a-z]", plain)
+
+    def test_render_prints_the_expanded_rules(self):
+        out = self.profiles_cmd(render=["tmpl:a/b"])
+        self.assertIn("# --- profile tmpl:a/b ---", out)
+        self.assertIn("example.com/a/b/** GET POST", out)
+        self.assertNotIn("PROFILE", out)                    # rules, not the table
+
+    def test_render_takes_several_specs_in_composition_order(self):
+        out = self.profiles_cmd(render=["plain", "tmpl:a/b"])
+        self.assertLess(out.index("tmpl:a/b"), out.index("profile plain"))
+
+    def test_render_enforces_the_arg_contract(self):
+        self.refuses("requires an argument", self.profiles_cmd, ["tmpl"])
+        self.refuses("takes no argument", self.profiles_cmd, ["plain:x/y"])
+        self.refuses("does not match", self.profiles_cmd, ["tmpl:UPPER/x"])
+
+
 class TestEmptyAllowlist(CliCase):
     """No --with and no --rule is the strictest policy silkgate can express."""
 

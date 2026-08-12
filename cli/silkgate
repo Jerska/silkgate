@@ -6,7 +6,8 @@ sessions instead share ONE background mitmdump (a pool of listener ports) across
 many background guests — `up`/`exec`/`attach`/`down`, one guest per session, one
 dedicated proxy port each. Host state lives under ~/.silkgate. See ../README.md.
 
-    silkgate profiles              list the profiles in profiles/
+    silkgate profiles [--render S] list the profiles in profiles/, or print the rules
+                                   one or more specs compose to
     silkgate doctor                report every missing tool and its install command
     silkgate build --with X        build the image a profile list describes, into msb
     silkgate verify [--full]       Tier-1 containment check (test/verify_guest.sh)
@@ -2680,7 +2681,16 @@ def cmd_build(args):
 
 
 def cmd_profiles(args):
-    rows = [("PROFILE", "VERSION", "INSTALLS", "REACHES", "DESCRIPTION")]
+    specs = getattr(args, "render", None)
+    if specs:
+        # A parameterized policy stays as auditable as a static one: this is the exact
+        # composed text a session launched with the same --with list enforces, parsed
+        # first so a defect dies here rather than reads as an allowance.
+        text = compose_rules(resolve_profiles(specs))
+        load_ruleset(text)
+        sys.stdout.write(text)
+        return
+    rows = [("PROFILE", "VERSION", "ARG", "INSTALLS", "REACHES", "DESCRIPTION")]
     for d in sorted(p for p in PROFILE_DIR.iterdir() if p.is_dir()):
         prof = Profile(d.name)
         hosts = sorted({ln.split()[0].split("/")[0]
@@ -2690,8 +2700,8 @@ def cmd_profiles(args):
         desc = prof.conf.get("description", "")
         if prof.name in _VERIFY_ONLY:               # listed like the rest, usable unlike them
             desc = f"(silkgate verify only — refused with run/up/build/proxy) {desc}"
-        rows.append((prof.name, prof.version or "-", " ".join(installs) or "-",
-                     ", ".join(hosts) or "-", desc))
+        rows.append((prof.name, prof.version or "-", prof.arg_pattern or "-",
+                     " ".join(installs) or "-", ", ".join(hosts) or "-", desc))
     _print_table(rows)
 
 
@@ -4815,6 +4825,11 @@ def main():
                        help="one extra rule in DSL syntax, e.g. 'example.com/** GET' (repeatable)")
 
     p = sub.add_parser("profiles", help="list the available profiles")
+    p.add_argument("--render", action="append", metavar="PROFILE[@VER][:ARG]",
+                   type=_with_arg,
+                   help="print the composed rules for these specs instead of the table — "
+                        "exactly what a session with the same --with list enforces "
+                        "(repeatable)")
     p.set_defaults(fn=cmd_profiles)
 
     p = sub.add_parser("doctor", help="report every missing tool (docker, msb, mitmdump) "
