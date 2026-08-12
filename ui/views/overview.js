@@ -8,7 +8,7 @@
 // alone changed a state). Cards never rebuild on a tick.
 
 import { el, statusDot, meterBar, sparkline, fmtTokens, fmtCost } from "../render.js";
-import { fmtBytes } from "../store.js";
+import { fmtCpuPct, fmtMiB } from "../metrics.js";
 import { sessionTotals } from "../capture.js";
 import { estimateCost, contextWindow } from "../pricing.js";
 import { newControlBar } from "../controls.js";
@@ -226,12 +226,11 @@ export function newOverviewView() {
     }
     const h = ctx.metricsHistory?.bySession.get(card.session);
     card.nodes.met.append(
-      el("span", { class: "num" },
-         m.cpu_percent != null ? `cpu ${m.cpu_percent}%` : "cpu —"),
-      h ? sparkline(h.cpu) : null,
+      el("span", { class: "num" }, `cpu ${fmtCpuPct(m.cpu_percent) ?? "—"}`),
+      h ? sparkline(h.cpu, { unit: "%", times: h.ts, fmt: fmtCpuPct }) : null,
       el("span", { class: "num", title: "VMM RSS" },
-         m.memory_bytes != null ? `mem ${fmtBytes(m.memory_bytes)}` : "mem —"),
-      h ? sparkline(h.mem) : null);
+         `mem ${fmtMiB(m.memory_bytes) ?? "—"}`),
+      h ? sparkline(h.mem, { unit: "MiB", times: h.ts, fmt: fmtMiB }) : null);
     card.nodes.met.hidden = false;
   }
 

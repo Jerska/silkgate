@@ -13,6 +13,7 @@
 
 import { el, statusDot, renderDiff, sparkline, fmtTokens } from "../render.js";
 import { fmtBytes, fmtDur, fmtTime } from "../store.js";
+import { metricsSummary, fmtCpuPct, fmtMiB } from "../metrics.js";
 import { sessionTotals } from "../capture.js";
 import { journalEvent, timelineItems, filesTouched } from "../timeline.js";
 import { newControlBar, newKillControl } from "../controls.js";
@@ -136,26 +137,9 @@ export function newSessionView() {
   function updateMetrics() {
     const rows = ctx.metrics?.metrics;
     const m = Array.isArray(rows) ? rows.find((r) => r?.session === session) : null;
-    if (!m) {
-      head.metrics.textContent = "";   // not available yet — the poll may land it
-      return;
-    }
-    const parts = [];
-    if (m.cpu_percent != null) parts.push(`cpu ${m.cpu_percent}%`);
-    if (m.memory_bytes != null) {
-      const limit = m.memory_limit_bytes != null
-        ? `/${fmtBytes(m.memory_limit_bytes)}` : "";
-      parts.push(`mem ${fmtBytes(m.memory_bytes)}${limit} (VMM RSS)`);
-    }
-    if (m.net_rx_bytes != null || m.net_tx_bytes != null) {
-      parts.push(`net ↓${fmtBytes(m.net_rx_bytes ?? 0)} ↑${fmtBytes(m.net_tx_bytes ?? 0)}`);
-    }
-    if (m.disk_read_bytes != null || m.disk_write_bytes != null) {
-      parts.push(`disk r${fmtBytes(m.disk_read_bytes ?? 0)}`
-                 + ` w${fmtBytes(m.disk_write_bytes ?? 0)}`);
-    }
-    if (m.uptime_secs != null) parts.push(`up ${fmtAge(m.uptime_secs * 1000)}`);
-    head.metrics.textContent = parts.join(" · ");
+    // Empty until the poll lands one; metricsSummary rounds and keeps VMM RSS
+    // from reading as "X/limit".
+    head.metrics.textContent = m ? metricsSummary(m).join(" · ") : "";
   }
 
   // --- the activity feed ------------------------------------------------------
@@ -651,18 +635,20 @@ export function newSessionView() {
       return;
     }
     const h = ctx.metricsHistory?.bySession.get(session);
-    const row = (label, value, series) => el("div", { class: "metric-row" },
+    const row = (label, value, series, spark) => el("div", { class: "metric-row" },
       el("span", { class: "metric-label" }, label),
       el("span", { class: "num metric-value" }, value),
-      series ? sparkline(series, { width: 240, height: 32 }) : null);
-    const mem = m.memory_bytes != null
-      ? fmtBytes(m.memory_bytes)
-        + (m.memory_limit_bytes != null
-           ? ` / ${fmtBytes(m.memory_limit_bytes)}` : "")
-      : "—";
+      series ? sparkline(series, { width: 240, height: 32, ...spark }) : null);
     metricsPane.append(
-      row("cpu", m.cpu_percent != null ? `${m.cpu_percent}%` : "—", h?.cpu),
-      row("mem (VMM RSS)", mem, h?.mem),
+      row("cpu", fmtCpuPct(m.cpu_percent) ?? "—", h?.cpu,
+          { unit: "%", times: h?.ts, fmt: fmtCpuPct }),
+      // VMM RSS is the VMM process's resident set: it legitimately exceeds
+      // the guest allocation, so it never renders beside the limit as X/Y.
+      row("mem (VMM RSS)", fmtMiB(m.memory_bytes) ?? "—", h?.mem,
+          { unit: "MiB", times: h?.ts, fmt: fmtMiB }),
+      m.memory_limit_bytes != null
+        ? row("guest allocation", fmtMiB(m.memory_limit_bytes), null)
+        : null,
       row("net", `↓${fmtBytes(m.net_rx_bytes ?? 0)} ↑${fmtBytes(m.net_tx_bytes ?? 0)}`,
           null),
       row("disk", `r${fmtBytes(m.disk_read_bytes ?? 0)}`
