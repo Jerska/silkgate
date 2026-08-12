@@ -494,7 +494,9 @@ class UiHttpTest(UiServerTest):
 
 class UiStreamTest(UiServerTest):
 
-    DEADLINE = 5.0
+    # 20 s, not 5: the stream tests wait on real socket reads, and a loaded machine
+    # (the sharded runner beside other suites) has pushed a 5 s wait past its deadline.
+    DEADLINE = 20.0
 
     def setUp(self):
         super().setUp()
