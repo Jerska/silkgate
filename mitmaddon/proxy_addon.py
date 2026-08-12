@@ -72,6 +72,41 @@ class _EventsFile:
 EVENTS = _EventsFile(os.environ.get("SILKGATE_EGRESS_EVENTS_FILE"))
 
 
+class _CaptureFile:
+    """Append-mode sink for LLM capture records — the deliberate contrast with _EventsFile.
+
+    A failed EVENTS write propagates and fails the flow closed, because the audit trail is
+    enforcement's own record. Capture is observability layered on top of flows the audit
+    already covers, so losing it must never cost traffic: the first failure disables the
+    sink for good and logs one control line, and `write` never raises.
+    """
+
+    def __init__(self, path):
+        self._fh = None
+        if path is None:
+            return
+        try:
+            self._fh = open(path, "a")
+        except Exception as e:
+            self._disable(f"capture sink disabled: {e}")
+
+    def _disable(self, reason):
+        self._fh = None
+        logger.info(json.dumps({"decision": "control", "reason": reason}))
+
+    def write(self, line):
+        if self._fh is None:
+            return
+        try:
+            self._fh.write(line + "\n")
+            self._fh.flush()
+        except Exception as e:
+            self._disable(f"capture sink disabled: {e}")
+
+
+CAPTURE = _CaptureFile(os.environ.get("SILKGATE_EGRESS_CAPTURE_FILE"))
+
+
 def configure(updates):
     """Refuse the one mitmproxy option that would route requests around this addon.
 
@@ -524,6 +559,375 @@ def _authority_rule(ruleset, host, port):
     return None
 
 
+# --- capture: decode LLM responses into records --------------------------------
+# Capture is observability, not enforcement: the decoder reads a copy of each chunk,
+# its records go to CAPTURE, and the wire is never modified. Every failure on this
+# path is contained fail-open — the flow, its byte counts and its audit pair are
+# worth more than the transcript.
+
+# Each bound protects the one proxy every session shares from a degenerate or
+# hostile stream, and each names its failure mode:
+_CAPTURE_LINE_MAX = 64 * 1024        # one SSE line; over = the decoder dies (fail open),
+                                     # because a real Anthropic event line is a few KiB
+                                     # and anything bigger is not the grammar we parse
+_CAPTURE_BLOCK_MAX = 256 * 1024      # stored chars per content block; over = stop
+                                     # appending, keep counting, mark truncated — long
+                                     # completions are legitimate, so capture degrades
+                                     # instead of dying
+_CAPTURE_TOTAL_MAX = 2 * 1024 * 1024 # bytes fed per SSE response; over = the decoder
+                                     # dies — an unbounded stream must not grow open-
+                                     # block state forever
+_CAPTURE_JSON_MAX = 2 * 1024 * 1024  # buffered stream=false body; over = the decoder
+                                     # dies — this is the one place capture buffers,
+                                     # so it is the one place a cap guards memory
+                                     # directly
+
+# High-confidence PREFIXED token shapes only, from the gitleaks default set: every
+# pattern is anchored to a literal vendor prefix. Deliberately no entropy or generic
+# hex/base64 rules — coding transcripts are full of SHAs, digests and randomish ids,
+# and a sighting channel that cries wolf gets filtered instead of read. The host
+# cross-checks this list against gitleaks upstream.
+_SECRET_PATTERNS = [(name, re.compile(pattern)) for name, pattern in (
+    ("anthropic-api-key",       r"\bsk-ant-[A-Za-z0-9_-]{16,}"),
+    ("openai-api-key",          r"\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}"),
+    ("github-pat",              r"\bghp_[A-Za-z0-9]{36}"),
+    ("github-oauth",            r"\bgho_[A-Za-z0-9]{36}"),
+    ("github-app-token",        r"\bgh[us]_[A-Za-z0-9]{36}"),
+    ("github-fine-grained-pat", r"\bgithub_pat_[A-Za-z0-9_]{82}"),
+    ("gitlab-pat",              r"\bglpat-[A-Za-z0-9_-]{20}"),
+    ("aws-access-key-id",       r"\bAKIA[0-9A-Z]{16}\b"),
+    ("slack-bot-token",         r"\bxoxb-[0-9A-Za-z-]{20,}"),
+    ("slack-user-token",        r"\bxoxp-[0-9A-Za-z-]{20,}"),
+    ("slack-webhook-url",       r"https://hooks\.slack\.com/services/"
+                                r"T[A-Za-z0-9_]{5,}/B[A-Za-z0-9_]{5,}/[A-Za-z0-9_]{10,}"),
+    ("stripe-live-key",         r"\b[sr]k_live_[A-Za-z0-9]{16,}"),
+    ("google-api-key",          r"\bAIza[A-Za-z0-9_-]{35}"),
+    ("sendgrid-api-key",        r"\bSG\.[A-Za-z0-9_-]{16,32}\.[A-Za-z0-9_-]{16,64}"),
+    ("twilio-api-key",          r"\bSK[0-9a-fA-F]{32}\b"),
+    ("npm-token",               r"\bnpm_[A-Za-z0-9]{36}"),
+    ("pypi-token",              r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{20,}"),
+    ("huggingface-token",       r"\bhf_[A-Za-z0-9]{34}"),
+    ("private-key-pem",         r"-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----"),
+    ("jwt",                     r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\."
+                                r"[A-Za-z0-9_-]{8,}"),
+)]
+
+# The guest environment deliberately holds dummy credentials the proxy swaps at the
+# boundary (profiles/claude/env), and agents echo their env — so the dummy would light
+# up the anthropic pattern on every transcript. Exact matched-text only, never a
+# prefix: a real key that merely starts like a dummy must still be sighted.
+_SECRET_ALLOWLIST = frozenset({"sk-ant-DUMMY-replaced-by-egress-proxy"})
+
+
+def _redact(text):
+    """(text with secret spans replaced, names of the patterns that hit).
+
+    Runs on a complete block at content_block_stop, so no secret can straddle a chunk
+    boundary. Only what the capture file stores is rewritten; the sighting record
+    carries the pattern name and never the matched value.
+    """
+    seen = []
+    for name, pattern in _SECRET_PATTERNS:
+        replaced = pattern.sub(
+            lambda m, _n=name: m.group(0) if m.group(0) in _SECRET_ALLOWLIST
+            else f"[redacted:{_n}]", text)
+        if replaced != text:
+            seen.append(name)
+            text = replaced
+    return text, seen
+
+
+class _AnthropicCapture:
+    """Anthropic Messages response -> capture records. Pure: bytes in through feed(),
+    dicts out, no mitmproxy and no I/O, so the whole grammar is unit-testable directly.
+
+    feed(chunk) returns the records the chunk completed; b"" is mitmproxy's
+    end-of-message marker. flush() is the abort path, for a flow that died before the
+    marker: it closes open blocks and marks the turn incomplete. summary() is what the
+    audit response record can be enriched with, whenever it is asked. Any parse
+    surprise raises out of feed — containment is the tap's job, not this class's,
+    because the tap is the only layer that knows what a dead decoder must not take
+    down with it.
+    """
+
+    def __init__(self, mode):
+        if mode not in ("sse", "json"):
+            raise ValueError(f"unknown capture mode: {mode!r}")
+        self._sse = mode == "sse"
+        self._buf = b""                  # partial SSE line / the whole stream=false body
+        self._total = 0                  # bytes fed, for the caps
+        self._event = None               # pending SSE event type
+        self._data = []                  # accumulated data: lines for the pending event
+        self._blocks = {}                # index -> open block accumulator
+        self._model = None
+        self._message_id = None
+        self._usage = {}
+        self._stop_reason = None
+        self._output_tokens = None
+        self._ended = False              # a turn_end went out; emit nothing further
+
+    # --- accumulators ---------------------------------------------------------
+    @staticmethod
+    def _rec(kind, **fields):
+        """A record with its known fields only: absent upstream data is omitted, not null."""
+        rec = {"kind": kind}
+        rec.update((k, v) for k, v in fields.items() if v is not None)
+        return rec
+
+    @staticmethod
+    def _new_block(btype, tool_name=None, tool_id=None):
+        return {"type": btype, "parts": [], "chars": 0, "stored": 0,
+                "truncated": False, "tool_name": tool_name, "tool_id": tool_id}
+
+    @staticmethod
+    def _append(block, text):
+        """chars counts the true length; storage stops at the cap and marks it."""
+        if not block["truncated"]:
+            room = _CAPTURE_BLOCK_MAX - block["stored"]
+            if len(text) > room:
+                block["parts"].append(text[:room])
+                block["stored"] = _CAPTURE_BLOCK_MAX
+                block["truncated"] = True
+            else:
+                block["parts"].append(text)
+                block["stored"] += len(text)
+        block["chars"] += len(text)
+
+    def _close_block(self, index, block):
+        """The content_block record (plus sightings), scanned and redacted here —
+        the one moment the text is both complete and still unwritten."""
+        rec = {"kind": "content_block", "index": index, "type": block["type"],
+               "chars": block["chars"]}
+        if block["truncated"]:
+            rec["truncated"] = True
+        if block["type"] not in ("text", "tool_use"):
+            # thinking, and any type this decoder does not know: the length is
+            # recorded, the content never is — unknown content has unknown
+            # sensitivity, so it gets thinking's treatment, not text's.
+            return [rec]
+        text, seen = _redact("".join(block["parts"]))
+        out = [{"kind": "secret_sighting", "pattern": name, "index": index}
+               for name in seen]
+        if block["type"] == "text":
+            rec["text"] = text
+        else:
+            rec["tool_name"] = block["tool_name"]
+            rec["tool_id"] = block["tool_id"]
+            try:                         # truncated or partial JSON: keep the raw string
+                rec["tool_input"] = json.loads(text)
+            except ValueError:
+                rec["tool_input"] = text
+        out.append(rec)
+        return out
+
+    # --- input ----------------------------------------------------------------
+    def feed(self, chunk):
+        if not chunk:
+            return self._finish() if self._sse else self._finish_json()
+        self._total += len(chunk)
+        self._buf += chunk
+        if not self._sse:
+            if self._total > _CAPTURE_JSON_MAX:
+                raise ValueError("stream=false body exceeds _CAPTURE_JSON_MAX")
+            return []
+        if self._total > _CAPTURE_TOTAL_MAX:
+            raise ValueError("SSE stream exceeds _CAPTURE_TOTAL_MAX")
+        out = []
+        while True:
+            nl = self._buf.find(b"\n")
+            if nl < 0:
+                if len(self._buf) > _CAPTURE_LINE_MAX:
+                    raise ValueError("SSE line exceeds _CAPTURE_LINE_MAX")
+                break
+            line, self._buf = self._buf[:nl], self._buf[nl + 1:]
+            if len(line) > _CAPTURE_LINE_MAX:
+                raise ValueError("SSE line exceeds _CAPTURE_LINE_MAX")
+            # Split on \n before decoding: a complete line is valid UTF-8 on its own
+            # (multi-byte sequences never contain 0x0A), so only chunk-torn sequences
+            # inside one line could ever need errors="replace".
+            out.extend(self._line(line.decode("utf-8", "replace").rstrip("\r")))
+        return out
+
+    def flush(self):
+        """Abort path: whatever is open, then a turn_end marked incomplete."""
+        return self._finish()
+
+    def summary(self):
+        out = {}
+        if self._model is not None:
+            out["model"] = self._model
+        if self._usage.get("input_tokens") is not None:
+            out["tokens_in"] = self._usage["input_tokens"]
+        if self._output_tokens is not None:
+            out["tokens_out"] = self._output_tokens
+        if self._stop_reason is not None:
+            out["stop_reason"] = self._stop_reason
+        return out
+
+    # --- SSE grammar ------------------------------------------------------------
+    def _line(self, line):
+        if line == "":
+            return self._dispatch()
+        if line.startswith(":"):         # SSE comment (Anthropic sends keepalives)
+            return []
+        field, _, value = line.partition(":")
+        if value.startswith(" "):        # the grammar strips one leading space
+            value = value[1:]
+        if field == "event":
+            self._event = value
+        elif field == "data":
+            self._data.append(value)
+        # unknown fields (id:, retry:) are ignored, per the grammar
+        return []
+
+    def _dispatch(self):
+        event, data = self._event, "\n".join(self._data)
+        self._event, self._data = None, []
+        if not data or self._ended:
+            return []
+        payload = json.loads(data)
+        etype = event or payload.get("type")
+        if etype == "message_start":
+            msg = payload["message"]
+            self._model = msg.get("model")
+            self._message_id = msg.get("id")
+            self._usage = msg.get("usage") or {}
+            self._output_tokens = self._usage.get("output_tokens")
+            return [self._turn_start()]
+        if etype == "content_block_start":
+            block = payload["content_block"]
+            acc = self._new_block(block.get("type"), tool_name=block.get("name"),
+                                  tool_id=block.get("id"))
+            if acc["type"] == "text" and block.get("text"):
+                self._append(acc, block["text"])
+            elif acc["type"] == "thinking" and block.get("thinking"):
+                acc["chars"] += len(block["thinking"])
+            self._blocks[payload["index"]] = acc
+            return []
+        if etype == "content_block_delta":
+            acc = self._blocks[payload["index"]]
+            delta = payload["delta"]
+            dtype = delta.get("type")
+            if dtype == "text_delta":
+                self._append(acc, delta["text"])
+            elif dtype == "input_json_delta":
+                self._append(acc, delta["partial_json"])
+            elif dtype == "thinking_delta":
+                acc["chars"] += len(delta["thinking"])   # chars only, never the text
+            # unknown delta types (signature_delta among them) are ignored
+            return []
+        if etype == "content_block_stop":
+            index = payload["index"]
+            return self._close_block(index, self._blocks.pop(index))
+        if etype == "message_delta":
+            delta = payload.get("delta") or {}
+            if delta.get("stop_reason") is not None:
+                self._stop_reason = delta["stop_reason"]
+            usage = payload.get("usage") or {}
+            if usage.get("output_tokens") is not None:
+                self._output_tokens = usage["output_tokens"]   # cumulative; keep latest
+            return []
+        if etype == "message_stop":
+            self._ended = True
+            return [self._rec("turn_end", stop_reason=self._stop_reason,
+                              output_tokens=self._output_tokens)]
+        if etype == "error":
+            # The upstream ended the turn itself; open blocks still hold real content,
+            # so they are closed and kept rather than lost with the stream.
+            self._ended = True
+            self._stop_reason = "error"
+            err = payload.get("error") or {}
+            out = []
+            for index in sorted(self._blocks):
+                out.extend(self._close_block(index, self._blocks[index]))
+            self._blocks.clear()
+            rec = self._rec("turn_end", stop_reason="error",
+                            output_tokens=self._output_tokens)
+            rec["error"] = {"type": err.get("type"), "message": err.get("message")}
+            out.append(rec)
+            return out
+        return []                        # ping, and event types newer than this decoder
+
+    # --- endings ----------------------------------------------------------------
+    def _turn_start(self):
+        return self._rec("turn_start", model=self._model, message_id=self._message_id,
+                         input_tokens=self._usage.get("input_tokens"),
+                         cache_creation_input_tokens=self._usage.get(
+                             "cache_creation_input_tokens"),
+                         cache_read_input_tokens=self._usage.get(
+                             "cache_read_input_tokens"))
+
+    def _finish(self):
+        """End of input before the grammar ended the turn: close and mark incomplete."""
+        if self._ended:
+            return []
+        self._ended = True
+        out = []
+        for index in sorted(self._blocks):
+            out.extend(self._close_block(index, self._blocks[index]))
+        self._blocks.clear()
+        rec = self._rec("turn_end", stop_reason=self._stop_reason,
+                        output_tokens=self._output_tokens)
+        rec["incomplete"] = True
+        out.append(rec)
+        return out
+
+    def _finish_json(self):
+        """The whole stream=false body at once -> the identical record sequence SSE
+        would have produced, through the same block accumulators — so the caps, the
+        chars counting and the redaction cannot drift between the two modes."""
+        if self._ended:
+            return []
+        self._ended = True
+        msg = json.loads(self._buf.decode("utf-8", "replace"))
+        self._model = msg.get("model")
+        self._message_id = msg.get("id")
+        self._usage = msg.get("usage") or {}
+        self._stop_reason = msg.get("stop_reason")
+        self._output_tokens = self._usage.get("output_tokens")
+        out = [self._turn_start()]
+        for index, block in enumerate(msg["content"]):
+            acc = self._new_block(block.get("type"), tool_name=block.get("name"),
+                                  tool_id=block.get("id"))
+            if acc["type"] == "text":
+                self._append(acc, block.get("text") or "")
+            elif acc["type"] == "tool_use":
+                self._append(acc, json.dumps(block.get("input"), ensure_ascii=False,
+                                             separators=(",", ":")))
+            elif acc["type"] == "thinking":
+                acc["chars"] = len(block.get("thinking") or "")
+            out.extend(self._close_block(index, acc))
+        out.append(self._rec("turn_end", stop_reason=self._stop_reason,
+                             output_tokens=self._output_tokens))
+        return out
+
+
+def _capture_write(flow, state, rec):
+    """One capture record as a JSON line: the envelope that joins it to the flow's
+    audit pair, then the decoder's fields. The timing fields are added here because
+    the decoder is pure and has no clock to relate to the request. Wrapped so it can
+    never throw into the tap — a capture failure must not touch forwarding."""
+    try:
+        record = {"ts": _ts(), "kind": rec["kind"], "id": flow.id,
+                  "session": state["session"], "host": flow.request.host}
+        if state.get("exec") is not None:
+            record["exec"] = state["exec"]
+        start = getattr(flow.request, "timestamp_start", None)
+        if start is not None:
+            if rec["kind"] == "turn_start" and state.get("first_chunk_ts") is not None:
+                record["ttfb_ms"] = int(round((state["first_chunk_ts"] - start) * 1000))
+            elif rec["kind"] == "turn_end":
+                record["duration_ms"] = int(round((time.time() - start) * 1000))
+        record.update((k, v) for k, v in rec.items() if k != "kind")
+        CAPTURE.write(json.dumps(record))
+    except Exception as e:
+        try:
+            logger.info(json.dumps({"decision": "control", "reason":
+                                    f"capture record dropped: {e.__class__.__name__}"}))
+        except Exception:
+            pass
+
+
 def responseheaders(flow: http.HTTPFlow) -> None:
     # Forward response bytes as they arrive. mitmproxy's default buffers the whole body
     # before sending anything, which starves streaming consumers: an SSE completion that
@@ -532,21 +936,63 @@ def responseheaders(flow: http.HTTPFlow) -> None:
     # here needs the assembled response body — and failing to stream only costs latency,
     # which is why this is the one hook that swallows its error instead of blocking.
     #
-    # For a flow request() allowed, streaming and counting are one act: mitmproxy hands a
-    # callable each chunk (and b"" at end of message) and forwards whatever it returns, so
-    # the count costs no buffering. Flows without the marker — this addon's own deny
-    # responses, mostly — just stream.
+    # For a flow request() allowed, streaming, counting and capture are one act:
+    # mitmproxy hands the tap each chunk (and b"" at end of message) and forwards
+    # whatever it returns, so nothing here costs buffering. Flows without the marker —
+    # this addon's own deny responses, mostly — just stream.
     try:
         state = flow.metadata.get("egress")
         if state is None:
             flow.response.stream = True
             return
 
-        def count(chunk, _state=state):
+        def tap(chunk, _flow=flow, _state=state):
+            # Counting, first-chunk timestamping and `return chunk` sit outside the
+            # capture try: no capture failure may corrupt forwarding or the audit's
+            # byte counts.
             _state["response_bytes"] += len(chunk)
+            if _state.get("first_chunk_ts") is None:
+                _state["first_chunk_ts"] = time.time()
+            decoder = _flow.metadata.get("capture")
+            if decoder is not None:
+                try:
+                    for rec in decoder.feed(chunk):
+                        _capture_write(_flow, _state, rec)
+                except Exception as e:
+                    # The decoder is dead; the flow is not. Pop it so later chunks
+                    # skip it, say why once, and keep counting.
+                    _flow.metadata.pop("capture", None)
+                    _capture_write(_flow, _state, {"kind": "capture_error", "reason":
+                                                   f"decoder died: {e.__class__.__name__}"})
             return chunk
 
-        flow.response.stream = count
+        # The stream assignment comes before decoder attachment: a capture setup bug
+        # must never leave the response buffered (the SSE-starvation failure this
+        # hook exists to prevent) — it may only leave it unobserved.
+        flow.response.stream = tap
+
+        try:
+            if state.get("capture") and flow.response.status_code == 200:
+                encoding = flow.response.headers.get("content-encoding", "identity")
+                media = (flow.response.headers.get("content-type") or "")
+                media = media.split(";", 1)[0].strip().lower()
+                # Streamed chunks arrive still content-encoded, and growing a
+                # decompressor here would hand the guest a zip-bomb lever; Anthropic
+                # answers identity-encoded, so metadata-only is the honest fallback.
+                if encoding.lower() not in ("", "identity"):
+                    _capture_write(flow, state, {"kind": "capture_error", "reason":
+                                                 f"content-encoding {_clip(encoding)}: "
+                                                 "not decoded"})
+                elif media == "text/event-stream":
+                    flow.metadata["capture"] = _AnthropicCapture("sse")
+                elif media == "application/json":
+                    flow.metadata["capture"] = _AnthropicCapture("json")
+                else:
+                    _capture_write(flow, state, {"kind": "capture_error", "reason":
+                                                 f"unexpected content-type: {_clip(media)}"})
+        except Exception as e:
+            _capture_write(flow, state, {"kind": "capture_error", "reason":
+                                         f"decoder setup failed: {e.__class__.__name__}"})
     except Exception as e:
         logger.info(json.dumps({"decision": "stream", "reason":
                                 f"not streaming: {e.__class__.__name__}"}))
@@ -556,11 +1002,33 @@ def _conclude(flow, reason=""):
     """The "response" record for a flow request() allowed: what actually moved, and how the
     flow ended. Pops the marker, so whichever of response()/error() runs emits exactly one
     record — and a flow this addon denied, which mitmproxy also routes through response(),
-    has no marker and already told its whole story on the deny line."""
+    has no marker and already told its whole story on the deny line.
+
+    Capture teardown happens here too, each step wrapped on its own: a decoder still
+    attached means the stream never reached its own end, so its open blocks are flushed
+    as an incomplete turn, and whatever it learned (model, tokens, stop_reason) enriches
+    this record — but none of that may cost the record itself."""
     state = flow.metadata.pop("egress", None)
     if state is None:
         return
+    extras = {}
+    if state.get("exec") is not None:
+        extras["exec"] = state["exec"]
+    decoder = flow.metadata.pop("capture", None)
+    if decoder is not None:
+        try:
+            for rec in decoder.flush():
+                _capture_write(flow, state, rec)
+        except Exception as e:
+            _capture_write(flow, state, {"kind": "capture_error", "reason":
+                                         f"flush failed: {e.__class__.__name__}"})
+        try:
+            extras.update(decoder.summary())
+        except Exception:
+            pass
     start = getattr(flow.request, "timestamp_start", None)
+    if start is not None and state.get("first_chunk_ts") is not None:
+        extras["ttfb_ms"] = int(round((state["first_chunk_ts"] - start) * 1000))
     if start is not None:
         end = (getattr(flow.response, "timestamp_end", None)
                or getattr(flow.error, "timestamp", None)
@@ -572,7 +1040,7 @@ def _conclude(flow, reason=""):
            status=flow.response.status_code if flow.response else None,
            request_bytes=state["request_bytes"],
            response_bytes=state["response_bytes"],
-           duration_ms=duration_ms)
+           duration_ms=duration_ms, **extras)
 
 
 def response(flow: http.HTTPFlow) -> None:
@@ -731,7 +1199,16 @@ def request(flow: http.HTTPFlow) -> None:
                   session=session)
             return
 
-        # 8. Auth secret: replace the named header's value with the real secret (held on the
+        # 8. The exec marker: the CLI stamps X-Silkgate-Exec on requests it issues on a
+        #    run's behalf, so capture and audit records can be joined to that run.
+        #    Popped here, unconditionally — h:* rules skip the hygiene in step 10, and
+        #    an internal id must never reach the destination. Clipped like any other
+        #    guest-supplied text; a request without the header simply records no exec.
+        exec_id = req.headers.pop("x-silkgate-exec", None)
+        if exec_id is not None:
+            exec_id = _clip(exec_id)
+
+        # 9. Auth secret: replace the named header's value with the real secret (held on the
         #    host) ONLY if the request already carries that header — the guest signals intent by
         #    sending it. We never force the header onto a request that didn't use it.
         secret_header = None
@@ -756,7 +1233,7 @@ def request(flow: http.HTTPFlow) -> None:
             else:
                 inject_skipped = rule.inject_auth
 
-        # 9. Header hygiene: unless the rule allows all headers (h:*), drop any header failing the
+        # 10. Header hygiene: unless the rule allows all headers (h:*), drop any header failing the
         #    value constraint (deny-by-default) — keeping the auth header we just replaced.
         stripped_headers = []
         if not rule.allow_all_headers:
@@ -778,11 +1255,15 @@ def request(flow: http.HTTPFlow) -> None:
             extras["stripped_query"] = stripped_query
         if stripped_headers:
             extras["stripped_headers"] = stripped_headers
+        if exec_id is not None:
+            extras["exec"] = exec_id
         _audit("allow", flow, rule.raw, session=session, **extras)
         # The allow line says what was asked; what actually moved — status and byte counts —
         # is the "response" record _conclude emits, and this marker is what earns one.
+        # rule.capture and exec ride along for the tap; first_chunk_ts is stamped there.
         flow.metadata["egress"] = {"session": session, "request_bytes": body_len,
-                                   "response_bytes": 0}
+                                   "response_bytes": 0, "capture": rule.capture,
+                                   "exec": exec_id, "first_chunk_ts": None}
         flow.response = None                      # nothing threw — let the request through
     except Exception as e:
         _fail_closed(flow, session, e)
