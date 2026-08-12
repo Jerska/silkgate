@@ -145,7 +145,9 @@ even a `session: null` deny stays attributable to a port. The `response` record 
 byte counts, and duration.
 
 The events file is the machine-readable contract. Each proxy start creates one
-`events-<stamp>.jsonl` beside the log: pure JSONL, free of mitmdump's own output. Every
+`events-<stamp>.jsonl` beside the log: pure JSONL, free of mitmdump's own output. The
+CLI names that file to the addon in `SILKGATE_EGRESS_EVENTS_FILE`, and `proxy.json`
+records the path. Every
 request record lands in both sinks byte-identical. Control-socket activity is logged but
 never mirrored (`test_control_records_not_mirrored` in `test/test_addon.py`), so the events
 file holds request records only. The audit trail is required, not best-effort: a write that
