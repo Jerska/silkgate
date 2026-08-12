@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3287,6 +3288,23 @@ def cmd_attach(args):
     sys.exit(rc)
 
 
+def _down_session(meta):
+    """The one way a handed-over session ends — cmd_down and the UI's down endpoint
+    both run this. Harvest first: the guest's gitdir dies with the VM, and a retried
+    down harvests again — new commits fast-forward the branch; nothing new is a quiet
+    no-op. True iff a failed harvest kept the workspace. The removal holds the stop
+    signals: a Ctrl-C partway through would leave the session half-removed, the one
+    state worse than up or gone (off the main thread the deferral is a no-op — no
+    signal lands there)."""
+    with _deferred_interrupts():
+        keep = bool(meta.get("branch")) and not _harvest_branch(meta)
+        _teardown_session(meta)
+        if meta.get("branch") and not keep:
+            _reap_derived_workspace(meta)
+        _maybe_stop_proxy()
+    return keep
+
+
 def cmd_down(args):
     meta = read_meta(args.name)
     if not meta:
@@ -3294,16 +3312,7 @@ def cmd_down(args):
     # Teardown needs msb to stop/rm the guest; without this, its absence surfaces as
     # "msb rm failed — session kept", which reads as a broken sandbox, not a missing tool.
     preflight("msb", *(("git",) if meta.get("branch") else ()))
-    # The removal holds the stop signals: a Ctrl-C partway through would leave the
-    # session half-removed, the one state worse than up or gone.
-    with _deferred_interrupts():
-        # Harvest first: the guest's gitdir dies with the VM. A retried down harvests
-        # again — new commits fast-forward the branch; nothing new is a quiet no-op.
-        keep = bool(meta.get("branch")) and not _harvest_branch(meta)
-        _teardown_session(meta)
-        if meta.get("branch") and not keep:
-            _reap_derived_workspace(meta)
-        _maybe_stop_proxy()
+    keep = _down_session(meta)
     say(f"session {args.name} down")
     if keep:
         sys.exit(1)
@@ -3641,18 +3650,29 @@ UI_STREAM_POLL = 0.5         # seconds between tail passes on /api/stream
 UI_STREAM_HEARTBEAT = 15.0   # idle seconds before an SSE comment keeps the pipe alive
 
 # Every asset the UI can serve, by exact request path. A map instead of a filesystem
-# walk makes traversal structurally impossible: a path outside it resolves to nothing.
+# walk makes traversal structurally impossible: a path outside it resolves to nothing
+# — which is also why ui/'s *.test.js files stay unserved: they are not keys here.
+# Nested paths are plain dict keys, never re-parsed.
 _UI_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/store.js": ("store.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/router.js": ("router.js", "text/javascript; charset=utf-8"),
+    "/capture.js": ("capture.js", "text/javascript; charset=utf-8"),
+    "/pricing.js": ("pricing.js", "text/javascript; charset=utf-8"),
+    "/render.js": ("render.js", "text/javascript; charset=utf-8"),
+    "/views/overview.js": ("views/overview.js", "text/javascript; charset=utf-8"),
+    "/views/session.js": ("views/session.js", "text/javascript; charset=utf-8"),
+    "/views/calls.js": ("views/calls.js", "text/javascript; charset=utf-8"),
 }
 
 
-def _events_files():
-    """The retained events files, oldest first — the stamp in the name is the order."""
-    return sorted(LOG_DIR.glob("events-*.jsonl"))
+def _events_files(pattern="events-*.jsonl"):
+    """The retained files of one trail kind, oldest first — the stamp in the name is
+    the order. The audit trail and the capture trail share the layout, so the glob is
+    the only parameter."""
+    return sorted(LOG_DIR.glob(pattern))
 
 
 def _event_passes(rec, filters):
@@ -3694,13 +3714,13 @@ def _event_passes(rec, filters):
     return True
 
 
-def _events_history(filters, limit):
+def _events_history(filters, limit, pattern="events-*.jsonl"):
     """The newest `limit` records passing `filters`, oldest first, across every
-    retained events file (filename order — the stamp is chronological, and records
-    within a file are append-ordered). Unparsable lines are skipped: the live file's
-    tail can be half-written mid-read, and history must not die on it."""
+    retained file of one kind (filename order — the stamp is chronological, and
+    records within a file are append-ordered). Unparsable lines are skipped: the live
+    file's tail can be half-written mid-read, and history must not die on it."""
     kept = []
-    for path in _events_files():
+    for path in _events_files(pattern):
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:                          # pruned mid-scan: already gone
@@ -3730,12 +3750,17 @@ class _EventsTailer:
     from 0; a start cursor naming anything but the live file → the live file's EOF,
     since the client refetches history on reset and history covers the gap. No proxy
     at all yields nothing — the caller keeps polling and heartbeating, so a `down`
-    followed by an `up` flows into the same open stream."""
+    followed by an `up` flows into the same open stream.
 
-    def __init__(self, cursor=None):
+    `meta_key` names which proxy.json entry holds the live file — "events" for the
+    audit trail, "capture" for the capture trail — and is the whole difference
+    between the two streams."""
+
+    def __init__(self, cursor=None, meta_key="events"):
         self._path = None                        # nothing live seen yet
         self._offset = 0
         self._start = cursor                     # consumed when a live file first appears
+        self._meta_key = meta_key
 
     @staticmethod
     def _parse_cursor(cursor):
@@ -3746,7 +3771,7 @@ class _EventsTailer:
 
     def poll(self, proxy_meta):
         out = []
-        events = (proxy_meta or {}).get("events")
+        events = (proxy_meta or {}).get(self._meta_key)
         if not events:
             return out
         path = Path(events)
@@ -3791,13 +3816,349 @@ class _EventsTailer:
         return out
 
 
+# --- ui: per-session detail, control and search -------------------------------------
+# Module-level (not nested in the handler) for the same reason _bundle_in_guest is:
+# every host/guest boundary here is a seam the tests stub, and every cache must be
+# one per process, not one per request thread.
+
+UI_BRIEF_MAX_BYTES = 256 << 10   # /api/session serves at most this much brief text
+UI_ARCHIVED_LIMIT = 50           # newest archived metas /api/sessions carries
+UI_OUTPUT_TAIL = 200             # /api/session/<ident>/output default tail
+UI_OUTPUT_TAIL_MAX = 2000
+UI_OUTPUT_TTL = 1.0              # seconds one output fetch answers for, per session
+UI_METRICS_TTL = 2.0             # seconds one msb metrics run answers for
+UI_SEARCH_LIMIT = 200            # /api/search early-exits at this many results
+UI_SEARCH_MIN_QUERY = 3
+UI_SEARCH_MAX_BYTES = 32 << 20   # /api/search stops scanning past this many bytes
+
+_EXEC_ID_RE = re.compile(r"[0-9a-f]{8}")
+
+_OUTPUT_LOCK = threading.Lock()
+_OUTPUT_CACHE = {}               # (name, tail) -> (monotonic stamp, payload, code)
+_METRICS_LOCK = threading.Lock()
+_METRICS_CACHE = {"at": None, "payload": None}
+_DIFF_LOCK = threading.Lock()
+_DIFF_BUSY = set()               # idents with a diff in flight: one guest git at a time
+
+
+def _resolve_ident(ident):
+    """(meta, state, session dir) for a live name or an archived sid, or three Nones.
+
+    The ident is validated before it is ever a path component: a live name must pass
+    read_meta's bar, an archived sid read_archived_meta's. Both die() on a planted
+    meta — in a server thread that refusal becomes a plain not-found answer instead
+    of killing the thread. A name that also parses as a sid (possible for short
+    session names) resolves live-first: live names are the operator's handles."""
+    if _NAME_RE.fullmatch(ident or ""):
+        try:
+            meta = read_meta(ident)
+        except SystemExit:
+            return None, None, None
+        if meta:
+            return meta, "live", session_dir(ident)
+    if _SID_RE.fullmatch(ident or ""):
+        try:
+            meta = read_archived_meta(ident)
+        except SystemExit:
+            return None, None, None
+        if meta:
+            return meta, "archived", ARCHIVE_DIR / ident
+    return None, None, None
+
+
+def _session_brief(meta, state, sdir):
+    """The brief block for /api/session, or None. The --brief copy in the session dir
+    wins (source "flag" — operator-authored); a live session without one falls back
+    to <workspace>/BRIEF.md (source "workspace" — guest-writable, so the label is the
+    warning). The workspace path passed _check_meta_fields on read; a symlinked
+    BRIEF.md is skipped rather than followed to wherever the guest pointed it. Text
+    is capped at UI_BRIEF_MAX_BYTES and the sha256 covers the bytes served."""
+    path, source = sdir / "brief.md", "flag"
+    if not path.is_file():
+        if state != "live" or not meta.get("workspace"):
+            return None
+        path, source = Path(meta["workspace"]) / "BRIEF.md", "workspace"
+        if path.is_symlink() or not path.is_file():
+            return None
+    try:
+        with open(path, "rb") as f:
+            data = f.read(UI_BRIEF_MAX_BYTES + 1)
+    except OSError:
+        return None
+    truncated = len(data) > UI_BRIEF_MAX_BYTES
+    data = data[:UI_BRIEF_MAX_BYTES]
+    return {"source": source, "text": data.decode("utf-8", "replace"),
+            "sha256": hashlib.sha256(data).hexdigest(), "truncated": truncated}
+
+
+def _session_output(meta, state, sdir, tail):
+    """(payload, status) for /api/session/<ident>/output. Archived sessions read the
+    output.log snapshot; live ones ask msb, behind a 1 s TTL cache per (session,
+    tail) — N open tabs cost one subprocess per second, and a failure is cached the
+    same so a dead sandbox is not re-poked every poll."""
+    if state == "archived":
+        try:
+            text = (sdir / "output.log").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        lines = text.splitlines()
+        return {"source": "archive", "lines": lines[-tail:],
+                "truncated": len(lines) > tail}, 200
+    key = (meta["name"], tail)
+    with _OUTPUT_LOCK:
+        hit = _OUTPUT_CACHE.get(key)
+        if hit and time.monotonic() - hit[0] < UI_OUTPUT_TTL:
+            return hit[1], hit[2]
+        lines, err = _run_msb_logs(meta["sandbox"], tail_n=tail)
+        if err is not None:
+            payload, code = {"error": f"cannot read guest output: {err}"}, 502
+        else:
+            # tail lines came back full: there may be more — that is all msb says.
+            payload, code = {"source": "live", "lines": lines,
+                             "truncated": len(lines) >= tail}, 200
+        _OUTPUT_CACHE[key] = (time.monotonic(), payload, code)
+        return payload, code
+
+
+_DIFF_TIMEOUT = 30
+_DIFF_MAX_BYTES = 2 << 20
+
+# One in-guest pass for /api/session/<ident>/diff: what changed since the base, both
+# staged-or-not (status) and as a patch (diff against $1). The split marker keeps the
+# two apart in one exec round-trip.
+_DIFF_SH = """\
+set -eu
+{cd}git status --porcelain
+echo SILKGATE_DIFF_SPLIT
+git diff "$1"
+"""
+
+
+def _diff_in_guest(meta):
+    """(status, diff, error) from a live guest — a branch session diffs through the
+    GIT_DIR/GIT_WORK_TREE pair, a checkout session from /workspace where its clone's
+    own .git lives."""
+    if meta.get("branch"):
+        script, env = _DIFF_SH.format(cd=""), _BRANCH_ENV
+    else:
+        script, env = _DIFF_SH.format(cd="cd /workspace\n"), ()
+    try:
+        proc = subprocess.run(msb_exec_argv(meta["sandbox"],
+                                            ["sh", "-c", script, "_", meta["base"]],
+                                            env=env),
+                              capture_output=True, text=True, errors="replace",
+                              start_new_session=True, timeout=_DIFF_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None, "the guest did not answer the diff request in time"
+    if proc.returncode:
+        return None, None, (proc.stderr.strip().splitlines()
+                            or ["guest git diff failed"])[-1]
+    status, sep, diff = proc.stdout.partition("SILKGATE_DIFF_SPLIT\n")
+    if not sep:
+        return None, None, "no diff verdict from the guest"
+    return status, diff, None
+
+
+def _clip_text(text, cap):
+    """(text within `cap` utf-8 bytes, whether it was cut)."""
+    data = text.encode("utf-8", "replace")
+    if len(data) <= cap:
+        return text, False
+    return data[:cap].decode("utf-8", "replace"), True
+
+
+def _run_msb_metrics():
+    """`msb metrics --format json` parsed, or None on any failure — the seam
+    /api/metrics stubs in tests and the TTL cache sits in front of."""
+    msb = shutil.which("msb")
+    if not msb:
+        return None
+    try:
+        proc = subprocess.run([msb, "metrics", "--format", "json"],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode:
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    return parsed
+
+
+def _metrics_snapshot():
+    """The /api/metrics payload, behind a 2 s TTL cache under one lock: N open tabs
+    cost one msb subprocess per TTL, not one each — the lock makes the racers wait
+    on the one runner and then read its answer. An empty registry skips the
+    subprocess outright, and a failed run is cached like a good one, so a hung msb
+    is not re-poked every poll."""
+    with _METRICS_LOCK:
+        now = time.monotonic()
+        if (_METRICS_CACHE["at"] is not None
+                and now - _METRICS_CACHE["at"] < UI_METRICS_TTL):
+            return _METRICS_CACHE["payload"]
+        metrics = []
+        metas = list_metas()
+        if metas:
+            raw = _run_msb_metrics()
+            by_sandbox = {}
+            if isinstance(raw, list):                # msb's native shape: one entry per
+                for entry in raw:                    # sandbox, named inside the entry
+                    if isinstance(entry, dict) and entry.get("name"):
+                        by_sandbox[str(entry["name"])] = entry
+            elif isinstance(raw, dict):
+                by_sandbox = {k: v for k, v in raw.items() if isinstance(v, dict)}
+            for m in metas:
+                entry = by_sandbox.get(m["sandbox"])
+                if entry is not None:
+                    metrics.append({"session": m["name"],
+                                    **{k: v for k, v in entry.items() if k != "name"}})
+        payload = {"sampled": now_iso(), "ttl": UI_METRICS_TTL, "metrics": metrics}
+        _METRICS_CACHE.update(at=now, payload=payload)
+        return payload
+
+
+def _search_files():
+    """(path, source) pairs for /api/search, newest file first by mtime across the
+    capture trail, the audit trail and every archived journal — so an early exit
+    keeps the freshest records."""
+    entries = []
+    for pattern, source in (("capture-*.jsonl", "capture"), ("events-*.jsonl", "audit")):
+        entries += [(p, source) for p in LOG_DIR.glob(pattern)]
+    if ARCHIVE_DIR.is_dir():
+        entries += [(d / "journal.jsonl", "journal") for d in ARCHIVE_DIR.iterdir()
+                    if _SID_RE.fullmatch(d.name) and (d / "journal.jsonl").is_file()]
+
+    def mtime(entry):
+        try:
+            return entry[0].stat().st_mtime
+        except OSError:
+            return 0.0
+    return sorted(entries, key=mtime, reverse=True)
+
+
+def _search_trail(query, session, limit):
+    """(results, truncated) for /api/search: a case-folded substring scan of the raw
+    JSONL lines, newest file first and newest line first within a file, early-exited
+    at `limit` results and at a scanned-bytes ceiling.
+
+    Growth trigger: this is a bounded linear scan, good for the trails one operator
+    accumulates. When the ceiling starts truncating routine queries, the next step
+    is an SQLite index over these same files — not a query language on the scan."""
+    needle = query.casefold()
+    results, scanned = [], 0
+    for path, source in _search_files():
+        if len(results) >= limit or scanned >= UI_SEARCH_MAX_BYTES:
+            return results, True
+        # Journal records carry no session field; the archive's sid names it
+        # (<stamp>-<name>-<hex>), so the filter still lands.
+        journal_session = path.parent.name[17:-7] if source == "journal" else None
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        scanned += len(data)
+        for line in reversed(data.decode("utf-8", "replace").splitlines()):
+            if needle not in line.casefold():
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if session is not None:
+                held = journal_session if source == "journal" else rec.get("session")
+                if held != session:
+                    continue
+            results.append({"source": source, "record": rec})
+            if len(results) >= limit:
+                return results, True
+    return results, False
+
+
+def _freeze_session(name):
+    """Freeze one live session's egress: rules.txt moves to rules.frozen and an empty
+    ruleset takes its place — deny-by-default does the rest, since the addon re-reads
+    the session's rules on every resolve. Why it failed, or None."""
+    sdir = session_dir(name)
+    if (sdir / "rules.frozen").exists():
+        return "already frozen"
+    try:
+        (sdir / "rules.txt").rename(sdir / "rules.frozen")
+        (sdir / "rules.txt").write_text("")
+    except OSError as e:
+        return f"could not freeze: {e}"
+    _journal(name, "frozen")
+    return None
+
+
+def _resume_session(name):
+    """Undo _freeze_session: the preserved ruleset moves back over the empty one (one
+    atomic rename). Why it failed, or None."""
+    sdir = session_dir(name)
+    if not (sdir / "rules.frozen").exists():
+        return "not frozen"
+    try:
+        (sdir / "rules.frozen").rename(sdir / "rules.txt")
+    except OSError as e:
+        return f"could not resume: {e}"
+    _journal(name, "resumed")
+    return None
+
+
+_KILL_GRACE = 5     # seconds between TERM and the KILL escalation, in-guest
+
+# One in-guest pass for the kill endpoint: signal the process group the exec's
+# pidfile names, politely first, then hard once the grace runs out. The pidfile is
+# guest-written, so its content is held to digits before it reaches kill's argv.
+_KILL_SH = ("set -eu\n"
+            f'pidfile={GUEST_EXECS}/$1.pid\n'
+            'if [ ! -f "$pidfile" ]; then echo SILKGATE_NO_PIDFILE; exit 0; fi\n'
+            'pgid=$(cat "$pidfile")\n'
+            'case "$pgid" in ""|*[!0-9]*) echo SILKGATE_NO_PIDFILE; exit 0;; esac\n'
+            'kill -TERM -- -"$pgid" 2>/dev/null || :\n'
+            f'i=0; while [ $i -lt {_KILL_GRACE} ] && kill -0 -- -"$pgid" 2>/dev/null; '
+            'do sleep 1; i=$((i+1)); done\n'
+            'if kill -0 -- -"$pgid" 2>/dev/null; '
+            'then kill -KILL -- -"$pgid" 2>/dev/null || :; fi\n'
+            'echo SILKGATE_KILLED\n')
+
+
+def _kill_in_guest(meta, exec_id):
+    """(token, detail) from the guest: SILKGATE_KILLED, SILKGATE_NO_PIDFILE (the exec
+    already ended — its wrapper's trap removed the pidfile), or SILKGATE_ERROR."""
+    try:
+        proc = subprocess.run(msb_exec_argv(meta["sandbox"],
+                                            ["sh", "-c", _KILL_SH, "_", exec_id]),
+                              capture_output=True, text=True, start_new_session=True,
+                              timeout=_KILL_GRACE + _MSB_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return "SILKGATE_ERROR", "the guest did not answer the kill request in time"
+    for line in reversed(proc.stdout.splitlines()):
+        token = line.strip()
+        if token in ("SILKGATE_KILLED", "SILKGATE_NO_PIDFILE"):
+            return token, ""
+    return "SILKGATE_ERROR", (proc.stderr.strip().splitlines()
+                              or ["no verdict from the guest"])[-1]
+
+
 def _ui_server(port):
     """The bound, threaded HTTP server behind `silkgate ui`; the caller runs it.
 
     Threads, because one open SSE stream on a plain HTTPServer would block every other
     request; daemon threads, so main()'s os._exit(130) on Ctrl-C reaps the open
-    streams. Loopback only, and every response carries nosniff + a self-only CSP: the
-    UI must not be able to send the trail anywhere, even if a record smuggles markup.
+    streams. Every response carries nosniff + a self-only CSP: the UI must not be able
+    to send the trail anywhere, even if a record smuggles markup.
+
+    Security model: no auth, by decision — the 127.0.0.1 bind is the boundary, since
+    only processes on this host can connect, and the guests' Tier-1 rules keep them
+    off every host port. The server must never bind beyond loopback; remote use is an
+    SSH tunnel to it, and a future --bind flag requires token auth first. Inside that
+    boundary the remaining callers are the host's own browsers, so every request is
+    held to a loopback Host header (a DNS-rebound page carries its own hostname) and
+    any Origin present must be loopback too (a cross-site page always sends its own).
     """
     # Local imports: only this command needs an HTTP server, and every `silkgate exec`
     # would otherwise pay for importing one.
@@ -3828,26 +4189,92 @@ def _ui_server(port):
         def _json(self, obj, code=200):
             self._reply(code, "application/json", json.dumps(obj).encode())
 
+        def _guarded(self):
+            """Whether this request came from this host's own browser pointed at this
+            server. The Host header must name loopback — a DNS-rebound page reaches
+            127.0.0.1 with its own hostname in Host, so it fails here — and an Origin,
+            when a browser sends one, must be loopback too. Browsers always send
+            Origin on cross-origin POSTs, so a hostile page's POST can never look
+            first-party: that is the defense for everything below that spawns
+            `msb exec` or tears a session down."""
+            loopback = ("127.0.0.1", "localhost", "::1")
+            try:
+                host = urllib.parse.urlsplit("//" + (self.headers.get("Host") or ""))
+            except ValueError:
+                return False
+            if host.hostname not in loopback:
+                return False
+            origin = self.headers.get("Origin")
+            if origin is None:
+                return True
+            try:
+                parts = urllib.parse.urlsplit(origin)
+            except ValueError:
+                return False
+            return parts.scheme in ("http", "https") and parts.hostname in loopback
+
         def do_GET(self):
             url = urllib.parse.urlsplit(self.path)
             query = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
             try:
+                if not self._guarded():
+                    return self._json({"error": "forbidden"}, 403)
                 if url.path == "/api/sessions":
                     self._sessions()
                 elif url.path == "/api/events":
                     self._events(query)
+                elif url.path == "/api/capture":
+                    self._capture(query)
                 elif url.path == "/api/stream":
                     self._stream(query)
+                elif url.path == "/api/capture/stream":
+                    self._stream(query, meta_key="capture")
+                elif url.path == "/api/metrics":
+                    self._json(_metrics_snapshot())
+                elif url.path == "/api/search":
+                    self._search(query)
+                elif url.path.startswith("/api/session/"):
+                    ident, _, sub = url.path[len("/api/session/"):].partition("/")
+                    if not sub:
+                        self._session(ident)
+                    elif sub == "output":
+                        self._output(ident, query)
+                    else:
+                        self._json({"error": "not found"}, 404)
                 else:
                     self._static(url.path)
             except (BrokenPipeError, ConnectionResetError):
                 self.close_connection = True     # the tab closed; nobody to answer
 
+        def do_POST(self):
+            # POSTs are the control plane: freeze/resume/down/kill/diff all reach a
+            # guest or the registry, so the guard above is what stands between them
+            # and any web page (see _guarded — Origin is always on a cross-site POST).
+            self.close_connection = True         # request bodies are never read here
+            url = urllib.parse.urlsplit(self.path)
+            parts = url.path.split("/")
+            try:
+                if not self._guarded():
+                    return self._json({"error": "forbidden"}, 403)
+                if parts[:3] == ["", "api", "session"] and len(parts) == 5 \
+                        and parts[4] in ("freeze", "resume", "down", "diff"):
+                    if parts[4] == "diff":
+                        self._diff(parts[3])
+                    else:
+                        self._control(parts[3], parts[4])
+                elif parts[:3] == ["", "api", "session"] and len(parts) == 7 \
+                        and parts[4] == "exec" and parts[6] == "kill":
+                    self._kill(parts[3], parts[5])
+                else:                            # POST exists for the control plane
+                    self._refuse()               # alone; everything else stays 405
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+
         def _refuse(self):
             self.close_connection = True         # keep a HEAD from desyncing keep-alive
             self._json({"error": "method not allowed"}, 405)
 
-        do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _refuse
+        do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _refuse
 
         def _static(self, path):
             route = _UI_ROUTES.get(path)
@@ -3864,13 +4291,48 @@ def _ui_server(port):
             meta = read_proxy() or {}
             ident = _proxy_ident()               # identity via the control socket, as ever:
             running = ident is not None          # a recycled pid must not read as "running"
-            self._json({"sessions": list_metas(),
+            # Archived rows carry the keys a listing needs; /api/session/<sid> has
+            # the rest. last_rc rides along only where an exec_end recorded one.
+            archived = [{"sid": m["sid"], "name": m.get("name"),
+                         "ended": m.get("ended"),
+                         **({"last_rc": m["last_rc"]} if "last_rc" in m else {})}
+                        for m in reversed(list_archived_metas()[-UI_ARCHIVED_LIMIT:])]
+            self._json({"sessions": [{**m, "state": "live"} for m in list_metas()],
+                        "archived": archived,
                         "proxy": {"running": running,
                                   "pid": (ident or meta.get("pid")) if running else None,
                                   "ports": meta.get("ports"),
                                   "started": meta.get("started"),
                                   "log": meta.get("log"),
                                   "events": meta.get("events")}})
+
+        def _limit(self, query, default, cap):
+            """The validated limit parameter, or None after a 400 went out."""
+            try:
+                limit = int(query.get("limit", default))
+            except ValueError:
+                self._json({"error": "limit: not an integer"}, 400)
+                return None
+            if limit < 1:
+                self._json({"error": "limit: must be >= 1"}, 400)
+                return None
+            return min(limit, cap)
+
+        def _page(self, filters, limit, meta_key, pattern):
+            """One history page plus the live cursor — /api/events and /api/capture
+            differ only in which trail they read. The live file's size is read BEFORE
+            the history: a record appended between the two shows up in both history
+            and the stream — the client dedupes on (id, decision) — where a size read
+            after would show it in neither."""
+            cursor = None
+            live = (read_proxy() or {}).get(meta_key)
+            if live:
+                try:
+                    cursor = f"{Path(live).name}:{Path(live).stat().st_size}"
+                except OSError:
+                    cursor = f"{Path(live).name}:0"
+            self._json({"events": _events_history(filters, limit, pattern),
+                        "cursor": cursor})
 
         def _events(self, query):
             filters = {}
@@ -3889,28 +4351,144 @@ def _ui_server(port):
             for key in ("session", "decision", "method", "host"):
                 if key in query:
                     filters[key] = query[key]
-            try:
-                limit = int(query.get("limit", UI_EVENTS_LIMIT))
-            except ValueError:
-                return self._json({"error": "limit: not an integer"}, 400)
-            if limit < 1:
-                return self._json({"error": "limit: must be >= 1"}, 400)
-            limit = min(limit, UI_EVENTS_LIMIT_MAX)
-            # The live file's size is read BEFORE the history: a record appended between
-            # the two shows up in both history and the stream — the client dedupes on
-            # (id, decision) — where a size read after would show it in neither.
-            cursor = None
-            live = (read_proxy() or {}).get("events")
-            if live:
-                try:
-                    cursor = f"{Path(live).name}:{Path(live).stat().st_size}"
-                except OSError:
-                    cursor = f"{Path(live).name}:0"
-            self._json({"events": _events_history(filters, limit), "cursor": cursor})
+            limit = self._limit(query, UI_EVENTS_LIMIT, UI_EVENTS_LIMIT_MAX)
+            if limit is None:
+                return
+            self._page(filters, limit, "events", "events-*.jsonl")
 
-        def _stream(self, query):
+        def _capture(self, query):
+            filters = {}
+            if "session" in query:
+                filters["session"] = query["session"]
+            limit = self._limit(query, UI_EVENTS_LIMIT, UI_EVENTS_LIMIT_MAX)
+            if limit is None:
+                return
+            self._page(filters, limit, "capture", "capture-*.jsonl")
+
+        def _search(self, query):
+            q = query.get("q") or ""
+            if len(q) < UI_SEARCH_MIN_QUERY:
+                return self._json(
+                    {"error": f"q: need at least {UI_SEARCH_MIN_QUERY} characters"}, 400)
+            limit = self._limit(query, UI_SEARCH_LIMIT, UI_SEARCH_LIMIT)
+            if limit is None:
+                return
+            results, truncated = _search_trail(q, query.get("session"), limit)
+            self._json({"results": results, "truncated": truncated})
+
+        def _session(self, ident):
+            meta, state, sdir = _resolve_ident(ident)
+            if meta is None:
+                return self._json({"error": f"no such session: {ident}"}, 404)
+            try:
+                rules = (sdir / "rules.txt").read_text(encoding="utf-8",
+                                                       errors="replace")
+            except OSError:
+                rules = ""
+            proxy = read_proxy() or {}
+            self._json({"session": meta, "state": state,
+                        "journal": _read_journal(sdir / "journal.jsonl"),
+                        "brief": _session_brief(meta, state, sdir),
+                        "rules": rules,
+                        "pointers": {"events": proxy.get("events"),
+                                     "captures": [str(p) for p in
+                                                  _events_files("capture-*.jsonl")]}})
+
+        def _output(self, ident, query):
+            meta, state, sdir = _resolve_ident(ident)
+            if meta is None:
+                return self._json({"error": f"no such session: {ident}"}, 404)
+            try:
+                tail = int(query.get("tail", UI_OUTPUT_TAIL))
+            except ValueError:
+                return self._json({"error": "tail: not an integer"}, 400)
+            if tail < 1:
+                return self._json({"error": "tail: must be >= 1"}, 400)
+            payload, code = _session_output(meta, state, sdir,
+                                            min(tail, UI_OUTPUT_TAIL_MAX))
+            self._json(payload, code)
+
+        def _diff(self, ident):
+            meta, state, sdir = _resolve_ident(ident)
+            if meta is None:
+                return self._json({"error": f"no such session: {ident}"}, 404)
+            with _DIFF_LOCK:
+                if ident in _DIFF_BUSY:          # one guest git per session at a time
+                    return self._json(
+                        {"error": "a diff for this session is already running"}, 429)
+                _DIFF_BUSY.add(ident)
+            try:
+                if state == "live":
+                    if not (meta.get("branch") or meta.get("checkout")):
+                        return self._json(
+                            {"error": "this session has no git checkout to diff"}, 409)
+                    status, diff, err = _diff_in_guest(meta)
+                    if err is not None:
+                        return self._json({"error": err}, 409)
+                    diff, truncated = _clip_text(diff, _DIFF_MAX_BYTES)
+                    return self._json({"mode": "guest", "status": status,
+                                       "diff": diff, "truncated": truncated})
+                if not meta.get("branch"):
+                    return self._json(
+                        {"error": "this session had no branch — nothing came back"}, 409)
+                if not meta.get("branch_ingested"):
+                    return self._json(
+                        {"error": "never harvested — no commits reached the host"}, 409)
+                proc = _git(meta["git_dir"], "diff",
+                            f"{meta['base']}..refs/heads/{meta['branch']}")
+                if proc is None or proc.returncode:
+                    return self._json({"error": "host git diff failed — the branch "
+                                                "may be gone from the repository"}, 409)
+                diff, truncated = _clip_text(proc.stdout, _DIFF_MAX_BYTES)
+                # An archived diff has no worktree, so there is no status to report.
+                self._json({"mode": "host", "status": "", "diff": diff,
+                            "truncated": truncated})
+            finally:
+                with _DIFF_LOCK:
+                    _DIFF_BUSY.discard(ident)
+
+        def _control(self, ident, action):
+            meta, state, _ = _resolve_ident(ident)
+            if meta is None:
+                return self._json({"error": f"no such session: {ident}"}, 404)
+            if state != "live":
+                return self._json(
+                    {"error": "an archived session cannot be controlled"}, 409)
+            if action == "down":
+                try:
+                    _down_session(meta)
+                except SystemExit:               # die() inside the teardown: kept whole
+                    return self._json({"error": "teardown failed — the session is "
+                                                "kept; run `silkgate down` for the "
+                                                "full report"}, 409)
+                return self._json({"ok": True})
+            err = (_freeze_session(meta["name"]) if action == "freeze"
+                   else _resume_session(meta["name"]))
+            if err is not None:
+                return self._json({"error": err}, 409)
+            self._json({"ok": True})
+
+        def _kill(self, ident, exec_id):
+            if not _EXEC_ID_RE.fullmatch(exec_id or ""):   # before it nears any argv
+                return self._json({"error": f"invalid exec id: {exec_id}"}, 400)
+            meta, state, _ = _resolve_ident(ident)
+            if meta is None:
+                return self._json({"error": f"no such session: {ident}"}, 404)
+            if state != "live":
+                return self._json(
+                    {"error": "an archived session has nothing to kill"}, 409)
+            token, detail = _kill_in_guest(meta, exec_id)
+            if token == "SILKGATE_KILLED":
+                _journal(meta["name"], "killed", exec_id=exec_id)
+                return self._json({"ok": True})
+            if token == "SILKGATE_NO_PIDFILE":
+                return self._json({"error": f"no pidfile for exec {exec_id} — "
+                                            "it already ended"}, 409)
+            self._json({"error": detail or "kill failed"}, 409)
+
+        def _stream(self, query, meta_key="events"):
             tailer = _EventsTailer(self.headers.get("Last-Event-ID")
-                                   or query.get("cursor"))
+                                   or query.get("cursor"), meta_key=meta_key)
             self.close_connection = True         # no Content-Length: the stream is the body
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
