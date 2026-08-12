@@ -618,6 +618,23 @@ class LifecycleTest(_FakeToolsCase):
         self.assertIsNone(sleeper.poll(), "the pid named by proxy.json was killed instead")
         self.assertFalse(MOD.PROXY_JSON.exists())
 
+    def test_proxy_alive_reaps_the_zombie_of_its_own_child(self):
+        """stop_proxy's grace loop polls proxy_alive on the mitmdump this very process
+        spawned and SIGTERMed — exited but unreaped, that child is a zombie, and a
+        zombie still answers kill -0. Unless proxy_alive reaps it, every teardown of a
+        proxy the same process started waits out the full grace on a corpse and then
+        SIGKILLs it."""
+        if not hasattr(os, "waitid"):
+            self.skipTest("no os.waitid here: cannot hold a child in the zombie state")
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        self.addCleanup(self._kill, proc)
+        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)   # exited, still unreaped
+        self.assertFalse(MOD.proxy_alive(proc.pid),
+                         "an exited-but-unreaped child counted as a live proxy — "
+                         "stop_proxy waits its full grace on a zombie, then SIGKILLs it")
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(proc.pid, os.WNOHANG)     # and the zombie itself must be gone
+
     def test_ensure_proxy_trusts_socket_not_pidfile(self):
         """A dead pid in proxy.json beside a live socket is a stale record, not a dead
         proxy: repair the record, never restart over the running one."""
