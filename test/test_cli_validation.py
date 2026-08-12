@@ -2036,11 +2036,14 @@ class TestGithubProfiles(CliCase):
         # batch line keeps the PAT. Every other path there is an action href whose
         # batch-issued Authorization must pass verbatim — injecting the PAT over it
         # makes GitHub answer 403 on upload-verify. First match wins, so the batch
-        # line must sit above the no-inject catch-all.
+        # line must sit above the no-inject catch-all. lfs.github.com sits behind
+        # the same front door as api.github.com — no User-Agent, no service — so
+        # both lines forward user-agent.
         for spec in ("github-read:some/repo", "github-write:some/repo"):
             rs = self.compose(spec)
             batch = rs.match("lfs.github.com", "/some/repo/objects/batch", "POST")
             self.assertEqual(batch.inject_auth, "github", spec)
+            self.assertTrue(batch.header_ok("user-agent", "git-lfs/3.5.1"), spec)
             verify = rs.match("lfs.github.com", "/some/repo/objects/someoid/verify",
                               "POST")
             self.assertIsNone(verify.inject_auth,
@@ -2049,6 +2052,8 @@ class TestGithubProfiles(CliCase):
                             spec)
             self.assertTrue(verify.header_ok("accept", "application/vnd.git-lfs+json"),
                             spec)
+            self.assertTrue(verify.header_ok("user-agent", "git-lfs/3.5.1"),
+                            f"{spec}: GitHub answers 403 without a User-Agent")
             self.assertFalse(verify.header_ok("x-exfil", "data"),
                              f"{spec}: the pins must not widen to h:*")
 
