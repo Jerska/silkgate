@@ -484,7 +484,7 @@ class UiStreamTest(UiServerTest):
         self.assertIn(b"X-Content-Type-Options: nosniff", head)
         self.assertNotIn(b"Content-Length:", head, "an endless body cannot have one")
         body = head.split(b"\r\n\r\n", 1)[1]
-        body += self.read_until(s, b"retry: 2000\n\n", got=body)
+        body = self.read_until(s, b"retry: 2000\n\n", got=body)
         return s, body
 
     def read_until(self, sock, token, got=b""):
