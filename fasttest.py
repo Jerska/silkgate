@@ -31,25 +31,29 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
-# The shard layout, balanced by measured wall time on a 1-vCPU machine. An
+# The shard layout, balanced by measured wall time (Linux guest, 8 vCPUs). An
 # entry is a module or a module.Class; the class entry wins when both match.
-# Rebalance by moving entries between shards. Keep test_proxy_lifecycle whole:
-# its tests probe free-port pools, the one cross-process race worth avoiding.
+# Rebalance by moving entries between shards. The three rest-* shards hold
+# small tests balanced by test count instead: on macOS their cost is per-test
+# process spawn overhead (~35 ms each), not the seconds measured here. The
+# test_proxy_lifecycle shards need the disjoint port floors run_shard_process
+# passes (see port_floor below).
 SHARDS = {
-    "lifecycle": ["test_proxy_lifecycle"],  # ~11 s, keep whole
-    "guest-probe": ["test_verify_oracles.GuestProbeScript"],  # ~10 s
+    "guest-probe": ["test_verify_oracles.GuestProbeScript"],  # ~10 s, the
+    # floor: one test waits out a 10 s silent proxy, irreducible by design
+    "interrupts": ["test_proxy_lifecycle.InterruptTest"],  # ~9 s
     "verify-wiring": ["test_verify_oracles.VerifyWiring"],  # ~9 s
-    "oracles-rest": ["test_verify_oracles"],  # the module's remainder, ~6 s
-    "rest": [  # ~2 s combined
-        "test_addon",
+    "oracles-rest": ["test_verify_oracles"],  # the module's remainder, ~5 s
+    "lifecycle": ["test_proxy_lifecycle"],  # the module's remainder, ~4 s
+    "rest-validation": ["test_cli_validation"],  # 160 tests, ~0.6 s
+    "rest-checks": ["test_addon", "test_verify_checks"],  # 155 tests, ~0.1 s
+    "rest-misc": [  # 126 tests, ~1.3 s
         "test_cli_branch_ingest",
         "test_cli_logs",
-        "test_cli_validation",
         "test_relay",
         "test_scripts",
         "test_tier1_probe",
         "test_ui",
-        "test_verify_checks",
     ],
 }
 
