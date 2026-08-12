@@ -89,6 +89,16 @@ def _free_port(span=1):
     raise unittest.SkipTest(f"no {span} consecutive ports free on both loopback families")
 
 
+def _squat(case, port):
+    """Hold `port` on IPv4 loopback until `case` ends. One family is enough to make the
+    CLI's _port_free report taken: it asks every bind address and fails on the first."""
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("127.0.0.1", port))
+    holder.listen(1)
+    case.addCleanup(holder.close)
+
+
 def _die_message(fn, *args, **kwargs):
     """Run `fn` expecting die(); return everything it said."""
     said = []
@@ -988,6 +998,38 @@ class OracleWiring(unittest.TestCase):
                          [("allow", "POST"), ("deny", "GET")])
 
 
+class VerifyPortSelection(unittest.TestCase):
+    """How one verify run picks its proxy port: the default scans to a base where every
+    port the run binds is free, an explicit --port is taken verbatim.
+
+    The scan is _find_free_pool, the same walk the shared pool does, so a shared proxy
+    holding the default range shifts verify forward instead of blocking it — and the
+    POOL_SIZE ports it proves free cover all three verify binds: the proxy's port and
+    the two oracle ports beside it.
+    """
+
+    def needed(self, base):
+        """Every port a verify run at `base` binds: the proxy's, the observer's, the
+        recorder's."""
+        return [base, sg._oracle_port(base, 1), sg._oracle_port(base, 2)]
+
+    def test_the_default_scans_past_an_occupied_floor_to_a_base_with_every_port_free(self):
+        base = _free_port(span=sg.POOL_SIZE + 1)
+        _squat(self, base)                 # what a shared proxy on the default floor looks like
+        with mock.patch.object(sg, "DEFAULT_BASE_PORT", base):
+            chosen = sg._verify_port(None)
+        self.assertEqual(chosen, base + 1, "the scan did not land one past the blocker")
+        for port in self.needed(chosen):
+            self.assertTrue(sg._port_free(port), f"verify binds {port} and it is taken")
+
+    def test_an_explicit_port_is_honored_verbatim_even_when_taken(self):
+        port = _free_port()
+        _squat(self, port)
+        self.assertEqual(sg._verify_port(port), port,
+                         "an explicit --port moved instead of being handed to start_proxy's "
+                         "die-if-taken guard")
+
+
 # --- cmd_verify end to end, over fakes ---------------------------------------------------
 
 _FAKE_MSB = '''\
@@ -1194,7 +1236,7 @@ class VerifyWiring(unittest.TestCase):
         said = []
         with mock.patch.object(sg, "say", said.append):
             try:
-                sg.cmd_verify(_Args(port=self.port, **kwargs))
+                sg.cmd_verify(_Args(**{"port": self.port, **kwargs}))
             except SystemExit:
                 return "\n".join(str(m) for m in said), True
         return "\n".join(str(m) for m in said), False
@@ -1216,16 +1258,17 @@ class VerifyWiring(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def dead_port(self):
+    def dead_port(self, *extra_reserved):
         """A port nothing holds — and specifically not one of this run's oracle ports.
 
         `_free_port(span=3)` reserves the proxy port and the two oracle ports by binding and
         closing them, so those three numbers are freshly released and are precisely what the
         kernel offers next. An unguarded ephemeral pick therefore lands on the observer's own
         port often enough to make a contained run look like a leak — on one platform and not
-        another, which is the worst way for a test to be wrong.
+        another, which is the worst way for a test to be wrong. A run whose port the scan
+        picks (not self.port) names its own range via `extra_reserved`.
         """
-        reserved = {self.port, self.port + 1, self.port + 2}
+        reserved = {self.port, self.port + 1, self.port + 2, *extra_reserved}
         for _ in range(50):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
                 probe.bind(("127.0.0.1", 0))
@@ -1314,6 +1357,25 @@ class VerifyWiring(unittest.TestCase):
         self.assertTrue(refused)
         self.assertIn("established no leak", said)
         self.assertIn("draws no conclusion", said)
+        self.assertNotIn("containment holds", said)
+
+    def test_no_port_scans_past_a_held_floor_and_the_run_completes(self):
+        # The whole point of the default: a shared proxy holds the floor, verify with no
+        # --port lands one past it and runs to its verdict — no die, no contention.
+        floor = _free_port(span=sg.POOL_SIZE + 1)
+        _squat(self, floor)
+        self.aim_probes_at(self.dead_port(*range(floor, floor + sg.POOL_SIZE + 1)))
+        with mock.patch.object(sg, "DEFAULT_BASE_PORT", floor):
+            said, refused = self.verify(port=None)
+        self.assertFalse(refused, said)
+        self.assertIn(f"proxy :{floor + 1} ·", said, "verify did not land one past the holder")
+        self.assertIn("containment holds", said)
+
+    def test_an_explicit_port_that_is_taken_dies_instead_of_moving(self):
+        _squat(self, self.port)
+        said, refused = self.verify()            # port=self.port, explicitly
+        self.assertTrue(refused)
+        self.assertIn(f"port {self.port} is already in use", said)
         self.assertNotIn("containment holds", said)
 
     def test_a_guest_that_cannot_be_removed_is_a_failure_of_its_own(self):
