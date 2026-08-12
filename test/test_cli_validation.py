@@ -757,8 +757,8 @@ class TestImageIdentityExcludesArg(ArgProfileCase):
 
 class TestCompositionOrder(ArgProfileCase):
     """The proxy is first-match-wins, so composition order is the override mechanism:
-    --rule lines first, then generated rules (arg expansions, GitHub grants), then
-    no-arg profile rules — explicit beats generated, generated beats floor."""
+    --rule lines first, then arg-instance expansions (the grants), then no-arg profile
+    rules — explicit beats a grant, a grant beats the floor."""
 
     def test_rule_then_arg_expansion_then_static_floor(self):
         self.profile_dir({"tmpl": self.TMPL, "plain": self.PLAIN})
@@ -782,17 +782,17 @@ class TestCompositionOrder(ArgProfileCase):
             "example.com", "/elsewhere", "GET")
         self.assertEqual(governing.methods, {"GET"})
 
-    def test_github_grants_sit_between_rule_lines_and_profile_floor(self):
-        args = mock.Mock(with_=["git"], rule=["example.com/** GET"],
-                         github_read=["a/b"], github_write=None)
+    def test_github_grant_sits_between_rule_lines_and_the_floor(self):
+        args = mock.Mock(with_=["github", "github-read:a/b"],
+                         rule=["example.com/** GET"])
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             _, text, _ = sg._session_policy(args)
         blocks = [text.index("# --- --rule ---"),
-                  text.index("# --- grants ---"),
-                  text.index("# --- profile git ---")]
+                  text.index("# --- profile github-read:a/b ---"),
+                  text.index("# --- profile github ---")]
         self.assertEqual(blocks, sorted(blocks), text)
-        self.assertIn("github.com/a/b/**", text)
+        self.assertIn("github.com/a/b/info/refs", text)
 
 
 class TestProfilesListingAndRender(ArgProfileCase):
@@ -1858,216 +1858,6 @@ class TestCheckoutSessions(GitRepoCase):
                 contextlib.redirect_stderr(io.StringIO()):
             sg.cmd_down(args)
         self.assertEqual(calls, ["teardown"])
-
-
-class TestGithubGrants(CliCase):
-    """--github-read/--github-write: validation, rule generation, wiring, guest config."""
-
-    # --- OWNER/REPO validation ---
-
-    def test_good_repo_names_accepted(self):
-        for good in ("owner/repo", "Org.Name/My.Repo-1", "a/b", "x_y/z_w",
-                     "owner-1/repo.2", "O/R"):
-            self.assertEqual(sg._github_repo_arg(good), good)
-
-    def test_bad_repo_names_refused(self):
-        import argparse as ap_mod
-        for bad in ("noslash", "a/b/c", "../x", "/repo", "owner/",
-                    "", "a b/c", "a/b c"):
-            with self.assertRaises(ap_mod.ArgumentTypeError, msg=f"should reject {bad!r}"):
-                sg._github_repo_arg(bad)
-
-    def test_bad_repo_via_flag(self):
-        for bad in ("noslash", "a/b/c", "../evil"):
-            self.refuses_argv("OWNER/REPO", "--github-read",
-                              ["run", "--with", "git", "--github-read", bad, "--", "true"])
-
-    # --- rule generation: inspect parsed ruleset ---
-
-    def _read_ruleset(self, read_repos, write_repos=None):
-        rules = sg._github_rules(read_repos, write_repos or [])
-        return sg.RuleSet.parse("\n".join(rules) + "\n")
-
-    def test_read_rules_control_hosts_have_inject_auth(self):
-        rs = self._read_ruleset(["owner/repo"])
-        for prefix in ("github.com/owner/repo/",
-                        "github.com/owner/repo.git/",
-                        "lfs.github.com/owner/repo/",
-                        "api.github.com/repos/owner/repo/"):
-            rule = next((r for r in rs.rules if r.raw.startswith(prefix)), None)
-            self.assertIsNotNone(rule, f"missing rule for {prefix}")
-            self.assertEqual(rule.inject_auth, "github",
-                             f"rule for {prefix} must inject github token")
-
-    def test_read_rules_storage_hosts_have_no_inject_auth(self):
-        rs = self._read_ruleset(["owner/repo"])
-        cdn = next(r for r in rs.rules
-                   if r.raw.startswith("github-cloud.githubusercontent.com"))
-        self.assertIsNone(cdn.inject_auth, "download storage must not inject auth")
-        self.assertTrue(cdn.allow_query, "download storage must pass query string")
-
-    def test_read_rules_no_s3_upload_rule(self):
-        rs = self._read_ruleset(["owner/repo"])
-        s3 = [r for r in rs.rules if "s3.amazonaws.com" in r.raw]
-        self.assertEqual(s3, [], "read grant must not include s3 upload rule")
-
-    def test_read_api_is_get_only(self):
-        rs = self._read_ruleset(["owner/repo"])
-        api = next(r for r in rs.rules
-                   if r.raw.startswith("api.github.com/repos/owner/repo/"))
-        self.assertIn("GET", api.methods)
-        self.assertNotIn("POST", api.methods)
-        self.assertNotIn("PATCH", api.methods)
-        self.assertNotIn("DELETE", api.methods)
-
-    def test_write_rules_include_s3_upload(self):
-        rs = self._read_ruleset([], ["owner/repo"])
-        s3 = next((r for r in rs.rules if "s3.amazonaws.com" in r.raw), None)
-        self.assertIsNotNone(s3, "write grant must include s3 upload rule")
-        self.assertIn("PUT", s3.methods)
-        self.assertIsNone(s3.inject_auth, "s3 upload must not inject auth")
-        self.assertTrue(s3.allow_query, "s3 upload must pass query string")
-
-    def test_write_api_includes_mutations(self):
-        rs = self._read_ruleset([], ["owner/repo"])
-        api = next(r for r in rs.rules
-                   if r.raw.startswith("api.github.com/repos/owner/repo/"))
-        for method in ("GET", "POST", "PATCH", "DELETE"):
-            self.assertIn(method, api.methods, f"write API rule missing {method}")
-
-    def test_write_supersedes_read_for_same_repo(self):
-        rs = self._read_ruleset(["a/b"], ["a/b"])
-        api_rules = [r for r in rs.rules
-                     if r.raw.startswith("api.github.com/repos/a/b/")]
-        self.assertEqual(len(api_rules), 1, "write must supersede read — no duplicate api rule")
-        self.assertIn("POST", api_rules[0].methods, "superseded rule must be the write variant")
-
-    def test_two_repos_produce_per_repo_rules(self):
-        rs = self._read_ruleset(["org/a"], ["org/b"])
-        prefixes_ab = [r.raw for r in rs.rules if "org/a" in r.raw]
-        prefixes_bb = [r.raw for r in rs.rules if "org/b" in r.raw]
-        self.assertTrue(len(prefixes_ab) >= 1)
-        self.assertTrue(len(prefixes_bb) >= 1)
-
-    def test_no_rules_for_empty_grants(self):
-        self.assertEqual(sg._github_rules([], []), [])
-
-    # --- wiring: flags reach run and up ---
-
-    def test_run_and_up_wire_github_flags(self):
-        """Both run and up pass --github-read/--github-write into _session_policy."""
-        cases = [
-            ["run", "--with", "git", "--github-read", "a/b",
-             "--github-write", "c/d", "--", "true"],
-            ["up", "--name", "u1", "--with", "git", "--github-read", "a/b",
-             "--github-write", "c/d"],
-        ]
-        for argv in cases:
-            seen = {}
-
-            def spy(args_, _seen=seen):
-                _seen["read"] = getattr(args_, "github_read", None)
-                _seen["write"] = getattr(args_, "github_write", None)
-                raise SystemExit(42)
-
-            with mock.patch.object(sys, "argv", ["silkgate"] + argv), \
-                    mock.patch.object(sg, "_session_policy", spy), \
-                    self.no_preflight(), self.assertRaises(SystemExit) as caught:
-                sg.main()
-            self.assertEqual(caught.exception.code, 42, f"argv={argv!r}")
-            self.assertEqual(seen["read"], ["a/b"], f"argv={argv!r}")
-            self.assertEqual(seen["write"], ["c/d"], f"argv={argv!r}")
-
-    # --- requires --with git ---
-
-    def test_github_grant_without_git_profile_refused(self):
-        for argv in (
-            ["run", "--github-read", "a/b", "--", "true"],
-            ["run", "--github-write", "a/b", "--", "true"],
-            ["up", "--name", "u2", "--github-read", "a/b"],
-            ["up", "--name", "u2", "--github-write", "a/b"],
-        ):
-            with mock.patch.object(sys, "argv", ["silkgate"] + argv), \
-                    self.no_preflight():
-                self.refuses("--with git", sg.main)
-
-    # --- guest git-config: URL-scoped per host, no global http.extraheader ---
-
-    def test_github_gitconfig_sh_sets_url_scoped_headers(self):
-        sh = sg._GITHUB_GITCONFIG_SH
-        for host_url in ("https://github.com/", "https://lfs.github.com/",
-                         "https://api.github.com/"):
-            self.assertIn(host_url, sh,
-                          f"gitconfig must set URL-scoped header for {host_url}")
-
-    def test_github_gitconfig_sh_no_global_extraheader(self):
-        """A bare http.extraheader would bleed the dummy token onto github-cloud.*
-        storage requests that carry their own AWS SigV4, causing S3 to return 501."""
-        sh = sg._GITHUB_GITCONFIG_SH
-        # URL-scoped keys look like http.https://github.com/.extraHeader — that substring
-        # does not contain the bare 'http.extraheader' pattern.
-        self.assertNotIn("http.extraheader", sh.lower(),
-                         "must not set bare http.extraheader (use URL-scoped form only)")
-
-    def test_github_gitconfig_sh_does_not_touch_storage_hosts(self):
-        sh = sg._GITHUB_GITCONFIG_SH
-        self.assertNotIn("s3.amazonaws.com", sh,
-                         "s3 storage host must not appear in gitconfig setup")
-        self.assertNotIn("githubusercontent.com", sh,
-                         "cdn storage host must not appear in gitconfig setup")
-
-    # --- session_context: grants surface in the Injected credentials section ---
-
-    def _github_ctx(self):
-        ruleset = sg.load_ruleset("\n".join(sg._github_rules(["a/b"], [])) + "\n")
-        return sg.session_context([], ruleset, persistent=False,
-                                  github_read=["a/b"])
-
-    def test_session_context_github_grant_reports_missing_secret(self):
-        """The warn-not-die contract: a launch without the github secret still hands the
-        guest a context that names the grant AND its unusable credential."""
-        env = {k: v for k, v in os.environ.items()
-               if not k.startswith("SILKGATE_EGRESS_SECRET_")}
-        with mock.patch.dict(os.environ, env, clear=True):
-            ctx = self._github_ctx()
-        self.assertIn("## GitHub access", ctx)
-        self.assertIn("inject_auth=github", ctx)
-        self.assertIn("Missing or malformed", ctx)
-
-    def test_session_context_github_grant_reports_available_secret(self):
-        with mock.patch.dict(os.environ,
-                             {"SILKGATE_EGRESS_SECRET_GITHUB": "Authorization: Basic abc"}):
-            ctx = self._github_ctx()
-        self.assertIn("## GitHub access", ctx)
-        self.assertIn("inject_auth=github", ctx)
-        self.assertIn("Available", ctx)
-
-    # --- read_meta hardening ---
-
-    def _plant_meta(self, name, **extra):
-        sdir = sg.SESSIONS_DIR / name
-        sdir.mkdir(parents=True)
-        self.addCleanup(shutil.rmtree, sdir, ignore_errors=True)
-        (sdir / "meta.json").write_text(json.dumps(
-            {"name": name, "sandbox": f"sg-{name}", **extra}))
-
-    def test_read_meta_refuses_traversal_in_github_read(self):
-        self._plant_meta("ghr1aa", github_read=["../evil"])
-        self.refuses("refusing it", sg.read_meta, "ghr1aa")
-
-    def test_read_meta_refuses_multi_slash_in_github_write(self):
-        self._plant_meta("ghw2bb", github_write=["a/b/c"])
-        self.refuses("refusing it", sg.read_meta, "ghw2bb")
-
-    def test_read_meta_refuses_non_list_github_field(self):
-        self._plant_meta("ghn3cc", github_read="owner/repo")
-        self.refuses("refusing it", sg.read_meta, "ghn3cc")
-
-    def test_read_meta_accepts_valid_github_fields(self):
-        self._plant_meta("ghv4dd", github_read=["owner/repo"], github_write=["org/proj"])
-        meta = sg.read_meta("ghv4dd")
-        self.assertEqual(meta["github_read"], ["owner/repo"])
-        self.assertEqual(meta["github_write"], ["org/proj"])
 
 
 class TestGithubProfiles(CliCase):

@@ -365,12 +365,12 @@ def profile_command(profiles):
     return None
 
 
-def compose_rules(profiles, extra_rules=(), generated_rules=()):
+def compose_rules(profiles, extra_rules=()):
     """The session's ruleset text, in deliberate order: --rule lines first, then
-    generated rules (arg-instance expansions, then grant rules such as --github-*),
-    then the rules of profiles without args. The proxy is first-match-wins, so earlier
-    rules override later ones for the paths they cover — explicit beats generated,
-    generated beats the profile floor."""
+    arg-instance expansions (grants such as github-read:OWNER/REPO), then the rules of
+    profiles without args. The proxy is first-match-wins, so earlier rules override
+    later ones for the paths they cover — explicit beats a grant, a grant beats the
+    profile floor."""
     out = []
     if extra_rules:
         out.append("# --- --rule ---")
@@ -379,49 +379,11 @@ def compose_rules(profiles, extra_rules=(), generated_rules=()):
         if p.arg is not None and p.rules.strip():
             out.append(f"# --- profile {p.spec} ---")
             out.append(p.rendered_rules().rstrip("\n"))
-    if generated_rules:
-        out.append("# --- grants ---")
-        out.extend(generated_rules)
     for p in profiles:
         if p.arg is None and p.rules.strip():
             out.append(f"# --- profile {p.spec} ---")
             out.append(p.rules.rstrip("\n"))
     return "\n".join(out) + "\n" if out else ""
-
-
-def _github_rules(read_repos, write_repos):
-    """DSL rule lines for --github-read/--github-write grants.
-
-    write supersedes read for the same repo. github-cloud object-storage hosts serve every
-    repo from shared paths (no per-repo component), so those rules are emitted at most once.
-    The storage endpoints are self-authorizing (presigned URL or AWS SigV4) and must carry no
-    inject_auth — adding a second Authorization header there causes S3 to return 501.
-    """
-    write_set = set(write_repos)
-    # Preserve caller order; de-duplicate within each list via dict.fromkeys.
-    effective = list(dict.fromkeys(list(read_repos) + list(write_repos)))
-    if not effective:
-        return []
-    rules = []
-    for repo in effective:
-        is_write = repo in write_set
-        # REST API write grants include mutations; read is GET only.
-        api_methods = "GET POST PATCH DELETE" if is_write else "GET"
-        # Both path forms: `git clone https://github.com/o/r` hits /o/r/info/refs with no
-        # `.git` and GitHub serves it without redirecting, while the `.git` suffix is the
-        # other common form. Each covers its own git smart-HTTP and LFS-batch paths.
-        rules += [
-            f"github.com/{repo}/** GET POST inject_auth=github",
-            f"github.com/{repo}.git/** GET POST inject_auth=github",
-            f"lfs.github.com/{repo}/** GET POST inject_auth=github",
-            f"api.github.com/repos/{repo}/** {api_methods} inject_auth=github",
-        ]
-    # LFS object download: presigned URLs carry the signature in the query string.
-    rules.append("github-cloud.githubusercontent.com/** GET q:*")
-    if write_set:
-        # LFS object upload: SigV4 in the Authorization header, must not be replaced.
-        rules.append("github-cloud.s3.amazonaws.com/** PUT q:*")
-    return rules
 
 
 def load_ruleset(text, where="rules"):
@@ -1031,8 +993,7 @@ def ensure_image(profiles, image, *, base=BASE_IMAGE):
 # a courtesy to a cooperating agent — it saves turns wasted on things the sandbox forbids
 # — and never a control: an adversarial guest ignores it, so nothing may rely on it.
 
-def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, checkout=None,
-                    github_read=(), github_write=()):
+def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, checkout=None):
     """The markdown a guest is handed about its own sandbox. `mounts` is the validated
     -v list as (host, guest, mode) triples; the active mode — branch, checkout, or the
     mode of a mount at /workspace — keys the workspace sentence, and every other mount
@@ -1201,31 +1162,6 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         snippet = p.rendered_context().strip()
         if snippet:
             lines += ["", snippet]
-    if github_read or github_write:
-        write_set = set(github_write)
-        all_repos = list(dict.fromkeys(list(github_read) + list(github_write)))
-        lines += [
-            "",
-            "## GitHub access",
-            "",
-            "**Use git and git-lfs against the repositories below with no credential",
-            "configuration — the proxy holds the token.** These GitHub repositories are",
-            "reachable through the egress allowlist:",
-            "",
-        ]
-        for repo in all_repos:
-            access = "read/write (push, LFS upload, API writes)" if repo in write_set else "read (clone, fetch, LFS download, API GET)"
-            lines.append(f"- `{repo}` — {access}")
-        lines += [
-            "",
-            "The proxy injects the GitHub token, and the token is never present in this",
-            "machine. For a `curl` call to `api.github.com`, pass",
-            "`-H \"Authorization: Basic c2lsa2dhdGU=\"` yourself — that placeholder makes",
-            "the proxy inject the real credential. All of this rides the `github`",
-            "credential, and its launch-time status appears under \"Injected credentials\"",
-            "below. If that status is missing or malformed, these grants deny until the",
-            "operator fixes the secret.",
-        ]
     inject_names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
     if inject_names:
         lines += [
@@ -1288,9 +1224,6 @@ _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 # What msb accepts as a sandbox name. meta.json's "sandbox" reaches `msb exec`/`msb rm` argv,
 # so it is held to this before it is used — a value msb would read as a flag is not a name.
 _SANDBOX_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-# OWNER/REPO accepted by --github-read/--github-write. No traversal (no .., no leading /),
-# exactly one slash, both sides non-empty letters/digits/dots/hyphens/underscores.
-_GITHUB_REPO_RE = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 
 
 def _name_ok(name):
@@ -1327,15 +1260,6 @@ def read_meta(name):
         branch, base = str(meta["branch"]), str(meta.get("base", ""))
         if not _BRANCH_RE.fullmatch(branch) or ".." in branch or not _BASE_RE.fullmatch(base):
             die(f"session {name!r}: its meta.json names branch {branch!r} — refusing it")
-    for field in ("github_read", "github_write"):
-        entries = meta.get(field)
-        if entries is None:
-            continue
-        # These reach generated rule host/path strings, so each entry is held to the same
-        # charset validated at flag parse time — a planted meta cannot inject arbitrary paths.
-        if not isinstance(entries, list) or any(
-                not _GITHUB_REPO_RE.fullmatch(str(e)) or ".." in str(e) for e in entries):
-            die(f"session {name!r}: its meta.json has invalid {field} field — refusing it")
     return meta
 
 
@@ -2539,26 +2463,6 @@ def _setup_checkout_guest(sandbox, base, session):
         die("guest git setup failed — session torn down")
 
 
-# URL-scoped per-host so the header does NOT apply to github-cloud.s3.amazonaws.com, which
-# carries its own AWS SigV4 Authorization on LFS uploads. git-lfs applies a global
-# http.extraheader to every request including that one — a second Authorization header makes
-# S3 return 501 Not Implemented. Scoping to the three github control hosts avoids that.
-_GITHUB_GITCONFIG_SH = """\
-set -eu
-git config --global 'http.https://github.com/.extraHeader' 'Authorization: Basic c2lsa2dhdGU='
-git config --global 'http.https://lfs.github.com/.extraHeader' 'Authorization: Basic c2lsa2dhdGU='
-git config --global 'http.https://api.github.com/.extraHeader' 'Authorization: Basic c2lsa2dhdGU='
-"""
-
-
-def _setup_github_guest(sandbox):
-    """Set URL-scoped credential stubs in the guest so the proxy can inject the real token."""
-    rc = run_guest(lambda c: msb_exec_argv(sandbox, c),
-                   ["sh", "-c", _GITHUB_GITCONFIG_SH], tty=False)
-    if rc:
-        die("guest github git setup failed — session torn down")
-
-
 # The bundle range is always base..branch; only the nothing-new check moves with harvests.
 # rev-list --count, not a tip comparison: a guest reset to an ancestor of the base would
 # otherwise reach `bundle create`, which refuses an empty range with an error this protocol
@@ -2782,8 +2686,6 @@ def cmd_run(args):
     check_env(args.env)
     _check_mount_flags(args)
     profiles, rules_text, ruleset = _session_policy(args)
-    github_read = getattr(args, "github_read", None) or []
-    github_write = getattr(args, "github_write", None) or []
     cmd = _strip_cmd_sep(args.cmd) or profile_command(profiles)
     if not cmd:
         die("nothing to run — pass a command after -- (or --with a profile that names one)")
@@ -2812,13 +2714,11 @@ def cmd_run(args):
     proxy_was_running = _proxy_running()        # --port is the base port iff WE start it
     rc, provisioned, branch_ready, proxy = 1, False, False, None
     create_env = list(args.env) + (list(_BRANCH_ENV) if args.branch else [])
-    github_meta = {"github_read": github_read, "github_write": github_write} \
-        if (github_read or github_write) else {}
     try:
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, vmounts, persistent=False)
-        meta_extra = {**_session_meta(profiles, cmd), **(spec or {}), **github_meta}
+        meta_extra = {**_session_meta(profiles, cmd), **(spec or {})}
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
@@ -2827,8 +2727,6 @@ def cmd_run(args):
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
             die(fault)                      # the finally below tears the session down
-        if github_read or github_write:
-            _setup_github_guest(sandbox_name(name))
         if args.branch:
             _setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
             branch_ready = True
@@ -2874,15 +2772,7 @@ def _session_policy(args):
     of a rule written to match nothing would sit in shell history reading like an allowance.
     """
     profiles = resolve_profiles(args.with_ or [])
-    reads = getattr(args, "github_read", None)
-    reads = reads if isinstance(reads, list) else []
-    writes = getattr(args, "github_write", None)
-    writes = writes if isinstance(writes, list) else []
-    if reads or writes:
-        if not any(p.name == "git" for p in profiles):
-            die("--github-read/--github-write need git in the guest — add --with git")
-    github_extra = _github_rules(reads, writes)
-    rules_text = compose_rules(profiles, args.rule or [], github_extra)
+    rules_text = compose_rules(profiles, args.rule or [])
     ruleset = load_ruleset(rules_text)
     if not ruleset.rules:
         say("empty allowlist — this guest can reach nothing; every request is denied")
@@ -2906,17 +2796,13 @@ def _context_for(args, profiles, ruleset, mounts, *, persistent):
         [GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
                            if p.conf.get("context_path")]))
     return session_context(profiles, ruleset, mounts=mounts, persistent=persistent,
-                           branch=args.branch, checkout=args.checkout,
-                           github_read=getattr(args, "github_read", None) or (),
-                           github_write=getattr(args, "github_write", None) or ()), paths
+                           branch=args.branch, checkout=args.checkout), paths
 
 
 def cmd_up(args):
     check_env(args.env)
     _check_mount_flags(args)
     profiles, rules_text, ruleset = _session_policy(args)
-    github_read = getattr(args, "github_read", None) or []
-    github_write = getattr(args, "github_write", None) or []
     name = args.name or uuid4().hex[:6]
     _validate_name(name)
     if session_dir(name).exists():
@@ -2943,14 +2829,11 @@ def cmd_up(args):
     image = ensure_image(profiles, args.image, base=args.base)
     provisioned = False
     create_env = list(args.env) + (list(_BRANCH_ENV) if args.branch else [])
-    github_meta = {"github_read": github_read, "github_write": github_write} \
-        if (github_read or github_write) else {}
     try:
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, vmounts, persistent=True)
-        meta_extra = {**_session_meta(profiles, profile_command(profiles)), **(spec or {}),
-                      **github_meta}
+        meta_extra = {**_session_meta(profiles, profile_command(profiles)), **(spec or {})}
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
@@ -2959,8 +2842,6 @@ def cmd_up(args):
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
             die(fault)
-        if github_read or github_write:
-            _setup_github_guest(sandbox_name(name))
         if args.branch:
             _setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
         elif spec:
@@ -4742,15 +4623,6 @@ def cmd_verify(args):
 # argparse itself, so a rejection names the flag it came from: `--with node@22.11.0` is
 # exactly the token a reviewer's eye slides over on a command line composed for approval.
 
-def _github_repo_arg(value):
-    """argparse type for --github-read/--github-write: OWNER/REPO with no traversal."""
-    if not _GITHUB_REPO_RE.fullmatch(value) or ".." in value:
-        raise argparse.ArgumentTypeError(
-            f"invalid repo {value!r} — expected OWNER/REPO (letters, digits, '.', '-', '_'; "
-            "exactly one slash, no path traversal)")
-    return value
-
-
 def _mount_arg(spec):
     """argparse type for -v/--mount: SRC:DST[:MODE] syntax alone — the path guards run at
     dispatch, where the mount list is checked as a whole (_mount_args)."""
@@ -4924,16 +4796,6 @@ def main():
                    help="like --checkout, but on new branch NAME whose commits land in the "
                         "host repo at teardown; beside --checkout REF, REF is the branch "
                         "base (needs --with git; owns /workspace, so no -v may target it)")
-    p.add_argument("--github-read", action="append", metavar="OWNER/REPO",
-                   type=_github_repo_arg,
-                   help="grant clone/fetch/LFS-download/API-GET for OWNER/REPO; "
-                        "token injected by the proxy, never in the guest "
-                        "(needs --with git; repeatable)")
-    p.add_argument("--github-write", action="append", metavar="OWNER/REPO",
-                   type=_github_repo_arg,
-                   help="grant everything --github-read does plus push/LFS-upload/API-write; "
-                        "token injected by the proxy, never in the guest "
-                        "(needs --with git; repeatable)")
     env_opt(p)
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
                    help="give the command a terminal, for a TUI (default: yes if stdin is a "
@@ -4964,16 +4826,6 @@ def main():
                    help="like --checkout, but on new branch NAME whose commits land in the "
                         "host repo at down; beside --checkout REF, REF is the branch base "
                         "(needs --with git; owns /workspace, so no -v may target it)")
-    p.add_argument("--github-read", action="append", metavar="OWNER/REPO",
-                   type=_github_repo_arg,
-                   help="grant clone/fetch/LFS-download/API-GET for OWNER/REPO; "
-                        "token injected by the proxy, never in the guest "
-                        "(needs --with git; repeatable)")
-    p.add_argument("--github-write", action="append", metavar="OWNER/REPO",
-                   type=_github_repo_arg,
-                   help="grant everything --github-read does plus push/LFS-upload/API-write; "
-                        "token injected by the proxy, never in the guest "
-                        "(needs --with git; repeatable)")
     profile_opts(p)
     env_opt(p)
     p.add_argument("--image", metavar="REF", type=_image_arg,
