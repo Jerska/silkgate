@@ -275,6 +275,12 @@ class Profile:
     def env_pairs(self):
         return [ln for ln in self.env.splitlines() if ln.strip() and not ln.startswith("#")]
 
+    def rendered_rules(self):
+        """rules.txt with every {arg} replaced by the validated arg. rules.txt is the
+        only templated file: setup.sh and env shape the image, which an arg must never
+        touch (see image_ref, which hashes the template bytes as written)."""
+        return self.rules.replace("{arg}", self.arg) if self.arg is not None else self.rules
+
 
 def _parse_conf(path):
     """`key = value` lines; blanks and #-comments ignored."""
@@ -332,16 +338,27 @@ def profile_command(profiles):
     return None
 
 
-def compose_rules(profiles, extra_rules=()):
-    """The session's ruleset text: every profile's rules, plus any inline --rule."""
+def compose_rules(profiles, extra_rules=(), generated_rules=()):
+    """The session's ruleset text, in deliberate order: --rule lines first, then
+    generated rules (arg-instance expansions, then grant rules such as --github-*),
+    then the rules of profiles without args. The proxy is first-match-wins, so earlier
+    rules override later ones for the paths they cover — explicit beats generated,
+    generated beats the profile floor."""
     out = []
-    for p in profiles:
-        if p.rules.strip():
-            out.append(f"# --- profile {p.spec} ---")
-            out.append(p.rules.rstrip("\n"))
     if extra_rules:
         out.append("# --- --rule ---")
         out.extend(extra_rules)
+    for p in profiles:
+        if p.arg is not None and p.rules.strip():
+            out.append(f"# --- profile {p.spec} ---")
+            out.append(p.rendered_rules().rstrip("\n"))
+    if generated_rules:
+        out.append("# --- grants ---")
+        out.extend(generated_rules)
+    for p in profiles:
+        if p.arg is None and p.rules.strip():
+            out.append(f"# --- profile {p.spec} ---")
+            out.append(p.rules.rstrip("\n"))
     return "\n".join(out) + "\n" if out else ""
 
 
@@ -2806,7 +2823,7 @@ def _session_policy(args):
         if not any(p.name == "git" for p in profiles):
             die("--github-read/--github-write need git in the guest — add --with git")
     github_extra = _github_rules(reads, writes)
-    rules_text = compose_rules(profiles, list(args.rule or []) + github_extra)
+    rules_text = compose_rules(profiles, args.rule or [], github_extra)
     ruleset = load_ruleset(rules_text)
     if not ruleset.rules:
         say("empty allowlist — this guest can reach nothing; every request is denied")

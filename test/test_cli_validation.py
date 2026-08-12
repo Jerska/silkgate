@@ -633,6 +633,96 @@ class TestProfileInstanceDedup(ArgProfileCase):
         self.assertEqual([p.spec for p in profiles], ["tmpl:a/b", "tmpl:c/d"])
 
 
+class TestProfileArgExpansion(ArgProfileCase):
+    """{arg} expands into rules.txt alone, at composition time, after validation."""
+
+    def test_rules_template_expands_the_arg(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        text = sg.compose_rules(sg.resolve_profiles(["tmpl:owner/repo"]))
+        self.assertIn("example.com/owner/repo/** GET POST", text)
+        self.assertNotIn("{arg}", text)
+
+    def test_every_placeholder_occurrence_expands(self):
+        self.profile_dir({"multi": {"profile.conf": "arg_pattern = [a-z]+\n",
+                                    "rules.txt": "a.com/{arg}/** GET\nb.com/{arg} GET\n"}})
+        text = sg.compose_rules(sg.resolve_profiles(["multi:x"]))
+        self.assertIn("a.com/x/** GET", text)
+        self.assertIn("b.com/x GET", text)
+
+    def test_expanded_rules_parse_and_scope_to_the_arg(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        ruleset = sg.load_ruleset(sg.compose_rules(sg.resolve_profiles(["tmpl:a/b"])))
+        self.assertIsNotNone(ruleset.match("example.com", "/a/b/x", "POST"))
+        self.assertIsNone(ruleset.match("example.com", "/c/d/x", "POST"))
+
+    def test_injection_attempts_die_at_the_spec_parser(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        for evil in ("a/b GET\nevil.com/** GET", "a/b evil.com/** GET",
+                     "a/b\tPOST", "a/b\rmax_body=1g"):
+            self.refuses("whitespace and control", sg.resolve_profiles, [f"tmpl:{evil}"])
+
+    def test_structural_injection_without_whitespace_dies_at_the_pattern(self):
+        # '#' would comment out the rest of the rule line; '**' would widen the path.
+        self.profile_dir({"tmpl": self.TMPL})
+        self.refuses("does not match", sg.resolve_profiles, ["tmpl:a/b#x"])
+        self.refuses("does not match", sg.resolve_profiles, ["tmpl:**"])
+
+    def test_setup_and_env_are_never_templated(self):
+        self.profile_dir({"holey": {"profile.conf": "arg_pattern = [a-z]+\n",
+                                    "rules.txt": "a.com/{arg} GET\n",
+                                    "setup.sh": "echo {arg}\n",
+                                    "env": "X={arg}\n"}})
+        (p,) = sg.resolve_profiles(["holey:x"])
+        cert = self.tmp / "egress-ca.pem"
+        cert.write_text("cert")
+        context = self.tmp / "ctx"
+        context.mkdir()
+        with mock.patch.object(sg, "ensure_ca", lambda: cert):
+            sg.write_build_context(context, [p], sg.BASE_IMAGE)
+        self.assertEqual((context / "setup-holey.sh").read_text(), "echo {arg}\n")
+        self.assertIn("X={arg}", (context / "Dockerfile").read_text())
+
+
+class TestCompositionOrder(ArgProfileCase):
+    """The proxy is first-match-wins, so composition order is the override mechanism:
+    --rule lines first, then generated rules (arg expansions, GitHub grants), then
+    no-arg profile rules — explicit beats generated, generated beats floor."""
+
+    def test_rule_then_arg_expansion_then_static_floor(self):
+        self.profile_dir({"tmpl": self.TMPL, "plain": self.PLAIN})
+        profiles = sg.resolve_profiles(["plain", "tmpl:a/b"])
+        text = sg.compose_rules(profiles, ["example.com/a/b/** GET POST PUT"])
+        blocks = [text.index("# --- --rule ---"),
+                  text.index("# --- profile tmpl:a/b ---"),
+                  text.index("# --- profile plain ---")]
+        self.assertEqual(blocks, sorted(blocks), text)
+        ruleset = sg.load_ruleset(text)
+        # All three rules cover GET /a/b/x; the --rule line (the only one with PUT)
+        # must be the one that governs it.
+        governing = ruleset.match("example.com", "/a/b/x", "GET")
+        self.assertIn("PUT", governing.methods)
+        # Without the --rule line the arg expansion (the POST-bearing rule) governs.
+        governing = sg.load_ruleset(sg.compose_rules(profiles)).match(
+            "example.com", "/a/b/x", "GET")
+        self.assertIn("POST", governing.methods)
+        # Off the arg's paths, the static floor is all that matches.
+        governing = sg.load_ruleset(sg.compose_rules(profiles)).match(
+            "example.com", "/elsewhere", "GET")
+        self.assertEqual(governing.methods, {"GET"})
+
+    def test_github_grants_sit_between_rule_lines_and_profile_floor(self):
+        args = mock.Mock(with_=["git"], rule=["example.com/** GET"],
+                         github_read=["a/b"], github_write=None)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _, text, _ = sg._session_policy(args)
+        blocks = [text.index("# --- --rule ---"),
+                  text.index("# --- grants ---"),
+                  text.index("# --- profile git ---")]
+        self.assertEqual(blocks, sorted(blocks), text)
+        self.assertIn("github.com/a/b/**", text)
+
+
 class TestEmptyAllowlist(CliCase):
     """No --with and no --rule is the strictest policy silkgate can express."""
 
