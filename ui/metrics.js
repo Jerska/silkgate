@@ -49,7 +49,7 @@ export function metricsSummary(m) {
   const parts = [];
   const cpu = fmtCpuPct(m.cpu_percent);
   if (cpu !== null) parts.push(`cpu ${cpu}`);
-  const mem = fmtMiB(m.memory_bytes);
+  const mem = fmtMiB(m.memory_rss_bytes);
   if (mem !== null) parts.push(`mem ${mem} (VMM RSS)`);
   if (m.net_rx_bytes != null || m.net_tx_bytes != null) {
     parts.push(`net ↓${fmtBytes(m.net_rx_bytes ?? 0)}`
@@ -88,7 +88,7 @@ export function pushSamples(hist, payload, cap = SPARK_SAMPLES) {
       hist.bySession.set(m.session, h);
     }
     h.cpu.push(asSample(m.cpu_percent));
-    h.mem.push(asSample(m.memory_bytes));
+    h.mem.push(asSample(m.memory_rss_bytes));
     h.ts.push(typeof payload.sampled === "string" ? payload.sampled : null);
     while (h.cpu.length > cap) h.cpu.shift();
     while (h.mem.length > cap) h.mem.shift();

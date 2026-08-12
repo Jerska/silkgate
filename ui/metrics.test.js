@@ -12,10 +12,10 @@ function payload(sampled, rows) {
 
 test("samples accumulate per session, independently", () => {
   const h = newHistory();
-  pushSamples(h, payload("t1", [{ session: "a", cpu_percent: 10, memory_bytes: 100 },
-                                { session: "b", cpu_percent: 90, memory_bytes: 900 }]));
+  pushSamples(h, payload("t1", [{ session: "a", cpu_percent: 10, memory_rss_bytes: 100 },
+                                { session: "b", cpu_percent: 90, memory_rss_bytes: 900 }]));
   const touched = pushSamples(h, payload("t2", [{ session: "a", cpu_percent: 20,
-                                                  memory_bytes: 200 }]));
+                                                  memory_rss_bytes: 200 }]));
   assert.deepEqual(touched, ["a"]);
   assert.deepEqual(h.bySession.get("a").cpu, [10, 20]);
   assert.deepEqual(h.bySession.get("b").cpu, [90], "b kept its own ring");
@@ -42,9 +42,9 @@ test("the ring holds 30 samples and sheds the oldest", () => {
 
 test("a missing or junk number is a null gap, never a zero", () => {
   const h = newHistory();
-  pushSamples(h, payload("t1", [{ session: "a", memory_bytes: 100 }]));
+  pushSamples(h, payload("t1", [{ session: "a", memory_rss_bytes: 100 }]));
   pushSamples(h, payload("t2", [{ session: "a", cpu_percent: "97%",
-                                  memory_bytes: 200 }]));
+                                  memory_rss_bytes: 200 }]));
   assert.deepEqual(h.bySession.get("a").cpu, [null, null]);
   assert.deepEqual(h.bySession.get("a").mem, [100, 200]);
 });
@@ -79,7 +79,7 @@ test("memory reads in MiB at one decimal", () => {
 
 test("the summary shows RSS alone with its label — never X/limit", () => {
   const parts = metricsSummary({ cpu_percent: 0.004325448535382748,
-                                 memory_bytes: 880_620_339,
+                                 memory_rss_bytes: 880_620_339,
                                  memory_limit_bytes: 536_870_912,
                                  uptime_secs: 245 });
   assert.equal(parts[0], "cpu 0.0%");
@@ -89,6 +89,16 @@ test("the summary shows RSS alone with its label — never X/limit", () => {
   assert.ok(!parts.some((p) => p.includes("/512") || p.includes("512.0")),
             "the limit stays out of the one-line summary");
   assert.equal(parts[2], "up 4m");
+});
+
+test("memory reads the backend's memory_rss_bytes, not the retired name", () => {
+  const parts = metricsSummary({ memory_bytes: 880_620_339 });
+  assert.ok(!parts.some((p) => p.startsWith("mem ")),
+            "the retired memory_bytes key must not render");
+  const h = newHistory();
+  pushSamples(h, payload("t1", [{ session: "a", memory_bytes: 100 }]));
+  assert.deepEqual(h.bySession.get("a").mem, [null],
+                   "the ring records a gap, not the retired key's value");
 });
 
 test("the summary skips what the row does not carry", () => {

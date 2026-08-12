@@ -683,7 +683,7 @@ export function newSessionView() {
           { unit: "%", times: h?.ts, fmt: fmtCpuPct }),
       // VMM RSS is the VMM process's resident set: it legitimately exceeds
       // the guest allocation, so it never renders beside the limit as X/Y.
-      row("mem (VMM RSS)", fmtMiB(m.memory_bytes) ?? "—", h?.mem,
+      row("mem (VMM RSS)", fmtMiB(m.memory_rss_bytes) ?? "—", h?.mem,
           { unit: "MiB", times: h?.ts, fmt: fmtMiB }),
       m.memory_limit_bytes != null
         ? row("guest allocation", fmtMiB(m.memory_limit_bytes), null)

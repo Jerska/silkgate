@@ -229,7 +229,7 @@ export function newOverviewView() {
       el("span", { class: "num" }, `cpu ${fmtCpuPct(m.cpu_percent) ?? "—"}`),
       h ? sparkline(h.cpu, { unit: "%", times: h.ts, fmt: fmtCpuPct }) : null,
       el("span", { class: "num", title: "VMM RSS" },
-         `mem ${fmtMiB(m.memory_bytes) ?? "—"}`),
+         `mem ${fmtMiB(m.memory_rss_bytes) ?? "—"}`),
       h ? sparkline(h.mem, { unit: "MiB", times: h.ts, fmt: fmtMiB }) : null);
     card.nodes.met.hidden = false;
   }
