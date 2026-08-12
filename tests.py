@@ -45,7 +45,10 @@ SHARDS = {
     "verify-wiring": ["test_verify_oracles.VerifyWiring"],  # ~9 s
     "oracles-rest": ["test_verify_oracles"],  # the module's remainder, ~5 s
     "lifecycle": ["test_proxy_lifecycle"],  # the module's remainder, ~4 s
-    "rest-validation": ["test_cli_validation"],  # 160 tests, ~0.6 s
+    "rest-validation": [  # 215 tests, ~0.6 s
+        "test_cli_settings",
+        "test_cli_validation",
+    ],
     "rest-checks": [  # 194 tests, ~1.3 s
         "test_addon",
         "test_capture_decoder",
