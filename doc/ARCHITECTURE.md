@@ -149,7 +149,7 @@ gateway.** This is the piece neither Claude Code nor Codex ships.
 | LLM call | guest → proxy → `api.anthropic.com` | The guest sends a dummy key and the proxy injects the real one. The key survives full guest compromise, because the guest never holds it. |
 | `npm install` | guest → proxy → `GET registry.npmjs.org` | A malicious postinstall runs inside the VM, contained, and reaches nothing except the inspected proxy. |
 | Exfiltration under prompt injection | guest → proxy → denied | There is no `~/.ssh` in the guest — the only host paths are the mounts the user chose, each guarded and read-only by default, and a `--checkout` guest holds committed content only, so an untracked `/workspace/.env` never entered it. A POST of a secret that was handed in to `evil.com` is denied (not allowlisted), and to `github.com` is blocked on method, size, or SNI-Host mismatch. Two independent failures are required. |
-| Git push | guest commits → human reviews → host pushes | The safest default: the agent commits inside the VM and the human pushes after review. For autonomy, allow push to one repo only, with the PAT injected and the body capped (`max_body`). No SSH keys exist in the guest. |
+| Git push | guest commits → human reviews → host pushes | The safest default: the agent commits inside the VM and the human pushes after review. For autonomy, the `github-write:OWNER/REPO` profile grants push to that one repository, with the PAT injected and the body capped (`max_body`). No SSH keys exist in the guest. |
 
 ## The agent's channel back to the parent
 

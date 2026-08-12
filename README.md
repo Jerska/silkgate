@@ -116,13 +116,13 @@ The same name repeats with different arguments to grant several instances. Each
 distinct name, version, and argument combination expands its rules once, and exact
 duplicates deduplicate silently. When a profile's conf declares `supersedes = NAME`,
 its instance drops any NAME instance with the same argument, and silkgate prints one
-line per drop. There is no dependency counterpart — grants stay tight.
+line per drop. The dependency key is `requires = NAME`: a listed profile that is
+absent from the `--with` list is refused, never added silently.
 
 The composed ruleset is ordered, and the order is the override mechanism. The proxy is
 first-match-wins, so an earlier rule decides every request it covers. Composition puts
-`--rule` lines first, then generated rules, then the rules of profiles without
-arguments. The generated rules are the argument expansions, then the GitHub grant
-rules. Explicit therefore beats generated, and generated beats the profile floor.
+`--rule` lines first, then the argument expansions, then the rules of profiles without
+arguments. Explicit therefore beats a grant, and a grant beats the profile floor.
 `test/test_cli_validation.py` pins the validation, the image identity, and the order.
 Audit a composed policy before a launch:
 
@@ -292,33 +292,62 @@ not content-addressed — `git lfs logs last` renders guest-written bytes in a h
 so treat that output as untrusted. Hooks are copied into the clone verbatim and run in the
 guest. A hook that references host paths fails there (`--no-verify`, or fix the hook).
 
-## GitHub egress: `--github-read` and `--github-write`
+## GitHub egress: `github`, `github-read`, `github-write`
 
-**`--github-read OWNER/REPO` and `--github-write OWNER/REPO` grant a guest scoped GitHub
-access, with a host-held PAT the proxy injects.** Both flags are repeatable and need
-`--with git`. The secret is `SILKGATE_EGRESS_SECRET_GITHUB`, one full header line:
-`Authorization: Basic base64(x-access-token:<PAT>)`. As with every secret, a missing value
-warns at launch, and the guest sees the credential status in its context file.
+**GitHub egress is three profiles: `github` is the anonymous public-read floor, and
+`github-read:OWNER/REPO` and `github-write:OWNER/REPO` each grant one repository with a
+PAT the proxy injects.** The `git` profile installs git and git-lfs and opens nothing.
+Compose the pieces a task needs:
 
-What the composed rules allow, per repo:
+```sh
+silkgate run --with git --with github -- git clone https://github.com/octocat/Hello-World
+silkgate run --with git --with github-read:your-org/app -- git clone https://github.com/your-org/app
+silkgate up --name bot --with git --with github-write:your-org/app
+```
 
-| Leg | `--github-read` | `--github-write` |
+The floor allows anonymous clone and fetch of any public repository, with no credential
+anywhere. It holds four rules: the ref advertisement pinned to
+`?service=git-upload-pack`, the capped `git-upload-pack` POST, and GET on
+`raw.githubusercontent.com` and `codeload.github.com`. The grants take one `OWNER/REPO`
+argument each and repeat per repository. Their rules compose before the floor, so the
+granted repository rides the credential and every other one stays anonymous.
+`github-write` supersedes `github-read` for the same argument. Neither grant requires
+`git`: a `github-read`-only guest is a supported REST-only shape. The table below lists
+what each grant allows for its repository:
+
+| Leg | `github-read:OWNER/REPO` | `github-write:OWNER/REPO` |
 |---|---|---|
-| git smart-HTTP on `github.com/OWNER/REPO` (both the bare and `.git` path forms) | GET, POST | GET, POST |
-| LFS batch API (`lfs.github.com`, and the same paths on `github.com`) | GET, POST | GET, POST |
-| REST API (`api.github.com/repos/OWNER/REPO`) | GET | GET, POST, PATCH, DELETE |
+| ref advertisement (`info/refs`, bare and `.git` path forms) | GET, `?service=git-upload-pack` only | GET, upload-pack and receive-pack |
+| fetch negotiation (`git-upload-pack`) | POST, 1 MiB cap | POST, 1 MiB cap |
+| push (`git-receive-pack`) | — | POST, 64 MiB cap |
+| LFS batch API on `github.com` | `info/lfs/objects/batch` POST, 1 MiB cap | `info/lfs/**` GET and POST, 1 MiB cap |
+| LFS batch API on `lfs.github.com` | GET and POST, 1 MiB cap | GET and POST, 1 MiB cap |
+| REST API (`api.github.com/repos/OWNER/REPO`) | GET | GET, POST, PUT, PATCH, DELETE, 1 MiB cap |
+| `raw.githubusercontent.com`, `codeload.github.com` | GET, anonymous | GET, anonymous |
 | LFS object download (`github-cloud.githubusercontent.com`, presigned query) | GET, no injection | GET, no injection |
-| LFS object upload (`github-cloud.s3.amazonaws.com`, SigV4 header) | — | PUT, no injection |
+| LFS object upload (`github-cloud.s3.amazonaws.com`, SigV4 header) | — | PUT, 1 GiB cap, no injection |
 
-The git rules are identical for both flags, because a fetch itself rides POST
-(`git-upload-pack`). The read/write split therefore lives in the API methods, the upload
-host, and above all the PAT. A read-only PAT covers clone, fetch, and LFS download. A
-read-write PAT covers push, LFS upload, and API writes. Pair `--github-read` with a
-read-only PAT — the token, not the proxy, is what stops a push on the git leg. The
-storage hosts are self-authorized (presigned URL or SigV4), so those rules carry no
-`inject_auth` — a second `Authorization` header there makes S3 answer 501. The grants are
-recorded in `meta.json` and described to the guest in its context file. `_github_rules` in
-[`cli/silkgate`](cli/silkgate) composes the rules.
+Every `github.com`, `lfs.github.com`, and `api.github.com` row carries
+`inject_auth=github`. The secret is `SILKGATE_EGRESS_SECRET_GITHUB`, one full header
+line: `Authorization: Basic base64(x-access-token:<PAT>)`. As with every secret, a
+missing value warns at launch, and the guest sees the credential status in its context
+file. The storage hosts authorize themselves (presigned URL or SigV4), so those rules
+carry no `inject_auth` — a second `Authorization` header there makes S3 answer 501. Each
+grant's `setup.sh` bakes URL-scoped `Authorization` stubs into the image for the three
+control hosts, never a global one, for the same reason.
+
+Two gaps remain. `gh` is not installed and GraphQL is not reachable. The grants steer
+the guest to the REST API instead, through their context snippets. Call
+`api.github.com/repos/OWNER/REPO/...` with any `Authorization` value, and the proxy
+replaces that value with the real credential. The `raw.githubusercontent.com` and
+`codeload.github.com` lines stay anonymous even inside a grant, so a private file there
+answers 404. Fetch private content over git or the REST API instead.
+
+Migration from the removed flags: `--github-read OWNER/REPO` is now
+`--with github-read:OWNER/REPO`, `--github-write OWNER/REPO` is now
+`--with github-write:OWNER/REPO`, and the anonymous GitHub reach `--with git` once
+carried is now `--with github`. `test/test_cli_validation.py` (TestGithubProfiles) pins
+the read grant's push denial, the body caps, and the composition order.
 
 ## Layout
 

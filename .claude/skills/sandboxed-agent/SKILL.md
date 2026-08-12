@@ -355,7 +355,12 @@ wasted turns, and blocked requests reported as requests instead of retried in a 
   or run subagents in the foreground.
 - Guest clones see host branches as `origin/<name>`. If a brief names a bare branch,
   write `origin/<name>` in it, or create the branch on the host first.
-- `--github-read OWNER/REPO` and `--github-write OWNER/REPO` grant GitHub access
-  (repeatable, and both need `--with git`). The secret `SILKGATE_EGRESS_SECRET_GITHUB`
-  holds the full header line (`Authorization: Basic base64(x-access-token:<PAT>)`). A
-  missing secret warns at launch and shows in the guest context.
+- Plain `--with git` no longer reaches GitHub: it installs git and git-lfs and opens
+  nothing. `--with github` is the anonymous public-read floor (clone and fetch any
+  public repository, no credential). `--with github-read:OWNER/REPO` and
+  `--with github-write:OWNER/REPO` are the credentialed grants, one repository each,
+  repeatable. The secret is unchanged: `SILKGATE_EGRESS_SECRET_GITHUB` holds the full
+  header line (`Authorization: Basic base64(x-access-token:<PAT>)`), and a missing
+  value warns at launch and shows in the guest context. For non-git operations the
+  guest calls the REST API at `api.github.com/repos/OWNER/REPO/...` — `gh` is not
+  installed and GraphQL is not reachable.
