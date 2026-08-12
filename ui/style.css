@@ -144,6 +144,19 @@ button:hover { border-color: var(--muted); }
   background: var(--panel);
   color: var(--muted);
 }
+.badge.frozen { color: var(--accent); border-color: var(--accent); }
+.badge.untrusted { color: var(--idle); border-color: var(--idle); }
+
+/* Control buttons: freeze/resume/down/kill and their inline confirms. */
+.ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.ctl-confirm { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.ctl-note { color: var(--idle); }
+.ctl-err { color: var(--deny); }
 
 /* Diff lines: one .dl per line, long lines scroll the pane sideways —
    .diff sits inside a pane that owns overflow, the body never scrolls. */
@@ -176,7 +189,10 @@ button:hover { border-color: var(--muted); }
   padding: var(--sp-4);
 }
 
+/* The card is a div; .card-link::after stretches the anchor over it so the
+   whole card clicks through, while the control bar floats above on z-index. */
 .card {
+  position: relative;
   display: block;
   padding: var(--sp-3);
   background: var(--panel);
@@ -184,7 +200,20 @@ button:hover { border-color: var(--muted); }
   border-radius: 6px;
   color: var(--fg);
 }
-.card:hover { border-color: var(--muted); text-decoration: none; }
+.card:hover { border-color: var(--muted); }
+.card-link { display: block; color: var(--fg); }
+.card-link:hover { text-decoration: none; }
+.card-link::after { content: ""; position: absolute; inset: 0; }
+.card-ctl { position: relative; z-index: 1; margin-top: var(--sp-2); }
+
+.card-metrics {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-2);
+  margin-top: var(--sp-2);
+  color: var(--muted);
+}
 
 .card-head {
   display: flex;

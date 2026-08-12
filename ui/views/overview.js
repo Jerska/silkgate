@@ -7,9 +7,11 @@
 // only re-derives idle labels (and the dot/order when the passage of time
 // alone changed a state). Cards never rebuild on a tick.
 
-import { el, statusDot, meterBar, fmtTokens, fmtCost } from "../render.js";
+import { el, statusDot, meterBar, sparkline, fmtTokens, fmtCost } from "../render.js";
+import { fmtBytes } from "../store.js";
 import { sessionTotals } from "../capture.js";
 import { estimateCost, contextWindow } from "../pricing.js";
+import { newControlBar } from "../controls.js";
 
 const WORKING_MS = 60_000;       // egress this recent reads as "working"
 const OPEN_TURN_MS = 300_000;    // an open turn keeps "working" through a lull —
@@ -161,6 +163,9 @@ export function newOverviewView() {
 
   // --- rendering ------------------------------------------------------------------
 
+  // The card is a div with a stretched link over it — buttons cannot legally
+  // nest inside an anchor, so the link covers the card via CSS and the control
+  // bar sits above it on its own z-index.
   function createCard(entry) {
     const nodes = {
       dot: statusDot("waiting"),
@@ -168,25 +173,54 @@ export function newOverviewView() {
       deny: el("span", { class: "num" }, ""),
       req: el("span", { class: "num" }, ""),
       age: el("span", { class: "num" }, ""),
+      met: el("div", { class: "card-metrics" }),
       usage: el("div", { class: "card-usage" }),
       gauge: el("div", { class: "card-gauge" }),
     };
+    nodes.met.hidden = true;
     nodes.usage.hidden = true;
     nodes.gauge.hidden = true;
-    const card = {
-      ...entry, nodes, rank: 99, totals: null,
-      root: el("a", { class: "card",
-                      href: "#/session/" + encodeURIComponent(entry.ident) },
+    const card = { ...entry, nodes, rank: 99, totals: null, ctl: null };
+    card.ctl = newControlBar({
+      ident: entry.ident,
+      getMeta: () => (card.archived ? { state: "archived" } : card.meta),
+      onChanged: () => ctx.refreshSessions(),
+    });
+    card.root = el("div", { class: "card" },
+      el("a", { class: "card-link",
+                href: "#/session/" + encodeURIComponent(entry.ident) },
         el("div", { class: "card-head" },
           nodes.dot,
           el("span", { class: "card-name" }, entry.session),
           entry.meta?.branch
             ? el("span", { class: "card-branch" }, String(entry.meta.branch)) : null),
-        el("div", { class: "card-status" }, nodes.label),
-        el("div", { class: "card-counters" }, nodes.deny, nodes.req, nodes.age),
-        nodes.usage, nodes.gauge),
-    };
+        el("div", { class: "card-status" }, nodes.label)),
+      el("div", { class: "card-counters" }, nodes.deny, nodes.req, nodes.age),
+      nodes.met, nodes.usage, nodes.gauge,
+      el("div", { class: "card-ctl" }, card.ctl.root));
     return card;
+  }
+
+  // CPU/RAM numbers with their 30-sample sparklines; hidden until /api/metrics
+  // answers for this session. Memory is VMM RSS — the label keeps saying so.
+  function updateCardMetrics(card) {
+    const rows = ctx.metrics?.metrics;
+    const m = Array.isArray(rows)
+      ? rows.find((r) => r?.session === card.session) : null;
+    card.nodes.met.textContent = "";
+    if (!m) {
+      card.nodes.met.hidden = true;
+      return;
+    }
+    const h = ctx.metricsHistory?.bySession.get(card.session);
+    card.nodes.met.append(
+      el("span", { class: "num" },
+         m.cpu_percent != null ? `cpu ${m.cpu_percent}%` : "cpu —"),
+      h ? sparkline(h.cpu) : null,
+      el("span", { class: "num", title: "VMM RSS" },
+         m.memory_bytes != null ? `mem ${fmtBytes(m.memory_bytes)}` : "mem —"),
+      h ? sparkline(h.mem) : null);
+    card.nodes.met.hidden = false;
   }
 
   // The cross-card scale for the usage meter: a bar means "this session's share
@@ -223,8 +257,10 @@ export function newOverviewView() {
     card.nodes.deny.textContent = `deny ${denies}`;
     card.nodes.deny.className = "num" + (denies > 0 ? " deny-hot" : "");
     card.nodes.req.textContent = `req ${tally?.requests ?? 0}`;
+    updateCardMetrics(card);
     updateUsage(card);
     updateStatus(card, now);
+    card.ctl.sync();
   }
 
   function updateUsage(card) {
@@ -382,5 +418,7 @@ export function newOverviewView() {
     syncCards();
   }
 
-  return { mount, unmount, onFlush, onRoute, rebuild };
+  // The overview consumes metrics (cards show CPU/RAM + sparklines), so the
+  // 2 s poll runs while it is mounted.
+  return { mount, unmount, onFlush, onRoute, rebuild, wantsMetrics: true };
 }

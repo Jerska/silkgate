@@ -12,6 +12,7 @@
 import { el, statusDot, fmtTokens } from "../render.js";
 import { fmtBytes, fmtDur } from "../store.js";
 import { sessionTotals } from "../capture.js";
+import { newControlBar, newKillControl } from "../controls.js";
 import { triage, fmtAge } from "./overview.js";
 import { newCallsView } from "./calls.js";
 
@@ -25,6 +26,7 @@ export function newSessionView() {
   let tab = null;
   let ticker = null;
   const head = {};                 // dot, label, branch, metrics
+  let ctlBar = null;
   let tabBar, tabBody;
 
   // The active tab's teardown state: a mounted calls view, or a feed.
@@ -66,6 +68,7 @@ export function newSessionView() {
     head.label.textContent = m === null && !tally && !totals?.turns
       ? "unknown session" : s.label;
     head.branch.textContent = m?.branch ? String(m.branch) : "";
+    ctlBar?.sync();
     updateMetrics();
   }
 
@@ -172,6 +175,8 @@ export function newSessionView() {
     feed.execSel.parentElement.hidden = buckets.length < 2;
 
     const scope = scopeBuckets();
+    feed.kill.hidden = feed.selected === "" || scope.length !== 1
+      || scope[0][0] == null;
 
     // Errors and sightings, small enough to rebuild wholesale.
     feed.strip.textContent = "";
@@ -260,14 +265,29 @@ export function newSessionView() {
         feed.selected = execSel.value;
         renderFeed();
       });
+      // Kill escalates less than down but still confirms; it aims at the one
+      // exec the selector currently names, never at "all execs".
+      const killCtl = newKillControl({
+        getUrl: () => {
+          const scope = scopeBuckets();
+          if (feed.selected === "" || scope.length !== 1) return null;
+          const exec = scope[0][0];
+          if (exec == null) return null;   // unattributed: nothing to signal
+          return `/api/session/${encodeURIComponent(ident)}`
+            + `/exec/${encodeURIComponent(exec)}/kill`;
+        },
+        onDone: () => ctx.refreshSessions(),
+      });
       const strip = el("div", { class: "feed-strip" });
       const list = el("div", { class: "feed" });
       const msg = el("p", { class: "state-msg" });
       msg.hidden = true;
-      const picker = el("label", { class: "exec-pick" }, "exec ", execSel);
+      const picker = el("label", { class: "exec-pick" }, "exec ", execSel,
+                        " ", killCtl.root);
       picker.hidden = true;
       tabBody.append(el("section", { class: "activity" }, picker, strip, list, msg));
-      feed = { execSel, strip, list, msg, nodes: new Map(), selected: "", execs: null };
+      feed = { execSel, kill: killCtl.root, strip, list, msg,
+               nodes: new Map(), selected: "", execs: null };
       renderFeed();
     } else {
       tabBody.append(el("p", { class: "state-msg" },
@@ -288,6 +308,11 @@ export function newSessionView() {
     head.label = el("span", { class: "num" }, "…");
     head.branch = el("span", { class: "session-branch" });
     head.metrics = el("span", { class: "num session-metrics" });
+    ctlBar = newControlBar({
+      ident,
+      getMeta: meta,
+      onChanged: () => ctx.refreshSessions(),
+    });
     tabBar = el("nav", { class: "tabs" },
       ...TABS.map((t) => el("a", { href: "#/session/" + encodeURIComponent(ident)
                                          + (t === "activity" ? "" : "?tab=" + t),
@@ -300,7 +325,8 @@ export function newSessionView() {
         el("span", { class: "session-name" }, session),
         head.branch,
         head.label,
-        head.metrics),
+        head.metrics,
+        ctlBar.root),
       tabBar,
       tabBody);
     host.appendChild(root);
