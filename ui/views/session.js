@@ -22,6 +22,14 @@ import { newCallsView } from "./calls.js";
 
 const TABS = ["activity", "calls", "diff", "config", "brief", "output", "metrics"];
 
+// The config tab's extra sections render a string verbatim — rules is the
+// composed ruleset text, and JSON.stringify would print it as one line of
+// literal \n — and anything structured as indented JSON. Pure for the tests;
+// the value reaches the DOM as a <pre> text node either way.
+export function extraText(value) {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
 // The meta behind a session view, looked up fresh each call: live metas answer
 // by name, archived metas by the sid the overview links with. Archived-ness is
 // placement (the archived list) or an explicit state — the same derivation the
@@ -533,7 +541,7 @@ export function newSessionView() {
       if (detail[key] != null) {
         cfgPane.append(el("details", { class: "cfg-extra" },
           el("summary", null, key),
-          el("pre", null, JSON.stringify(detail[key], null, 2))));
+          el("pre", null, extraText(detail[key]))));
       }
     }
   }

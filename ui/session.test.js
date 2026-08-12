@@ -3,7 +3,7 @@
 // never imported by served files.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findMeta } from "./views/session.js";
+import { findMeta, extraText } from "./views/session.js";
 import { triage } from "./views/overview.js";
 
 const SESSIONS = {
@@ -42,6 +42,14 @@ test("no payload yet, or no match, answers null and not archived", () => {
   assert.deepEqual(findMeta(null, "x", "x"), { meta: null, archived: false });
   assert.deepEqual(findMeta(SESSIONS, "nope", "nope"),
                    { meta: null, archived: false });
+});
+
+test("the ruleset string renders verbatim, never as a JSON literal", () => {
+  const rules = "github.com/*/* GET\napi.anthropic.com/v1/messages POST\n";
+  assert.equal(extraText(rules), rules, "real newlines, no quoting");
+  assert.ok(!extraText(rules).includes("\\n"));
+  assert.equal(extraText({ a: 1 }), '{\n  "a": 1\n}',
+               "structured values still read as indented JSON");
 });
 
 test("the archived verdict drives triage to archived, matching the card", () => {
