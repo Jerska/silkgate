@@ -38,8 +38,7 @@ from datetime import datetime
 
 from mitmproxy import ctx, exceptions, http
 
-from rule_engine import (RuleSet, normalize_host,
-                         _parse_secret, _MAX_SECRET, _HEADER_TOKEN, _ROUTING_HEADERS)
+from rule_engine import RuleSet, normalize_host, _parse_secret, _MAX_SECRET
 
 logger = logging.getLogger("egress")
 
@@ -126,9 +125,9 @@ def configure(updates):
 
 
 # --- secrets: "<Header>: <value>", in memory, scoped by session -----------------
-# _parse_secret, _MAX_SECRET, _HEADER_TOKEN and _ROUTING_HEADERS live in rule_engine
-# so cli/silkgate can reuse the same parser for launch-time validation without taking
-# a mitmproxy dependency.  _SECRET_NAME is proxy-internal (control-socket op names).
+# _parse_secret and _MAX_SECRET live in rule_engine so cli/silkgate can reuse the
+# same parser for launch-time validation without taking a mitmproxy dependency.
+# _SECRET_NAME is proxy-internal (control-socket op names).
 _SECRET_NAME = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,63}")
 
 
