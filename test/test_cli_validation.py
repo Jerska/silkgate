@@ -1873,21 +1873,26 @@ class TestGithubProfiles(CliCase):
     # --- the read grant: no request a push or upload needs ---
 
     def test_read_grant_admits_nothing_a_push_needs(self):
-        rs = self.compose("github-read:some/repo")
-        for form in ("some/repo", "some/repo.git"):
-            adv = rs.match("github.com", f"/{form}/info/refs", "GET")
-            self.assertIsNotNone(adv, form)
-            self.assertFalse(adv.query_ok("service", "git-receive-pack"),
-                             "a receive-pack advertisement must be stripped to dumb-http")
-            for method in ("POST", "GET"):
-                self.assertIsNone(rs.match("github.com", f"/{form}/git-receive-pack", method),
-                                  f"{method} git-receive-pack must match no rule")
-        self.assertFalse(any("s3.amazonaws.com" in r.raw for r in rs.rules),
-                         "read grant must hold no S3 upload rule")
-        api = rs.match("api.github.com", "/repos/some/repo/contents/x", "GET")
-        self.assertEqual(api.methods, {"GET"})
-        for method in ("POST", "PUT", "PATCH", "DELETE"):
-            self.assertIsNone(rs.match("api.github.com", "/repos/some/repo/contents/x", method))
+        # The grant alone, and the whole session shape with the floor beneath it: the
+        # invariant is about the composed policy, not one file.
+        for rs in (self.compose("github-read:some/repo"),
+                   self.compose("git", "github", "github-read:some/repo")):
+            for form in ("some/repo", "some/repo.git"):
+                adv = rs.match("github.com", f"/{form}/info/refs", "GET")
+                self.assertIsNotNone(adv, form)
+                self.assertFalse(adv.query_ok("service", "git-receive-pack"),
+                                 "a receive-pack advertisement must be stripped to dumb-http")
+                for method in ("POST", "GET"):
+                    self.assertIsNone(
+                        rs.match("github.com", f"/{form}/git-receive-pack", method),
+                        f"{method} git-receive-pack must match no rule")
+            self.assertFalse(any("s3.amazonaws.com" in r.raw for r in rs.rules),
+                             "read grant must hold no S3 upload rule")
+            api = rs.match("api.github.com", "/repos/some/repo/contents/x", "GET")
+            self.assertEqual(api.methods, {"GET"})
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                self.assertIsNone(
+                    rs.match("api.github.com", "/repos/some/repo/contents/x", method))
 
     def test_read_grant_covers_fetch_with_the_credential(self):
         rs = self.compose("github-read:some/repo")
@@ -1931,11 +1936,12 @@ class TestGithubProfiles(CliCase):
         self.assertEqual(api.inject_auth, "github")
 
     def test_every_body_bearing_rule_pins_max_body(self):
-        for spec in ("github-read:some/repo", "github-write:some/repo"):
-            rs = self.compose(spec)
+        for specs in (("git", "github", "github-read:some/repo"),
+                      ("git", "github", "github-write:some/repo")):
+            rs = self.compose(*specs)
             for r in rs.rules:
                 if r.methods & {"POST", "PUT", "PATCH", "DELETE"}:
-                    self.assertGreater(r.max_body, 0, f"{spec}: {r.raw}")
+                    self.assertGreater(r.max_body, 0, f"{specs}: {r.raw}")
 
     def test_body_caps_are_the_documented_sizes(self):
         mib = 1024 * 1024
@@ -2043,6 +2049,8 @@ class TestGithubProfiles(CliCase):
         self.assertIn("`gh` is not installed", flat)
         self.assertIn("GraphQL is not reachable", flat)
         self.assertIn("Mutations need the github-write grant", flat)
+        # The brief also reports the credential the grants ride, whatever its status.
+        self.assertIn("`inject_auth=github`:", ctx)
 
     # --- render sanity ---
 
