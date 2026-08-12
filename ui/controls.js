@@ -48,6 +48,18 @@ export async function uncommittedNote(ident) {
                : "no uncommitted work detected.";
 }
 
+// What hides for a given session state: archived and downed sessions have
+// nothing left to control (the endpoints reject them), frozen swaps freeze
+// for resume plus badge. Pure so the gating pins down in node.
+export function controlVisibility(state) {
+  return {
+    root: state === "archived" || state === "down",
+    badge: state !== "frozen",
+    freeze: state === "frozen",
+    resume: state !== "frozen",
+  };
+}
+
 // The freeze/resume/down bar. getMeta() supplies the freshest meta each time;
 // onChanged() is the caller's poll-nudge after a successful action.
 export function newControlBar({ ident, getMeta, onChanged = () => {} }) {
@@ -124,14 +136,13 @@ export function newControlBar({ ident, getMeta, onChanged = () => {} }) {
     });
   });
 
-  // Re-derive what shows from the current state. Archived and downed sessions
-  // have nothing left to control; frozen swaps freeze for resume plus badge.
+  // Re-derive what shows from the current state.
   function sync() {
-    const s = state();
-    root.hidden = s === "archived" || s === "down";
-    badge.hidden = s !== "frozen";
-    freeze.hidden = s === "frozen";
-    resume.hidden = s !== "frozen";
+    const v = controlVisibility(state());
+    root.hidden = v.root;
+    badge.hidden = v.badge;
+    freeze.hidden = v.freeze;
+    resume.hidden = v.resume;
   }
 
   sync();

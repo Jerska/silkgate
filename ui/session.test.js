@@ -4,6 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { findMeta } from "./views/session.js";
+import { triage } from "./views/overview.js";
 
 const SESSIONS = {
   sessions: [
@@ -41,4 +42,12 @@ test("no payload yet, or no match, answers null and not archived", () => {
   assert.deepEqual(findMeta(null, "x", "x"), { meta: null, archived: false });
   assert.deepEqual(findMeta(SESSIONS, "nope", "nope"),
                    { meta: null, archived: false });
+});
+
+test("the archived verdict drives triage to archived, matching the card", () => {
+  const f = findMeta(SESSIONS, "d4e5f6", "d4e5f6");
+  const s = triage({ archived: f.archived, lastActivity: Date.parse(
+    "2026-08-12T11:56:00+00:00"), now: Date.parse("2026-08-12T12:00:00+00:00") });
+  assert.equal(s.state, "archived",
+               "never \"waiting 4m\" for a session in the archive");
 });

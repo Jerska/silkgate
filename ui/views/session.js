@@ -117,7 +117,7 @@ export function newSessionView() {
       if (!Number.isNaN(t) && (last === null || t > last)) last = t;
     }
     const s = triage({
-      archived: m ? m.state === "archived" : false,
+      archived: isArchived(),      // placement or state, like the overview card
       lastRc: m?.last_rc ?? null,
       lastActivity: last,
       openTurn: (totals?.openTurns ?? 0) > 0,
@@ -311,7 +311,7 @@ export function newSessionView() {
 
     const scope = scopeBuckets();
     feed.kill.hidden = feed.selected === "" || scope.length !== 1
-      || scope[0][0] == null;
+      || scope[0][0] == null || isArchived();   // nothing left to signal
 
     updateFilesPanel(scope);
 
@@ -596,7 +596,7 @@ export function newSessionView() {
     const pre = el("pre", { class: "output-text" });
     const msg = el("p", { class: "state-msg" }, "loading output…");
     pre.hidden = true;
-    refresh.hidden = meta()?.state === "archived";   // a done guest is done
+    refresh.hidden = isArchived();                   // a done guest is done
     tabBody.append(el("section", { class: "pane output-pane" },
       el("div", { class: "pane-bar" }, refresh, label,
          el("span", { class: "badge untrusted" }, "untrusted — guest stdout")),
@@ -792,7 +792,9 @@ export function newSessionView() {
     head.metrics = el("span", { class: "num session-metrics" });
     ctlBar = newControlBar({
       ident,
-      getMeta: meta,
+      // An archived-list meta may carry no state field; the bar gates on the
+      // placement verdict, so freeze/resume/down never show for the archive.
+      getMeta: () => (isArchived() ? { ...meta(), state: "archived" } : meta()),
       onChanged: () => ctx.refreshSessions(),
     });
     tabBar = el("nav", { class: "tabs" },
