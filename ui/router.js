@@ -79,7 +79,10 @@ export function buildRoute(route) {
   }
   if (route.view === "search") {
     const q = route.q ?? (route.params || {}).q ?? "";
-    return "#/search" + (q ? "?q=" + encodeURIComponent(q) : "");
+    if (!q) return "#/search";
+    const p = new URLSearchParams();
+    p.set("q", q);                 // URLSearchParams keeps the form canonical:
+    return "#/search?" + p;        // parse ∘ build is identity, spaces as "+"
   }
   return "#/";
 }
