@@ -24,7 +24,8 @@ What is covered:
     no proxy runs, and Last-Event-ID resume yielding only the suffix — for the audit
     stream and (parameterized) the capture stream
   * wave 2: the new static routes and their traversal 404s, the CSRF/rebinding matrix,
-    /api/session/<ident> (live + archived + bad idents + brief source labeling),
+    /api/session/<ident> (live + archived + bad idents + the briefs map with its
+    per-exec/default/workspace source labeling),
     /output (TTL cache, caps), /api/metrics (TTL, empty registry, cached failures),
     /diff (guest/host modes, 409s, 429, truncation) with stubbed seams, /api/capture
     history, /api/search (substring, caps, min length), and the control plane
@@ -698,30 +699,61 @@ class UiSessionDetailTest(UiServerTest):
         self.assertEqual([r["event"] for r in got["journal"]],
                          ["created", "exec_start"])
         self.assertEqual(got["rules"], "pypi.org/** GET\n")
-        self.assertIsNone(got["brief"], "no --brief and no workspace: null")
+        self.assertEqual(got["briefs"], {}, "no brief anywhere: an empty map")
+        self.assertNotIn("brief", got, "the singular field is gone — briefs is the map")
         self.assertEqual(got["pointers"]["captures"], [str(cap)])
         self.assertIsNone(got["pointers"]["events"], "no proxy runs")
 
-    def test_flag_brief_wins_and_is_labeled(self):
+    def test_default_brief_is_keyed_and_labeled_and_beats_the_fallback(self):
         sdir = self.write_session("s2", workspace=str(self.root / "ws"))
         (self.root / "ws").mkdir()
         (self.root / "ws" / "BRIEF.md").write_text("# from the guest\n")
         (sdir / "brief.md").write_bytes(b"# the operator's ask\n")
         _, got = self.get_json("/api/session/s2")
-        self.assertEqual(got["brief"]["source"], "flag")
-        self.assertEqual(got["brief"]["text"], "# the operator's ask\n")
-        self.assertEqual(got["brief"]["sha256"],
+        self.assertEqual(sorted(got["briefs"]), ["default"],
+                         "an operator brief exists, so the fallback stays out")
+        entry = got["briefs"]["default"]
+        self.assertEqual(entry["source"], "default")
+        self.assertEqual(entry["text"], "# the operator's ask\n")
+        self.assertEqual(entry["sha256"],
                          hashlib.sha256(b"# the operator's ask\n").hexdigest())
-        self.assertFalse(got["brief"]["truncated"])
+        self.assertFalse(entry["truncated"])
+
+    def test_exec_briefs_are_keyed_by_exec_id_with_journaled_sources(self):
+        sdir = self.write_session("s6")
+        (sdir / "brief.md").write_bytes(b"# the default\n")
+        bdir = sdir / "briefs"
+        bdir.mkdir()
+        (bdir / "cafe1234.md").write_bytes(b"# exec one's own ask\n")
+        (bdir / "beef5678.md").write_bytes(b"# the default\n")
+        (bdir / "not-an-exec-id.md").write_bytes(b"planted\n")
+        MOD._journal("s6", "exec_start", exec_id="cafe1234", argv=["true"],
+                     brief_sha256="x", brief_source="flag")
+        MOD._journal("s6", "exec_start", exec_id="beef5678", argv=["true"],
+                     brief_sha256="y", brief_source="default")
+        _, got = self.get_json("/api/session/s6")
+        self.assertEqual(sorted(got["briefs"]),
+                         ["beef5678", "cafe1234", "default"],
+                         "one entry per exec brief plus the session default; a "
+                         "foreign file in briefs/ is never served")
+        self.assertEqual(got["briefs"]["cafe1234"]["source"], "flag")
+        self.assertEqual(got["briefs"]["cafe1234"]["text"], "# exec one's own ask\n")
+        self.assertEqual(got["briefs"]["beef5678"]["source"], "default",
+                         "the journal's exec_start record labels each entry")
+        self.assertEqual(
+            got["briefs"]["cafe1234"]["sha256"],
+            hashlib.sha256(b"# exec one's own ask\n").hexdigest(),
+            "the sha covers the bytes served")
 
     def test_workspace_brief_is_the_live_fallback(self):
         self.write_session("s3", workspace=str(self.root / "ws"))
         (self.root / "ws").mkdir()
         (self.root / "ws" / "BRIEF.md").write_text("# guest-authored\n")
         _, got = self.get_json("/api/session/s3")
-        self.assertEqual(got["brief"]["source"], "workspace",
+        self.assertEqual(sorted(got["briefs"]), ["workspace"])
+        self.assertEqual(got["briefs"]["workspace"]["source"], "workspace",
                          "guest-writable, and the label says so")
-        self.assertEqual(got["brief"]["text"], "# guest-authored\n")
+        self.assertEqual(got["briefs"]["workspace"]["text"], "# guest-authored\n")
 
     def test_symlinked_workspace_brief_is_not_followed(self):
         secret = self.root / "secret.txt"
@@ -730,14 +762,19 @@ class UiSessionDetailTest(UiServerTest):
         (self.root / "ws").mkdir()
         (self.root / "ws" / "BRIEF.md").symlink_to(secret)
         _, got = self.get_json("/api/session/s4")
-        self.assertIsNone(got["brief"])
+        self.assertEqual(got["briefs"], {})
 
-    def test_brief_is_capped_and_marked_truncated(self):
+    def test_briefs_are_capped_and_marked_truncated(self):
         sdir = self.write_session("s5")
         (sdir / "brief.md").write_bytes(b"x" * (MOD.UI_BRIEF_MAX_BYTES + 5))
+        (sdir / "briefs").mkdir()
+        (sdir / "briefs" / "cafe1234.md").write_bytes(
+            b"y" * (MOD.UI_BRIEF_MAX_BYTES + 5))
         _, got = self.get_json("/api/session/s5")
-        self.assertTrue(got["brief"]["truncated"])
-        self.assertEqual(len(got["brief"]["text"]), MOD.UI_BRIEF_MAX_BYTES)
+        for key in ("default", "cafe1234"):
+            self.assertTrue(got["briefs"][key]["truncated"], key)
+            self.assertEqual(len(got["briefs"][key]["text"]),
+                             MOD.UI_BRIEF_MAX_BYTES, key)
 
     def test_archived_session_detail_without_workspace_fallback(self):
         sid, adir = self.write_archive("olda", workspace=str(self.root / "ws"))
@@ -750,13 +787,16 @@ class UiSessionDetailTest(UiServerTest):
         self.assertEqual(got["session"]["sid"], sid)
         self.assertEqual([r["event"] for r in got["journal"]], ["down"])
         self.assertEqual(got["rules"], "RULES\n")
-        self.assertIsNone(got["brief"], "the fallback is for live sessions alone")
+        self.assertEqual(got["briefs"], {}, "the fallback is for live sessions alone")
 
-    def test_archived_flag_brief_still_serves(self):
+    def test_archived_briefs_still_serve(self):
         sid, adir = self.write_archive("oldb")
         (adir / "brief.md").write_bytes(b"# archived ask\n")
+        (adir / "briefs").mkdir()
+        (adir / "briefs" / "cafe1234.md").write_bytes(b"# archived exec ask\n")
         _, got = self.get_json(f"/api/session/{sid}")
-        self.assertEqual(got["brief"]["source"], "flag")
+        self.assertEqual(got["briefs"]["default"]["source"], "default")
+        self.assertEqual(got["briefs"]["cafe1234"]["text"], "# archived exec ask\n")
 
     def test_bad_idents_are_404_never_paths(self):
         for ident in ("..", "no-such", "20990101T000000Z-gone-abcdef",

@@ -203,7 +203,8 @@ files:
 | `rules.txt` | the composed ruleset text the proxy enforced |
 | `journal.jsonl` | one JSON record per event: `created`, `exec_start`, `exec_end`, `harvest`, `frozen`, `resumed`, `killed`, `down` |
 | `output.log` | the last 20000 lines of guest output, at most 8 MiB; `SILKGATE_SNAPSHOT_TAIL_LINES` and `SILKGATE_SNAPSHOT_MAX_BYTES` override the two bounds |
-| `brief.md` | the operator's `--brief` file, when one was given |
+| `brief.md` | the session-default brief (`up --brief`), when one was given |
+| `briefs/<exec_id>.md` | the brief each exec ran under (its own `--brief`, or the session default), at most 1 MiB each |
 
 The archive is bookkeeping and therefore fail-open: a failed snapshot or rename warns and
 the teardown completes. Sandbox removal stays fail-closed: an unremovable sandbox keeps

@@ -3068,7 +3068,7 @@ def cmd_run(args):
     check_env(args.env)
     _check_mount_flags(args)
     profiles, rules_text, ruleset = _session_policy(args)
-    brief = _read_brief(args.brief)             # host-side, before any provisioning
+    _read_brief(args.brief)     # per-exec brief: fail on it here, before any host process
     cmd = _strip_cmd_sep(args.cmd) or profile_command(profiles)
     if not cmd:
         die("nothing to run — pass a command after -- (or --with a profile that names one)")
@@ -3102,13 +3102,12 @@ def cmd_run(args):
         port = pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, vmounts, persistent=False)
         meta_extra = {**_session_meta(profiles, cmd),
-                      **_observability_meta(args, rules_text, brief), "tty": tty,
+                      **_observability_meta(args, rules_text, None), "tty": tty,
                       **(spec or {})}
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           meta_extra, ctx, ctx_paths, memory=args.memory, cpus=args.cpus,
-                           brief=brief)
+                           meta_extra, ctx, ctx_paths, memory=args.memory, cpus=args.cpus)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -3120,8 +3119,10 @@ def cmd_run(args):
             _setup_checkout_guest(sandbox_name(name), spec["base"], name)
         say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
         exec_id = uuid4().hex[:8]
+        brief_fields = _exec_brief_fields(name, sandbox_name(name), exec_id, args.brief)
         _journal(name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
-                 env_names=sorted({p.partition("=")[0] for p in args.env}), via="run")
+                 env_names=sorted({p.partition("=")[0] for p in args.env}), via="run",
+                 **brief_fields)
         rc = _bracketed_exec(name, exec_id, lambda: run_guest(
             lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
             cmd, tty=tty, exec_id=exec_id))
@@ -3194,12 +3195,66 @@ def _read_brief(path):
     return data
 
 
+# One in-guest pass to land an exec's brief: the bytes arrive on stdin — argv could
+# not carry a megabyte — and the rename makes the swap atomic, so a guest reading
+# the brief mid-exec never sees a torn file.
+_BRIEF_LAND_SH = ("set -eu\n"
+                  f"cat > {GUEST_BRIEF}.tmp\n"
+                  f"mv {GUEST_BRIEF}.tmp {GUEST_BRIEF}\n")
+
+
+def _land_brief_in_guest(sandbox, data):
+    """Write `data` to GUEST_BRIEF in a live guest — why it failed, or None. A seam
+    the tests stub, like _diff_in_guest."""
+    try:
+        proc = subprocess.run(msb_exec_argv(sandbox, ["sh", "-c", _BRIEF_LAND_SH]),
+                              input=data, capture_output=True,
+                              start_new_session=True, timeout=_MSB_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return "the guest did not take the brief in time"
+    if proc.returncode:
+        err = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+        return (err or ["guest brief write failed"])[-1]
+    return None
+
+
+def _exec_brief_fields(name, sandbox, exec_id, flag_path):
+    """Resolve, store and land one exec's brief; the fields its exec_start record
+    carries, or {} when no brief applies.
+
+    The exec's own --brief wins (source "flag"); the session default (up --brief,
+    brief.md in the session dir) covers an exec without one (source "default"),
+    re-landed every time so an earlier exec's flag brief cannot shadow it. The
+    resolved bytes are stored at briefs/<exec_id>.md beside the journal record that
+    names them, and GUEST_BRIEF always shows the newest exec's brief. Failures die
+    here, host-side, before the exec runs: a command sent without the brief it was
+    promised would report success over the wrong ask."""
+    data, source = _read_brief(flag_path), "flag"
+    if data is None:
+        try:
+            data = (session_dir(name) / "brief.md").read_bytes()
+        except OSError:                          # no default either: briefless exec
+            return {}
+        source = "default"
+    bdir = session_dir(name) / "briefs"
+    try:
+        bdir.mkdir(exist_ok=True)
+        (bdir / f"{exec_id}.md").write_bytes(data)
+    except OSError as e:
+        die(f"cannot store the exec brief under {bdir}: {e}")
+    err = _land_brief_in_guest(sandbox, data)
+    if err is not None:
+        die(f"could not land the brief in the guest: {err}")
+    return {"brief_sha256": hashlib.sha256(data).hexdigest(), "brief_source": source}
+
+
 def _observability_meta(args, rules_text, brief):
     """Recording-only meta fields: the rest of the ask, kept for the journal, the
     archive and wave-2 reads — never an enforcement input. env_names holds names alone,
     because values can be secrets. base_ref is the operator's own spelling of the base,
     display only, beside the resolved sha "base" already pins. rules_sha256 ties the
-    session to the exact ruleset text it ran under."""
+    session to the exact ruleset text it ran under. `brief` here is the session
+    default (up's --brief); a per-exec brief is journaled on its exec instead."""
     meta = {"env_names": sorted({p.partition("=")[0] for p in args.env}),
             "allow_git_dir": bool(args.allow_git_dir),
             "rules_sha256": hashlib.sha256(rules_text.encode()).hexdigest()}
@@ -3311,8 +3366,11 @@ def cmd_exec(args):
         die("nothing to run — usage: silkgate exec NAME [-t] [-e K=V]... -- CMD ...")
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
     exec_id = uuid4().hex[:8]
+    brief_fields = _exec_brief_fields(args.name, meta["sandbox"], exec_id,
+                                      getattr(args, "brief", None))
     _journal(args.name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
-             env_names=sorted({p.partition("=")[0] for p in args.env}), via="exec")
+             env_names=sorted({p.partition("=")[0] for p in args.env}), via="exec",
+             **brief_fields)
     rc = _bracketed_exec(args.name, exec_id, lambda: run_guest(
         lambda c: msb_exec_argv(meta["sandbox"], c, tty=tty, env=args.env),
         cmd, tty=tty, exec_id=exec_id))
@@ -3327,8 +3385,10 @@ def cmd_attach(args):
     if not cmd:
         die(f"session {args.name!r} has no default command — use: silkgate exec {args.name} -t -- CMD")
     exec_id = uuid4().hex[:8]
+    # attach takes no --brief; the session default still covers it, like any exec.
+    brief_fields = _exec_brief_fields(args.name, meta["sandbox"], exec_id, None)
     _journal(args.name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=True,
-             env_names=[], via="attach")
+             env_names=[], via="attach", **brief_fields)
     rc = _bracketed_exec(args.name, exec_id, lambda: run_guest(
         lambda c: msb_exec_argv(meta["sandbox"], c, tty=True), cmd, tty=True,
         exec_id=exec_id))
@@ -3918,20 +3978,9 @@ def _resolve_ident(ident):
     return None, None, None
 
 
-def _session_brief(meta, state, sdir):
-    """The brief block for /api/session, or None. The --brief copy in the session dir
-    wins (source "flag" — operator-authored); a live session without one falls back
-    to <workspace>/BRIEF.md (source "workspace" — guest-writable, so the label is the
-    warning). The workspace path passed _check_meta_fields on read; a symlinked
-    BRIEF.md is skipped rather than followed to wherever the guest pointed it. Text
-    is capped at UI_BRIEF_MAX_BYTES and the sha256 covers the bytes served."""
-    path, source = sdir / "brief.md", "flag"
-    if not path.is_file():
-        if state != "live" or not meta.get("workspace"):
-            return None
-        path, source = Path(meta["workspace"]) / "BRIEF.md", "workspace"
-        if path.is_symlink() or not path.is_file():
-            return None
+def _brief_entry(path, source):
+    """One briefs-map entry read from `path`, or None where no file answers. Text is
+    capped at UI_BRIEF_MAX_BYTES and the sha256 covers the bytes served."""
     try:
         with open(path, "rb") as f:
             data = f.read(UI_BRIEF_MAX_BYTES + 1)
@@ -3941,6 +3990,44 @@ def _session_brief(meta, state, sdir):
     data = data[:UI_BRIEF_MAX_BYTES]
     return {"source": source, "text": data.decode("utf-8", "replace"),
             "sha256": hashlib.sha256(data).hexdigest(), "truncated": truncated}
+
+
+def _session_briefs(meta, state, sdir):
+    """The briefs map for /api/session: one entry per exec that had a brief (keyed
+    by exec_id, from briefs/<exec_id>.md), the session default under "default", and
+    the workspace fallback under "workspace". Empty when there is no brief anywhere.
+
+    Per-exec sources — "flag" for an exec's own --brief, "default" for the session
+    default it inherited — come from the journal's exec_start records; an exec whose
+    record was lost reads as "flag". Reserved keys cannot collide: an exec_id is
+    eight hex characters. The fallback stays a fallback: <workspace>/BRIEF.md
+    appears only for a live session with no operator-authored brief at all, and
+    stays untrusted — guest-writable, so the source label is the warning, a symlink
+    is never followed, and the workspace path passed _check_meta_fields on read."""
+    sources = {}
+    for rec in _read_journal(sdir / "journal.jsonl"):
+        if rec.get("event") == "exec_start" and rec.get("brief_source"):
+            sources[str(rec.get("exec_id"))] = str(rec["brief_source"])
+    briefs = {}
+    bdir = sdir / "briefs"
+    if bdir.is_dir():
+        for p in sorted(bdir.glob("*.md")):
+            if not _EXEC_ID_RE.fullmatch(p.stem):    # not something silkgate stored
+                continue
+            entry = _brief_entry(p, sources.get(p.stem, "flag"))
+            if entry:
+                briefs[p.stem] = entry
+    if (sdir / "brief.md").is_file():
+        entry = _brief_entry(sdir / "brief.md", "default")
+        if entry:
+            briefs["default"] = entry
+    if not briefs and state == "live" and meta.get("workspace"):
+        path = Path(meta["workspace"]) / "BRIEF.md"
+        if not path.is_symlink() and path.is_file():
+            entry = _brief_entry(path, "workspace")
+            if entry:
+                briefs["workspace"] = entry
+    return briefs
 
 
 def _session_output(meta, state, sdir, tail):
@@ -4454,7 +4541,7 @@ def _ui_server(port):
             proxy = read_proxy() or {}
             self._json({"session": meta, "state": state,
                         "journal": _read_journal(sdir / "journal.jsonl"),
-                        "brief": _session_brief(meta, state, sdir),
+                        "briefs": _session_briefs(meta, state, sdir),
                         "rules": rules,
                         "pointers": {"events": proxy.get("events"),
                                      "captures": [str(p) for p in
@@ -5864,8 +5951,9 @@ def main():
                         "host repo at teardown; beside --checkout REF, REF is the branch "
                         "base (needs --with git; owns /workspace, so no -v may target it)")
     p.add_argument("--brief", metavar="FILE",
-                   help=f"copy FILE (≤ 1 MiB) into the guest at {GUEST_BRIEF} — the task "
-                        "brief; meta records its path and sha256")
+                   help=f"this run's task brief: FILE (≤ 1 MiB) lands at {GUEST_BRIEF} "
+                        "before the command runs, is stored per exec and journaled "
+                        "with its sha256")
     env_opt(p)
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
                    help="give the command a terminal, for a TUI (default: yes if stdin is a "
@@ -5898,8 +5986,9 @@ def main():
                         "(needs --with git; owns /workspace, so no -v may target it)")
     profile_opts(p)
     p.add_argument("--brief", metavar="FILE",
-                   help=f"copy FILE (≤ 1 MiB) into the guest at {GUEST_BRIEF} — the task "
-                        "brief; meta records its path and sha256")
+                   help=f"session-default task brief: copied to {GUEST_BRIEF} (≤ 1 MiB), "
+                        "applied to every exec that does not pass its own --brief; "
+                        "meta records its path and sha256")
     env_opt(p)
     p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")
@@ -5921,6 +6010,10 @@ def main():
                    help="give the command a terminal, for a TUI (default: yes if stdin is a "
                         "TTY). --no-tty runs it non-interactively — output is still live, "
                         "with stdout and stderr kept apart")
+    p.add_argument("--brief", metavar="FILE",
+                   help=f"this exec's task brief: FILE (≤ 1 MiB) lands at {GUEST_BRIEF} "
+                        "before the command runs, is stored per exec and journaled "
+                        "with its sha256 (default: the session's up --brief, if any)")
     env_opt(p)
     # nargs='*' (not REMAINDER): with a positional NAME first, REMAINDER would swallow
     # -t/-e that follow NAME. '*' lets them parse; use `--` to pass flags on to CMD.

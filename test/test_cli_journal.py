@@ -586,14 +586,24 @@ class TestMetaAdditions(JournalCase):
         self.assertEqual(meta["env_names"], ["B"])
         self.assertNotIn("tty", meta, "tty is a run-only field")
 
-    def test_brief_flows_into_meta_and_provision(self):
+    def test_up_brief_is_the_session_default_in_meta_and_provision(self):
         brief = self.tmp / "task.md"
         brief.write_bytes(b"# do the thing\n")
-        seen = self.spy_main(["run", "--brief", str(brief), "--", "true"])
+        seen = self.spy_main(["up", "--name", "m2", "--brief", str(brief)])
         self.assertEqual(seen["brief"], b"# do the thing\n")
         self.assertEqual(seen["meta"]["brief_path"], str(brief.resolve()))
         self.assertEqual(seen["meta"]["brief_sha256"],
                          hashlib.sha256(b"# do the thing\n").hexdigest())
+
+    def test_run_brief_is_per_exec_never_session_meta(self):
+        """run's --brief lands at exec time (stored per exec, journaled on its
+        exec_start) — never at provision, never in the session meta."""
+        brief = self.tmp / "task.md"
+        brief.write_bytes(b"# do the thing\n")
+        seen = self.spy_main(["run", "--brief", str(brief), "--", "true"])
+        self.assertIsNone(seen["brief"])
+        self.assertNotIn("brief_path", seen["meta"])
+        self.assertNotIn("brief_sha256", seen["meta"])
 
     def test_base_ref_is_the_operators_spelling(self):
         args = types.SimpleNamespace(env=[], allow_git_dir=False, branch="nb",
@@ -603,6 +613,179 @@ class TestMetaAdditions(JournalCase):
         self.assertEqual(sg._observability_meta(args, RULE, None)["base_ref"], "v1")
         args.branch, args.checkout = None, None
         self.assertNotIn("base_ref", sg._observability_meta(args, RULE, None))
+
+
+# -- the per-exec brief ------------------------------------------------------------
+
+class TestExecBrief(JournalCase):
+    """The brief-per-exec contract: the exec's own --brief wins over the session
+    default, the resolved bytes are stored at briefs/<exec_id>.md, journaled with
+    their sha256 and source, and landed in the guest before the command runs."""
+
+    def run_exec(self, name, flag=None, land_error=None):
+        """cmd_exec with the guest seams stubbed -> the landed (sandbox, data) list."""
+        landed = []
+
+        def fake_land(sandbox, data):
+            landed.append((sandbox, data))
+            return land_error
+
+        args = types.SimpleNamespace(name=name, env=[], tty=False, brief=flag,
+                                     cmd=["--", "true"])
+        with mock.patch.object(sg, "_land_brief_in_guest", fake_land), \
+                mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            sg.cmd_exec(args)
+        return landed
+
+    def test_flag_brief_is_stored_journaled_and_landed(self):
+        self.write_session("x1")
+        f = self.tmp / "task.md"
+        f.write_bytes(b"# this exec's ask\n")
+        landed = self.run_exec("x1", flag=str(f))
+        start = sg._read_journal(sg.session_dir("x1") / "journal.jsonl")[0]
+        self.assertEqual(start["event"], "exec_start")
+        self.assertEqual(start["brief_source"], "flag")
+        self.assertEqual(start["brief_sha256"],
+                         hashlib.sha256(b"# this exec's ask\n").hexdigest())
+        stored = sg.session_dir("x1") / "briefs" / f"{start['exec_id']}.md"
+        self.assertEqual(stored.read_bytes(), b"# this exec's ask\n")
+        self.assertEqual(landed, [("sg-x1", b"# this exec's ask\n")])
+
+    def test_session_default_covers_a_briefless_exec(self):
+        self.write_session("x2")
+        (sg.session_dir("x2") / "brief.md").write_bytes(b"# the default\n")
+        landed = self.run_exec("x2")
+        start = sg._read_journal(sg.session_dir("x2") / "journal.jsonl")[0]
+        self.assertEqual(start["brief_source"], "default")
+        self.assertEqual(start["brief_sha256"],
+                         hashlib.sha256(b"# the default\n").hexdigest())
+        stored = sg.session_dir("x2") / "briefs" / f"{start['exec_id']}.md"
+        self.assertEqual(stored.read_bytes(), b"# the default\n",
+                         "the default is stored per exec like an own brief")
+        self.assertEqual(landed, [("sg-x2", b"# the default\n")],
+                         "re-landed, so an earlier flag brief cannot shadow it")
+
+    def test_own_flag_beats_the_session_default(self):
+        self.write_session("x3")
+        (sg.session_dir("x3") / "brief.md").write_bytes(b"# the default\n")
+        f = self.tmp / "own.md"
+        f.write_bytes(b"# my own\n")
+        landed = self.run_exec("x3", flag=str(f))
+        start = sg._read_journal(sg.session_dir("x3") / "journal.jsonl")[0]
+        self.assertEqual(start["brief_source"], "flag")
+        self.assertEqual(landed, [("sg-x3", b"# my own\n")])
+
+    def test_no_brief_anywhere_journals_no_fields_and_lands_nothing(self):
+        self.write_session("x4")
+        landed = self.run_exec("x4")
+        start = sg._read_journal(sg.session_dir("x4") / "journal.jsonl")[0]
+        self.assertEqual(start["event"], "exec_start")
+        self.assertNotIn("brief_source", start)
+        self.assertNotIn("brief_sha256", start)
+        self.assertEqual(landed, [])
+        self.assertFalse((sg.session_dir("x4") / "briefs").exists())
+
+    def test_failed_landing_dies_before_the_exec_starts(self):
+        self.write_session("x5")
+        f = self.tmp / "task.md"
+        f.write_bytes(b"# ask\n")
+        ran = []
+        args = types.SimpleNamespace(name="x5", env=[], tty=False, brief=str(f),
+                                     cmd=["--", "true"])
+        with mock.patch.object(sg, "_land_brief_in_guest",
+                               lambda sandbox, data: "guest is gone"), \
+                mock.patch.object(sg, "run_guest",
+                                  lambda *a, **k: ran.append(1) or 0):
+            self.refuses("could not land the brief", sg.cmd_exec, args)
+        self.assertEqual(ran, [], "the command must not run without its brief")
+        self.assertEqual(self.journal_events(sg.session_dir("x5") / "journal.jsonl"),
+                         [], "no exec_start for an exec that never started")
+
+    def test_attach_inherits_the_session_default(self):
+        self.write_session("x6", command=["claude"])
+        (sg.session_dir("x6") / "brief.md").write_bytes(b"# the default\n")
+        landed = []
+        with mock.patch.object(sg, "_land_brief_in_guest",
+                               lambda s, d: landed.append((s, d)) or None), \
+                mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
+                self.assertRaises(SystemExit):
+            sg.cmd_attach(types.SimpleNamespace(name="x6"))
+        start = sg._read_journal(sg.session_dir("x6") / "journal.jsonl")[0]
+        self.assertEqual(start["brief_source"], "default")
+        self.assertEqual(landed, [("sg-x6", b"# the default\n")])
+
+    def test_landing_feeds_the_brief_on_stdin_and_swaps_atomically(self):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"], seen["kwargs"] = argv, kwargs
+            return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        with mock.patch.object(sg, "_msb", lambda: "msb"), \
+                mock.patch.object(sg.subprocess, "run", fake_run):
+            self.assertIsNone(sg._land_brief_in_guest("sg-x", b"# ask\n"))
+        script = seen["argv"][seen["argv"].index("-c") + 1]
+        self.assertIn(f"cat > {sg.GUEST_BRIEF}.tmp", script)
+        self.assertIn(f"mv {sg.GUEST_BRIEF}.tmp {sg.GUEST_BRIEF}", script)
+        self.assertEqual(seen["kwargs"]["input"], b"# ask\n",
+                         "a megabyte brief rides stdin, never argv")
+
+    def test_oversized_flag_brief_still_dies(self):
+        self.write_session("x7")
+        big = self.tmp / "big.md"
+        big.write_bytes(b"x" * (sg._BRIEF_MAX_BYTES + 1))
+        args = types.SimpleNamespace(name="x7", env=[], tty=False, brief=str(big),
+                                     cmd=["--", "true"])
+        with mock.patch.object(sg, "run_guest", lambda *a, **k: 0):
+            self.refuses("over the 1 MiB limit", sg.cmd_exec, args)
+
+    def test_run_journals_its_exec_brief(self):
+        """cmd_run's --brief is per-exec: stored under the run's session, journaled
+        on its exec_start with source flag, and landed before the command."""
+        f = self.tmp / "task.md"
+        f.write_bytes(b"# run ask\n")
+        landed = []
+
+        def fake_provision(name, image, port, rules_text, ruleset, mounts, ws, env,
+                           meta_extra, context=None, context_paths=(), brief=None):
+            self.assertIsNone(brief, "run's brief never rides the provision copy")
+            self.write_session(name, **meta_extra)
+
+        with mock.patch.object(sg, "preflight", lambda *a: None), \
+                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
+                mock.patch.object(sg, "_proxy_running", lambda: True), \
+                mock.patch.object(sg, "ensure_proxy",
+                                  lambda port: {"log": "/dev/null", "ports": [8090]}), \
+                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(sg, "_provision_session", fake_provision), \
+                mock.patch.object(sg, "tier1_fault", lambda *a, **k: None), \
+                mock.patch.object(sg, "_land_brief_in_guest",
+                                  lambda s, d: landed.append((s, d)) or None), \
+                mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
+                mock.patch.object(sg, "_teardown_session",
+                                  lambda meta, archive=True: None), \
+                mock.patch.object(sg, "_release_port", lambda *a, **k: None), \
+                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(sys, "argv",
+                                  ["silkgate", "run", "--brief", str(f),
+                                   "--no-tty", "--", "true"]), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit) as caught:
+            sg.main()
+        self.assertEqual(caught.exception.code, 0)
+        sdirs = [d for d in sg.SESSIONS_DIR.iterdir() if not d.name.startswith(".")]
+        self.assertEqual(len(sdirs), 1)
+        recs = sg._read_journal(sdirs[0] / "journal.jsonl")
+        start = next(r for r in recs if r["event"] == "exec_start")
+        self.assertEqual(start["via"], "run")
+        self.assertEqual(start["brief_source"], "flag")
+        self.assertEqual(start["brief_sha256"],
+                         hashlib.sha256(b"# run ask\n").hexdigest())
+        self.assertEqual((sdirs[0] / "briefs" / f"{start['exec_id']}.md").read_bytes(),
+                         b"# run ask\n")
+        self.assertEqual(landed, [(f"sg-{sdirs[0].name}", b"# run ask\n")])
 
 
 # -- exec journal write points ---------------------------------------------------------
