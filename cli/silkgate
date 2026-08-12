@@ -605,6 +605,9 @@ def _wait_proxy_ready(proc, ports, log_path):
 # (archive elsewhere if the trail must outlive the machine).
 LOG_RETAIN_DAYS = 30
 LOG_RETAIN_COUNT = 20
+# Capture files hold conversation content — bulkier and more sensitive than audit
+# metadata — so they get a shorter default: a working week of look-back suffices.
+CAPTURE_RETAIN_DAYS = 7
 _LOG_PATTERNS = ("proxy-*.log", "proxy-*.rules", "standalone-*.rules", "events-*.jsonl")
 
 
@@ -616,43 +619,54 @@ def _retain_days(var, default):
         return default
 
 
+def _prune_kind(pattern, cutoff, live):
+    """One kind's removals under the policy above: only files BOTH beyond the newest
+    LOG_RETAIN_COUNT of the kind AND older than `cutoff`, never one in `live`."""
+    stamped = []
+    for p in LOG_DIR.glob(pattern):
+        try:
+            stamped.append((p.stat().st_mtime, p))
+        except OSError:                          # vanished mid-scan: already gone
+            continue
+    stamped.sort(reverse=True)
+    pruned = 0
+    for mtime, p in stamped[LOG_RETAIN_COUNT:]:
+        if p in live or mtime >= cutoff:
+            continue
+        try:
+            p.unlink()
+            pruned += 1
+        except OSError:
+            pass
+    return pruned
+
+
 def _prune_logs():
     """Apply the retention policy above; runs where log files are created.
 
     The log a live proxy is writing is safe twice over: proxy.json names it (checked
     here), and being written keeps its mtime inside the retention age — so even a
     foreground proxy another silkgate process started, which has no proxy.json, cannot
-    lose its log while it runs."""
-    try:
-        days = float(os.environ.get("SILKGATE_LOG_RETAIN_DAYS", "") or LOG_RETAIN_DAYS)
-    except ValueError:
-        days = LOG_RETAIN_DAYS
-    if days <= 0:                                # 0 (or less): retention is off, keep all
-        return
+    lose its log while it runs. Two age knobs, one per sensitivity — the audit kinds on
+    LOG_RETAIN_DAYS, capture files on CAPTURE_RETAIN_DAYS — and a knob at 0 (or less)
+    turns retention off for its own kinds alone."""
     _proxy_meta = read_proxy() or {}
-    live = {Path(v) for k in ("log", "events") if (v := _proxy_meta.get(k))}
-    cutoff = time.time() - days * 86400
+    live = {Path(v) for k in ("log", "events", "capture") if (v := _proxy_meta.get(k))}
     pruned = 0
-    for pattern in _LOG_PATTERNS:
-        stamped = []
-        for p in LOG_DIR.glob(pattern):
-            try:
-                stamped.append((p.stat().st_mtime, p))
-            except OSError:                      # vanished mid-scan: already gone
-                continue
-        stamped.sort(reverse=True)
-        for mtime, p in stamped[LOG_RETAIN_COUNT:]:
-            if p in live or mtime >= cutoff:
-                continue
-            try:
-                p.unlink()
-                pruned += 1
-            except OSError:
-                pass
+    for patterns, days in (
+            (_LOG_PATTERNS, _retain_days("SILKGATE_LOG_RETAIN_DAYS", LOG_RETAIN_DAYS)),
+            (("capture-*.jsonl",),
+             _retain_days("SILKGATE_CAPTURE_RETAIN_DAYS", CAPTURE_RETAIN_DAYS))):
+        if days <= 0:
+            continue
+        cutoff = time.time() - days * 86400
+        for pattern in patterns:
+            pruned += _prune_kind(pattern, cutoff, live)
     if pruned:
-        say(f"pruned {pruned} audit log file(s) older than {days:g}d from {LOG_DIR} "
+        say(f"pruned {pruned} audit log file(s) past retention from {LOG_DIR} "
             f"(the {LOG_RETAIN_COUNT} newest of each kind always stay; "
-            "SILKGATE_LOG_RETAIN_DAYS=0 keeps everything)")
+            "SILKGATE_LOG_RETAIN_DAYS=0 and SILKGATE_CAPTURE_RETAIN_DAYS=0 keep "
+            "everything)")
 
 
 def start_proxy(rules_text, port):
@@ -671,10 +685,12 @@ def start_proxy(rules_text, port):
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
     log_path = LOG_DIR / f"proxy-{stamp}.log"
     events_path = LOG_DIR / f"events-{stamp}.jsonl"
+    capture_path = LOG_DIR / f"capture-{stamp}.jsonl"
     rules_file = LOG_DIR / f"proxy-{stamp}.rules"
     rules_file.write_text(rules_text)
     env = dict(os.environ, SILKGATE_EGRESS_RULES=str(rules_file),
-               SILKGATE_EGRESS_EVENTS_FILE=str(events_path))
+               SILKGATE_EGRESS_EVENTS_FILE=str(events_path),
+               SILKGATE_EGRESS_CAPTURE_FILE=str(capture_path))
     env.pop("SILKGATE_EGRESS_SESSIONS_DIR", None)
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
@@ -1525,6 +1541,7 @@ def start_shared_proxy(base_port, ports=None):
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
     log_path = LOG_DIR / f"proxy-{stamp}.log"
     events_path = LOG_DIR / f"events-{stamp}.jsonl"
+    capture_path = LOG_DIR / f"capture-{stamp}.jsonl"
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
     argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"]
@@ -1533,15 +1550,18 @@ def start_shared_proxy(base_port, ports=None):
     # Multi-session mode: SILKGATE_EGRESS_SESSIONS_DIR on, SILKGATE_EGRESS_RULES off (addon needs exactly one).
     env = dict(os.environ, SILKGATE_EGRESS_SESSIONS_DIR=str(SESSIONS_DIR),
                SILKGATE_EGRESS_CONTROL_SOCK=str(PROXY_SOCK),
-               SILKGATE_EGRESS_EVENTS_FILE=str(events_path))
+               SILKGATE_EGRESS_EVENTS_FILE=str(events_path),
+               SILKGATE_EGRESS_CAPTURE_FILE=str(capture_path))
     env.pop("SILKGATE_EGRESS_RULES", None)
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
     # base_port is the pool that landed, not the one asked for — _find_free_pool may have
     # scanned past a squatter, and pick_port re-reads this record to follow it.
+    # "capture" also shields the live capture file from _prune_logs, like "log"/"events".
     meta = {"pid": proc.pid, "base_port": ports[0], "ports": ports,
             "log": str(log_path), "events": str(events_path),
+            "capture": str(capture_path),
             "sock": str(PROXY_SOCK), "started": now_iso()}
     try:
         _wait_proxy_ready(proc, ports, log_path)
@@ -2919,9 +2939,11 @@ def cmd_proxy(args):
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
     rules_file = LOG_DIR / f"standalone-{stamp}.rules"
     events_path = LOG_DIR / f"events-{stamp}.jsonl"
+    capture_path = LOG_DIR / f"capture-{stamp}.jsonl"
     rules_file.write_text(rules_text)
     env = dict(os.environ, SILKGATE_EGRESS_RULES=str(rules_file),
-               SILKGATE_EGRESS_EVENTS_FILE=str(events_path))
+               SILKGATE_EGRESS_EVENTS_FILE=str(events_path),
+               SILKGATE_EGRESS_CAPTURE_FILE=str(capture_path))
     env.pop("SILKGATE_EGRESS_SESSIONS_DIR", None)
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
