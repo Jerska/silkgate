@@ -14,13 +14,14 @@ test("the longest matching prefix wins", () => {
 });
 
 test("a prefix matches only at a segment boundary", () => {
-  assert.equal(priceFor("claude-sonnet-4-60"), null,
-               "claude-sonnet-4-60 must not take the claude-sonnet-4-6 row");
-  assert.equal(priceFor("claude-sonnet-4-5x"), null,
-               "a mid-segment continuation is a different model, not a match");
-  assert.deepEqual(priceFor("claude-sonnet-4-6"),
-                   priceFor("claude-sonnet-4-6-20991231"),
-                   "an exact id and its dated form find the same row");
+  assert.equal(priceFor("claude-sonnet-4-60").window, 200_000,
+               "claude-sonnet-4-60 falls to the claude-sonnet-4 row, never"
+               + " the 1M-window claude-sonnet-4-6 row");
+  assert.equal(priceFor("claude-sonnet-45"), null,
+               "a mid-segment continuation matches nothing");
+  assert.deepEqual(priceFor("claude-sonnet-4-6-20991231"),
+                   priceFor("claude-sonnet-4-6"),
+                   "a dated id still finds its exact row");
 });
 
 test("an unknown model answers null everywhere — never a guess", () => {
