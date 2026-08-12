@@ -334,7 +334,9 @@ Every `github.com`, `lfs.github.com`, and `api.github.com` row carries
 line: `Authorization: Basic base64(x-access-token:<PAT>)`. As with every secret, a
 missing value warns at launch, and the guest sees the credential status in its context
 file. The storage hosts authorize themselves (presigned URL or SigV4), so those rules
-carry no `inject_auth` — a second `Authorization` header there makes S3 answer 501. Each
+carry no `inject_auth` — a second `Authorization` header there makes S3 answer 501. The
+upload's SigV4 signature rides in request headers, so the S3 rule forwards all headers
+(`h:*`), while the presigned download host stays query-only. Each
 grant's `setup.sh` bakes URL-scoped `Authorization` stubs into the image for the three
 control hosts, never a global one, for the same reason.
 
@@ -342,8 +344,8 @@ Two gaps remain. `gh` is not installed and GraphQL is not reachable. The grants 
 the guest to the REST API instead, through their context snippets. Call
 `api.github.com/repos/OWNER/REPO/...` with any `Authorization` value, and the proxy
 replaces that value with the real credential. GitHub REST refuses a request that
-carries no `User-Agent` header, so the API rules forward `user-agent` and `accept` —
-the header that selects the API media type. The `raw.githubusercontent.com` and
+carries no `User-Agent` header, so the API rules forward `user-agent` and `accept`.
+The `accept` header selects the API media type. The `raw.githubusercontent.com` and
 `codeload.github.com` lines stay anonymous even inside a grant, so a private file there
 answers 404. Fetch private content over git or the REST API instead.
 

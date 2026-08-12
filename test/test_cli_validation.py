@@ -2009,6 +2009,22 @@ class TestGithubProfiles(CliCase):
         self.assertIsNone(s3.inject_auth, "S3 carries its own SigV4 Authorization")
         self.assertTrue(s3.allow_query)
 
+    def test_s3_upload_rule_forwards_the_sigv4_headers(self):
+        # The upload authorizes itself with SigV4 carried in request headers; strip
+        # any of them and S3 answers 403 Authorization error. h:* is deliberate.
+        s3 = self.compose("github-write:some/repo").match(
+            "github-cloud.s3.amazonaws.com", "/bucket/key", "PUT")
+        self.assertTrue(s3.allow_all_headers)
+        for name in ("authorization", "x-amz-content-sha256", "x-amz-date",
+                     "user-agent", "accept-encoding"):
+            self.assertTrue(s3.header_ok(name, "value"), name)
+        # The presigned download host stays query-only: no header widening there.
+        for spec in ("github-read:some/repo", "github-write:some/repo"):
+            cdn = self.compose(spec).match(
+                "github-cloud.githubusercontent.com", "/x/y", "GET")
+            self.assertFalse(cdn.allow_all_headers, spec)
+            self.assertFalse(cdn.header_ok("authorization", "AWS4-HMAC-SHA256 x"), spec)
+
     # --- composition: the grant governs in every --with order ---
 
     def test_grant_governs_every_smart_http_leg_in_every_with_order(self):
