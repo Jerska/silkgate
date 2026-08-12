@@ -50,6 +50,8 @@ silkgate can express — and the guest can reach nothing at all.
 - [doc/SOTA.md](doc/SOTA.md) — what the field ships and where the gaps are (a dated research
   snapshot).
 - [doc/PLUGIN.md](doc/PLUGIN.md) — how silkgate packages as a Claude Code plugin.
+- [doc/REFRESH.md](doc/REFRESH.md) — which facts in this tree rot with time (pins, prices,
+  static lists, observed upstream behavior), and the check that catches each.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to set up, test, commit, and write documentation
   here.
 - [AGENTS.md](AGENTS.md) — the additional instructions for agent contributors.
