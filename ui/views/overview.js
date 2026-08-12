@@ -96,6 +96,18 @@ export function newOverviewView() {
     return list.length;
   }
 
+  // denyBurst prunes on read, but only sessions with cards are ever read: a
+  // deny loop attributed to null or to a name absent from /api/sessions would
+  // stamp forever. The 1 s tick sweeps every list and drops the empty ones.
+  function pruneDenies(now) {
+    for (const [session, list] of denyTs) {
+      while (list.length && now - list[0] > DENY_WINDOW_MS) {
+        list.shift();
+      }
+      if (list.length === 0) denyTs.delete(session);
+    }
+  }
+
   function seedDenies() {
     denyTs.clear();
     denyCounted.clear();
@@ -365,6 +377,7 @@ export function newOverviewView() {
     // dot/order on the state flips those labels cross.
     ticker = setInterval(() => {
       const now = Date.now();
+      pruneDenies(now);
       for (const card of cards.values()) {
         updateStatus(card, now);
       }
