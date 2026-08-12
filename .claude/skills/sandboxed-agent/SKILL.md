@@ -59,8 +59,8 @@ key.**
   take `--branch NAME`.
 - `--branch` is `--checkout` plus a return path. The worktree moves from a guest-only
   folder to a host-derived mount, and a named branch is created at the base. Commits
-  return fast-forward only at `down` or `harvest`. `--branch X --checkout REF` sets the
-  branch base to REF.
+  return fast-forward only: at `run` teardown, at `down`, or earlier with
+  `harvest NAME`. `--branch X --checkout REF` sets the branch base to REF.
 - A plain `--checkout` guest holds committed content only — untracked files such as
   `.env` never enter it. Nothing a `--checkout` guest writes returns, commits included.
   `--checkout` works from the silkgate repo itself: only the repository's `.git` is
@@ -149,7 +149,11 @@ the guest's report, not evidence.**
   ```
 
   That run needs no claude profile and no secret — the smallest policy that can answer
-  the question.
+  the question. To check a harvested branch, point a disposable checkout at it:
+
+  ```sh
+  ./cli/silkgate run --with git --with node@22.11.0 --checkout agent/fix-tests -- node --test
+  ```
 - The workspace diff is the deliverable. Review it on the host before you push. Check
   that only what you expected changed, and that no test got weakened to pass. If a
   fixture is untracked, run `git add -N <dir>` first, or `git diff` shows nothing.
@@ -296,8 +300,11 @@ wasted turns, and blocked requests reported as requests instead of retried in a 
   run from inside the repository with `--with git` and hand the guest a real clone at
   `/workspace`. A plain `--checkout [REF]` guest is disposable: read the code, run the
   tests, commit locally, and nothing returns. `--branch <new-name>` is for deliverable
-  commits. They land in the host repository as that branch at `down`, or earlier with
-  `silkgate harvest NAME`. The ingest fast-forwards only and fetches under fsck
+  commits. They land in the host repository as that branch at `run` teardown, at `down`,
+  or earlier with `silkgate harvest NAME`. `run` prints its session name at startup, so
+  a second terminal can harvest it mid-run. A final harvest that cannot bank everything
+  makes `run` and `down` exit 1 and keep the workspace, even when the guest command
+  exited 0. The ingest fast-forwards only and fetches under fsck
   (`test/test_cli_branch_ingest.py` pins that rule). Uncommitted files die with the
   session. File modes ride in the commits, so the old exec-bit ritual is gone. In both
   modes, the host repository's `.git` is mounted read-only. With LFS in use, `.git/lfs`
