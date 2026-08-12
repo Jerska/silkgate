@@ -1697,6 +1697,11 @@ class TestGuestBriefEgress(CliCase):
     def test_plain_rule_carries_no_marker(self):
         self.assertNotIn("injects", self.ctx("api.anthropic.com/v1/** POST\n"))
 
+    def test_the_silkgate_500_has_an_action(self):
+        ctx = self.ctx()
+        self.assertIn("Do not retry it in a loop", ctx)
+        self.assertIn("Report it, with the\nrequest that caused it", ctx)
+
 
 if __name__ == "__main__":
     unittest.main()
