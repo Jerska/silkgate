@@ -396,6 +396,25 @@ class TestBrief(JournalCase):
         big.write_bytes(b"x" * (sg._BRIEF_MAX_BYTES + 1))
         self.refuses("over the 1 MiB limit", sg._read_brief, str(big))
 
+    def test_context_points_at_the_brief_only_when_one_lands(self):
+        pointer = f"Your task brief is at `{sg.GUEST_BRIEF}`. Read it first."
+        ruleset = sg.load_ruleset("")
+        with_brief = sg.session_context([], ruleset, persistent=False, brief=True)
+        self.assertIn(pointer, with_brief)
+        self.assertLess(with_brief.index(pointer), with_brief.index("## What is here"),
+                        "the pointer comes before everything else the guest reads")
+        without = sg.session_context([], ruleset, persistent=False)
+        self.assertNotIn("BRIEF.md", without)
+
+    def test_context_for_keys_the_pointer_on_the_flag(self):
+        args = types.SimpleNamespace(no_context=False, branch=None, checkout=None,
+                                     brief="/tmp/task.md")
+        ctx, _ = sg._context_for(args, [], sg.load_ruleset(""), (), persistent=False)
+        self.assertIn("BRIEF.md", ctx)
+        args.brief = None
+        ctx, _ = sg._context_for(args, [], sg.load_ruleset(""), (), persistent=False)
+        self.assertNotIn("BRIEF.md", ctx)
+
     def test_provision_writes_brief_and_copy_file_argv(self):
         """The exact context.md --copy-file pattern, asserted on the built msb argv —
         no real msb runs."""

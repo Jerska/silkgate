@@ -1020,11 +1020,13 @@ def ensure_image(profiles, image, *, base=BASE_IMAGE):
 # a courtesy to a cooperating agent — it saves turns wasted on things the sandbox forbids
 # — and never a control: an adversarial guest ignores it, so nothing may rely on it.
 
-def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, checkout=None):
+def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, checkout=None,
+                    brief=False):
     """The markdown a guest is handed about its own sandbox. `mounts` is the validated
     -v list as (host, guest, mode) triples; the active mode — branch, checkout, or the
     mode of a mount at /workspace — keys the workspace sentence, and every other mount
-    is listed with its own."""
+    is listed with its own. `brief` says a --brief file landed at GUEST_BRIEF, so the
+    guest is pointed at it before anything else."""
     lines = [
         "# Where you are: a silkgate sandbox",
         "",
@@ -1035,6 +1037,13 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         "Silkgate runs a command — usually a coding agent — inside a small, disposable",
         "virtual machine. Everything the machine sends to the network passes through one",
         "proxy. The proxy permits a named list of destinations and refuses the rest.",
+    ]
+    if brief:
+        lines += [
+            "",
+            f"Your task brief is at `{GUEST_BRIEF}`. Read it first.",
+        ]
+    lines += [
         "",
         "## What is here",
         "",
@@ -3166,7 +3175,8 @@ def _context_for(args, profiles, ruleset, mounts, *, persistent):
         [GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
                            if p.conf.get("context_path")]))
     return session_context(profiles, ruleset, mounts=mounts, persistent=persistent,
-                           branch=args.branch, checkout=args.checkout), paths
+                           branch=args.branch, checkout=args.checkout,
+                           brief=bool(getattr(args, "brief", None))), paths
 
 
 def cmd_up(args):
