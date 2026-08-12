@@ -1,11 +1,12 @@
 # Every path Claude Code was observed to use, and no more. The list is not a guess: eleven
-# sandboxed Claude Code 2.1.220 runs produced exactly these requests in the audit logs. The
-# old host-wide /** also granted the Files and Batches APIs — a guest parking data in the
-# host's own Anthropic org under the injected key — so the paths are enumerated instead.
-# The cost of enumerating: a path a newer Claude Code needs but this list lacks fails as a
-# 403 the guest will report as silkgate policy. When the pinned version is bumped, re-derive
-# this list from a fresh audit log rather than widening a rule here. Body caps sit only on
-# the two POSTed paths; max_body defaults to 0, and a GET needs no body.
+# sandboxed Claude Code runs produced exactly these requests in the audit logs. The profile
+# now pins 2.1.226 and the list awaits re-derivation at that version (doc/REFRESH.md tracks
+# this pair). The old host-wide /** also granted the Files and Batches APIs — a guest parking
+# data in the host's own Anthropic org under the injected key — so the paths are enumerated
+# instead. The cost of enumerating: a path a newer Claude Code needs but this list lacks
+# fails as a 403 the guest will report as silkgate policy. When the pinned version is bumped,
+# re-derive this list from a fresh audit log rather than widening a rule here. Body caps sit
+# only on the two POSTed paths; max_body defaults to 0, and a GET needs no body.
 api.anthropic.com/v1/messages                    POST  q:*  h:*  max_body=10m  inject_auth=anthropic  capture=anthropic
 api.anthropic.com/v1/messages/count_tokens       POST  q:*  h:*  max_body=10m  inject_auth=anthropic
 api.anthropic.com/v1/messages                    GET   q:*  h:*  inject_auth=anthropic
