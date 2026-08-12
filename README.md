@@ -95,6 +95,42 @@ steps run inside `docker build` on the host, which has its own network. A compil
 or an apt mirror therefore never touches the proxy or the policy the session will run
 under.
 
+## Profile arguments
+
+**A profile can take an argument — `--with NAME[@VERSION][:ARG]` — and the argument
+reaches only the composed rules, never the image.** A profile that takes an argument
+declares `arg_pattern` in its `profile.conf`: a regex the whole argument must match. A
+profile with a pattern requires an argument, and a profile without one refuses any. The
+argument lands inside rule syntax, so a malformed argument is rule injection. The spec
+parser refuses whitespace and control characters unconditionally, and the declared
+pattern decides the rest. Each refusal names the profile and its pattern.
+
+`rules.txt` is the one templated file. Every `{arg}` in it becomes the validated
+argument when the session's ruleset is composed. A `{arg}` placeholder in a profile
+with no declared pattern is a load error. `setup.sh` and `env` are never templated, so
+an argument can never affect the image. The tag's hash covers the template bytes as
+written, and the slug carries each profile name once. Two sessions with different
+arguments for one profile therefore reuse one image.
+
+The same name repeats with different arguments to grant several instances. Each
+distinct name, version, and argument combination expands its rules once, and exact
+duplicates deduplicate silently. When a profile's conf declares `supersedes = NAME`,
+its instance drops any NAME instance with the same argument, and silkgate prints one
+line per drop. There is no dependency counterpart — grants stay tight.
+
+The composed ruleset is ordered, and the order is the override mechanism. The proxy is
+first-match-wins, so an earlier rule decides every request it covers. Composition puts
+`--rule` lines first, then generated rules, then the rules of profiles without
+arguments. The generated rules are the argument expansions, then the GitHub grant
+rules. Explicit therefore beats generated, and generated beats the profile floor.
+`test/test_cli_validation.py` pins the validation, the image identity, and the order.
+Audit a composed policy before a launch:
+
+```sh
+./cli/silkgate profiles                              # the ARG column lists each pattern
+./cli/silkgate profiles --render some-profile:myarg  # the exact rules a session enforces
+```
+
 ## The guest context
 
 **Each session describes itself to the guest, so a cooperative agent wastes no turns on
