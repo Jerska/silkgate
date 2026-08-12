@@ -1090,9 +1090,12 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         ]
         for name in inject_names:
             value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{name.upper()}")
-            if value and _parse_secret(value) is not None:
-                status = ("Available — the proxy injects the real value at the boundary, "
-                          "and the matching in-guest key or token is a dummy.")
+            parsed = _parse_secret(value) if value else None
+            if parsed is not None:
+                # The guest learns the header's name, never any part of its value.
+                status = (f"Available — the proxy replaces the value of the `{parsed[0]}` "
+                          "header at the boundary, and the matching in-guest key or token "
+                          "is a dummy.")
             else:
                 reason = "not set" if not value else "set but not a valid header line"
                 status = (f"Missing or malformed ({reason}) — requests that need it will "

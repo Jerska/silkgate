@@ -636,6 +636,8 @@ class TestSecretValidation(CliCase):
             ctx = sg.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
         self.assertIn("Available", ctx)
+        self.assertIn("`x-api-key`", ctx)          # names the header the proxy rewrites
+        self.assertNotIn("sk-ant-test", ctx)       # and never any part of its value
 
     def test_session_context_lists_missing_credential(self):
         ruleset = self._ruleset()
@@ -654,6 +656,8 @@ class TestSecretValidation(CliCase):
             ctx = sg.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
         self.assertIn("Missing or malformed", ctx)
+        # A header name parsed out of a malformed secret is a guess — never surface it.
+        self.assertNotIn("x-api-key", ctx)
 
     def test_session_context_omits_section_when_no_inject_auth(self):
         ruleset = sg.load_ruleset("api.anthropic.com/v1/** POST\n")
