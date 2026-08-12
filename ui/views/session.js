@@ -20,6 +20,25 @@ import { triage, fmtAge } from "./overview.js";
 import { newCallsView } from "./calls.js";
 
 const TABS = ["activity", "calls", "diff", "config", "brief", "output", "metrics"];
+
+// The meta behind a session view, looked up fresh each call: live metas answer
+// by name, archived metas by the sid the overview links with. Archived-ness is
+// placement (the archived list) or an explicit state — the same derivation the
+// overview grid uses, so the detail header can never disagree with the card.
+// Pure so the lookup and the archived verdict pin down in node.
+export function findMeta(sessions, ident, session) {
+  for (const m of sessions?.sessions ?? []) {
+    if (m?.name === session) {
+      return { meta: m, archived: m.state === "archived" };
+    }
+  }
+  for (const m of sessions?.archived ?? []) {
+    if (String(m?.sid ?? m?.name) === ident) {
+      return { meta: m, archived: true };
+    }
+  }
+  return { meta: null, archived: false };
+}
 const DETAIL_MS = 5000;          // min gap between /api/session/<ident> fetches
 const OUTPUT_TAIL = 500;
 const OUTPUT_MIN_MS = 1000;      // min gap between manual output refreshes
@@ -49,13 +68,11 @@ export function newSessionView() {
   let detailAt = 0;
 
   function meta() {
-    for (const m of ctx.sessions?.sessions ?? []) {
-      if (m?.name === session) return m;
-    }
-    for (const m of ctx.sessions?.archived ?? []) {
-      if (String(m?.sid ?? m?.name) === ident) return m;
-    }
-    return null;
+    return findMeta(ctx.sessions, ident, session).meta;
+  }
+
+  function isArchived() {
+    return findMeta(ctx.sessions, ident, session).archived;
   }
 
   // A diff exists only where a git workspace does. Without a meta the answer
@@ -764,11 +781,12 @@ export function newSessionView() {
   function mount(host, appCtx, route) {
     ctx = appCtx;
     ident = route.ident;
-    session = ident;               // archived sids resolve to metas; data keys by name
-    const m = meta();
-    if (m?.name) session = m.name;
+    // Archived sids resolve to metas; data keys by name. On a cold load the
+    // sessions payload has not landed yet, so onFlush re-resolves when it does.
+    session = findMeta(ctx.sessions, ident, ident).meta?.name ?? ident;
 
     head.dot = statusDot("waiting");
+    head.name = el("span", { class: "session-name" }, session);
     head.label = el("span", { class: "num" }, "…");
     head.branch = el("span", { class: "session-branch" });
     head.metrics = el("span", { class: "num session-metrics" });
@@ -787,7 +805,7 @@ export function newSessionView() {
       el("header", { class: "session-head" },
         el("a", { href: "#/", class: "back" }, "← overview"),
         head.dot,
-        el("span", { class: "session-name" }, session),
+        head.name,
         head.branch,
         head.label,
         head.metrics,
@@ -816,6 +834,17 @@ export function newSessionView() {
   }
 
   function onFlush(payload) {
+    // An archived session opened by URL mounts before /api/sessions answers,
+    // with the sid standing in for the name. Re-resolve when a payload lands:
+    // rows, capture buckets and tallies all key by name.
+    if (payload.polled) {
+      const name = findMeta(ctx.sessions, ident, session).meta?.name;
+      if (name && name !== session) {
+        session = name;
+        head.name.textContent = session;
+        showTab(tab);            // the mounted tab keyed its data by the old name
+      }
+    }
     if (callsView) {
       callsView.onFlush(payload);
     }
