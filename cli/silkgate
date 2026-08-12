@@ -1388,6 +1388,11 @@ def _check_meta_fields(meta):
     sandbox = meta.get("sandbox")
     if sandbox is not None and not _SANDBOX_RE.fullmatch(str(sandbox)):
         return f"its meta.json names sandbox {sandbox!r}"
+    # sid becomes a path component of ARCHIVE_DIR at teardown (sdir.rename), where a
+    # '..' or absolute value would move the whole session dir — journal included —
+    # anywhere the planter names. Same bar the archive read side already holds it to.
+    if meta.get("sid") is not None and not _SID_RE.fullmatch(str(meta["sid"])):
+        return f"its meta.json names sid {meta['sid']!r}"
     if meta.get("branch") is not None:
         # Branch metas add git argv (branch, base) and an rmtree decision (repo_root via
         # _reap_derived_workspace) — same refusal as sandbox above for a planted meta.

@@ -221,6 +221,15 @@ class TestArchivedMetaReads(JournalCase):
         self.write_session("live1", git_dir="not/absolute")
         self.refuses("refusing it", sg.read_meta, "live1")
 
+    def test_planted_sid_fails_the_field_check(self):
+        for bad in ("../../../../tmp/silkgate-escape", "/tmp/silkgate-escape",
+                    "20250101T000000Z-a/b-abcdef"):
+            self.assertIn("sid", sg._check_meta_fields(self.meta(sid=bad)) or "", bad)
+
+    def test_planted_sid_is_refused_on_a_live_read(self):
+        self.write_session("live2", sid="../../../../tmp/silkgate-escape")
+        self.refuses("refusing it", sg.read_meta, "live2")
+
     def test_list_archived_metas_is_chronological_and_skips_foreign_dirs(self):
         older = "20240101T000000Z-old-abcdef"
         newer = "20250101T000000Z-new-abcdef"
@@ -323,6 +332,23 @@ class TestTeardownArchive(JournalCase):
         self.teardown(meta, logs=(big, None))
         size = (sg.ARCHIVE_DIR / sid / "output.log").stat().st_size
         self.assertLessEqual(size, sg._SNAPSHOT_MAX_BYTES)
+
+    def test_planted_sid_is_refused_before_the_rename(self):
+        """A hostile sid in a live meta must never become the rename destination:
+        `down` reaches its meta only through read_meta, which now refuses it — the
+        session dir stays put and nothing lands where the sid points."""
+        for bad in ("../../../../tmp/silkgate-repro-escaped",
+                    str(self.tmp / "absolute-escape")):
+            name = "esc" + str(abs(hash(bad)))[:4]
+            self.write_session(name, sid=bad)
+            with mock.patch.object(sg, "preflight", lambda *a: None):
+                self.refuses("refusing it", sg.cmd_down,
+                             types.SimpleNamespace(name=name))
+            self.assertTrue(sg.session_dir(name).exists(),
+                            "the refusal must come before any move")
+            escaped = (sg.ARCHIVE_DIR / bad).resolve()
+            self.assertFalse(escaped.exists(),
+                             f"the session dir escaped to {escaped}")
 
 
 # -- archive retention ---------------------------------------------------------------
