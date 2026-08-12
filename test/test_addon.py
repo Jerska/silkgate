@@ -1262,6 +1262,31 @@ class TotalCapSalvage(CaptureCase):
         self.assertEqual(resp["tokens_out"], 42)
 
 
+class NonOkStatus(CaptureCase):
+    """r2 finding 13: a rate-limited or 5xx turn attached no decoder AND wrote no
+    capture_error, so the capture file read like idleness. One record names the
+    status; the decoder still attaches to 200s only."""
+
+    def test_a_non_200_captured_flow_records_the_status(self):
+        f = self.captured_request()
+        self.respond(f, [b'{"type": "error"}'], content_type="application/json",
+                     status=429)
+        records = self.capture_records()
+        self.assertEqual([r["kind"] for r in records], ["capture_error"],
+                         "one record names the gap, and only one")
+        self.assertIn("status 429", records[0]["reason"])
+        self.assertNotIn("capture", f.metadata, "no decoder attaches to a non-200")
+        self.assertEqual(self.audit_response()["status"], 429)
+
+    def test_a_5xx_names_its_own_status(self):
+        f = self.captured_request()
+        self.respond(f, [b"overloaded"], content_type="text/plain", status=529)
+        records = self.capture_records()
+        self.assertEqual([r["kind"] for r in records], ["capture_error"])
+        self.assertIn("status 529", records[0]["reason"],
+                      "the status wins over the content-type branch")
+
+
 class DecodedCharBudget(AddonCase):
     """The total cap meters decoded content, not wire bytes, so the SSE and JSON
     modes agree on "too long" whatever the upstream's delta granularity — plus the

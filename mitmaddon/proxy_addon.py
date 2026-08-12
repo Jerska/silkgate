@@ -1017,14 +1017,22 @@ def responseheaders(flow: http.HTTPFlow) -> None:
         flow.response.stream = tap
 
         try:
-            if state.get("capture") and flow.response.status_code == 200:
+            if state.get("capture"):
+                status = flow.response.status_code
                 encoding = flow.response.headers.get("content-encoding", "identity")
                 media = (flow.response.headers.get("content-type") or "")
                 media = media.split(";", 1)[0].strip().lower()
+                # A non-200 turn is a turn the session paid for in time — rate
+                # limits and 5xx above all — so the gap gets a record a dashboard
+                # can tell from idleness. Only a 200 carries the message grammar
+                # the decoders parse.
+                if status != 200:
+                    _capture_write(flow, state, {"kind": "capture_error", "reason":
+                                                 f"status {status}: not captured"})
                 # Streamed chunks arrive still content-encoded, and growing a
                 # decompressor here would hand the guest a zip-bomb lever; Anthropic
                 # answers identity-encoded, so metadata-only is the honest fallback.
-                if encoding.lower() not in ("", "identity"):
+                elif encoding.lower() not in ("", "identity"):
                     _capture_write(flow, state, {"kind": "capture_error", "reason":
                                                  f"content-encoding {_clip(encoding)}: "
                                                  "not decoded"})
