@@ -205,6 +205,29 @@ cannot name the follow-up, use `run`. When you can:
 One shared proxy serves every session on its own port. Each guest's network policy admits
 only its own port, so a guest cannot reach another session's listener.
 
+## Parallel agents against one repository
+
+**Partition by file ownership, and put the partition in every brief — agents that own
+disjoint files merge with near-zero conflicts.** Each brief lists the files the agent
+owns plus an explicit never-edit list, names its new files up front, and says what the
+other agents own, so a collision surfaces as a report line instead of an edit.
+Partition tests by the contract they assert, not only by file.
+
+- Resolve the agents' unknowns on the host before you write the briefs. One minute of
+  host work removes the largest source of wrong work, and a wrong hint costs more than
+  a vague one: it fences the agent off the real cause.
+- Demand a report with Assumed and Disputed sections. Tell the agent what its sandbox
+  cannot run (docker, msb, a live proxy), so those claims land under Assumed. Check
+  each dispute yourself before you accept it.
+- Verify the merged tree, never each branch alone. A regression that lives between two
+  branches is invisible in either one. Before you blame the merge, baseline the same
+  command at the pre-merge commit.
+- Brief every agent to commit early. Agents die mid-run — an API stream idles out, the
+  host sleeps, a guest hits its memory limit — and commits survive where an unwritten
+  report does not. To continue a dead agent's work, harvest its branch, then launch a
+  successor with `--branch <name>-2 --checkout <name>` and a brief that lists the
+  inherited commits.
+
 ## Profiles: the image and the policy are one declaration
 
 **Pick capabilities with `--with NAME[@VERSION][:ARG]`, repeatable: a profile carries
@@ -344,6 +367,16 @@ leave the host. `--no-settings` skips the projection.
   from before `--branch` still works: `--with git`, clone inside the guest, then on the
   host `git fetch <dir> branch:branch`. Never run git in a directory a guest wrote — the
   hook risk applies in full.
+- A launch started in a detached background shell must close stdin: append `</dev/null`
+  to the `silkgate` invocation. `msb exec` streams stdin to the guest and waits for EOF,
+  and a detached shell hands it a pipe that never closes. The Tier-1 probe then times
+  out (`msb exec did not return within 15s`) on every attempt while the guest is
+  healthy, and silkgate refuses the unproven session — a clean teardown, exit 1,
+  nothing leaks. A foreground launch needs nothing.
+- An exit of 137 with one bare `Killed` line means the kernel inside the VM ended the
+  guest command, most often the OOM killer. Give the guest more memory and rerun. A
+  `--branch` teardown still harvests: the commits survive, and only an unwritten
+  report is lost.
 - Nothing bounds a runaway agent: silkgate has no timeout and no cost ceiling. If that
   matters, wrap the invocation in `timeout 600 …`. The teardown is clean, but the clock
   includes the image build, so a cold profile set spends part of the budget on docker.
