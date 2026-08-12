@@ -330,7 +330,7 @@ function dispatch() {
   const route = parseRoute(location.hash);
   // Same key → the mounted view absorbs the change (filter edits, tab flips).
   // A different session ident is a different mount, not a param change.
-  const key = route.view + (route.view === "session" ? " " + route.ident : "");
+  const key = route.view + (route.view === "session" ? "\0" + route.ident : "");
   if (view && key === viewKey) {
     view.onRoute(route);
     syncNav(route);
