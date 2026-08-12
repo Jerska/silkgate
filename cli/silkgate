@@ -269,8 +269,14 @@ class Profile:
 
     @property
     def spec(self):
-        base = f"{self.name}@{self.version}" if self.version else self.name
-        return f"{base}:{self.arg}" if self.arg is not None else base
+        return f"{self.image_spec}:{self.arg}" if self.arg is not None else self.image_spec
+
+    @property
+    def image_spec(self):
+        """The spec without the arg — everything about this instance that the image
+        can see. An arg reaches only composed rules, never setup.sh or env, so image
+        identity must exclude it or every arg would force a pointless rebuild."""
+        return f"{self.name}@{self.version}" if self.version else self.name
 
     def env_pairs(self):
         return [ln for ln in self.env.splitlines() if ln.strip() and not ln.startswith("#")]
@@ -868,22 +874,34 @@ WORKDIR /workspace
 """
 
 
+def _image_profiles(profiles):
+    """The unique (name, version) instances, in order: an arg never shapes the image,
+    so several instances of one profile contribute one layer set — two sessions whose
+    specs differ only in args reuse one image."""
+    unique = {}
+    for p in profiles:
+        unique.setdefault((p.name, p.version), p)
+    return list(unique.values())
+
+
 def image_ref(profiles, base=BASE_IMAGE):
     """`silkgate/<slug>:<hash12>` — slug to read, hash to be exact.
 
     The hash covers the base, the _BASE_LAYER template, and, per profile in order, its
-    name, resolved version, declared packages, and the bytes of its setup/rules/env.
+    name, resolved version, declared packages, and the bytes of its setup/rules/env —
+    rules as the template bytes on disk, so the hash and the slug exclude any arg.
     Editing any of those is a different image, so a stale cache hit can't happen;
     reordering is a different image too, since layers stack.
     """
+    profiles = _image_profiles(profiles)
     h = hashlib.sha256(base.encode())
     h.update(b"\0" + _BASE_LAYER.encode())
     for p in profiles:
-        h.update(b"\0" + p.spec.encode())
+        h.update(b"\0" + p.image_spec.encode())
         h.update(b"\0" + " ".join(p.packages).encode())
         for text in (p.setup, p.rules, p.env):
             h.update(b"\0" + text.encode())
-    slug = "-".join(p.name for p in profiles) or "base"
+    slug = "-".join(dict.fromkeys(p.name for p in profiles)) or "base"
     return f"{IMAGE_NS}/{slug[:60]}:{h.hexdigest()[:12]}"
 
 
@@ -897,6 +915,7 @@ def image_in_msb(ref):
 
 def write_build_context(directory, profiles, base):
     """The synthesized Dockerfile plus everything it COPYs."""
+    profiles = _image_profiles(profiles)        # one layer set per profile, args aside
     shutil.copyfile(ensure_ca(), directory / "egress-ca.pem")
     lines = [_BASE_LAYER.format(base=base)]
     # Every profile's `packages` in one transaction: apt resolves them together, shared
@@ -955,7 +974,8 @@ def build_image(profiles, *, base=BASE_IMAGE, platform_=None):
     with tempfile.TemporaryDirectory(prefix="silkgate-build-") as tmp:
         context = Path(tmp)
         write_build_context(context, profiles, base)
-        say(f"building {ref} ({', '.join(p.spec for p in profiles) or 'base only'})")
+        say(f"building {ref} "
+            f"({', '.join(p.image_spec for p in _image_profiles(profiles)) or 'base only'})")
         if subprocess.run([docker, "build", "--platform", plat, "-t", ref, str(context)],
                           env=env).returncode:
             die(f"docker build failed for {ref}")
@@ -1013,10 +1033,12 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         "",
     ]
     if profiles:
-        for p in profiles:
+        # What is installed, so one entry per (name, version) — instances of a profile
+        # that differ only in args install the same tools once.
+        for p in _image_profiles(profiles):
             # Named as packages, not commands, since the two differ (ripgrep ships `rg`).
             extra = f" — plus packages {', '.join(p.packages)}" if p.packages else ""
-            lines.append(f"- `{p.spec}`{extra}")
+            lines.append(f"- `{p.image_spec}`{extra}")
     else:
         lines.append("- Nothing beyond the base image.")
     lines += [
@@ -2843,8 +2865,9 @@ def _context_for(args, profiles, ruleset, mounts, *, persistent):
     """
     if args.no_context:
         return None, ()
-    paths = [GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
-                               if p.conf.get("context_path")]
+    paths = list(dict.fromkeys(
+        [GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
+                           if p.conf.get("context_path")]))
     return session_context(profiles, ruleset, mounts=mounts, persistent=persistent,
                            branch=args.branch, checkout=args.checkout,
                            github_read=getattr(args, "github_read", None) or (),

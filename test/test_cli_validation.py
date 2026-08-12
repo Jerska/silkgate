@@ -683,6 +683,40 @@ class TestProfileArgExpansion(ArgProfileCase):
         self.assertIn("X={arg}", (context / "Dockerfile").read_text())
 
 
+class TestImageIdentityExcludesArg(ArgProfileCase):
+    """The image hash covers the rules template bytes as written, never an expansion:
+    two sessions with different args for one profile must reuse one image."""
+
+    def test_hash_and_slug_unchanged_across_args(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        refs = {sg.image_ref(sg.resolve_profiles(spec))
+                for spec in (["tmpl:a/b"], ["tmpl:c/d"], ["tmpl:a/b", "tmpl:c/d"])}
+        self.assertEqual(len(refs), 1, refs)
+        ref = refs.pop()
+        self.assertTrue(ref.startswith("silkgate/tmpl:"), ref)   # the name once, no arg
+
+    def test_instances_contribute_one_layer_set(self):
+        self.profile_dir({"tmpl": {**self.TMPL, "setup.sh": "echo hi\n"},
+                          "plain": self.PLAIN})
+        profiles = sg.resolve_profiles(["tmpl:a/b", "plain", "tmpl:c/d"])
+        cert = self.tmp / "egress-ca.pem"
+        cert.write_text("cert")
+        context = self.tmp / "ctx"
+        context.mkdir()
+        with mock.patch.object(sg, "ensure_ca", lambda: cert):
+            sg.write_build_context(context, profiles, sg.BASE_IMAGE)
+        dockerfile = (context / "Dockerfile").read_text()
+        self.assertEqual(dockerfile.count("COPY setup-tmpl.sh"), 1, dockerfile)
+
+    def test_guest_brief_lists_the_install_once_without_the_arg(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        profiles = sg.resolve_profiles(["tmpl:a/b", "tmpl:c/d"])
+        ctx = sg.session_context(profiles, sg.load_ruleset(sg.compose_rules(profiles)),
+                                 persistent=False)
+        self.assertEqual(ctx.count("- `tmpl`"), 1, ctx)
+        self.assertNotIn("tmpl:a/b`", ctx)
+
+
 class TestCompositionOrder(ArgProfileCase):
     """The proxy is first-match-wins, so composition order is the override mechanism:
     --rule lines first, then generated rules (arg expansions, GitHub grants), then
