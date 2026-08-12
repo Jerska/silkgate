@@ -1,117 +1,239 @@
-/* style.css — minimal chrome around a monospace table. The trail is the UI. */
+/* style.css — the mission-control skin: one dark palette in custom properties,
+   one spacing scale, and a small vocabulary (.dot, .meter, .badge, .state-msg)
+   that every view reuses. The app is a full-height shell — the top bar stays
+   put and each view scrolls inside <main>, which is what keeps the table's
+   sticky header working inside its own overflow wrapper. Everything is usable
+   at half-screen: the grid collapses on its own minmax, the table scrolls
+   sideways in .table-wrap. */
 
 :root {
-  --line: #d8d8d8;
-  --muted: #777;
-  --deny-bg: #fdecec;
-  --deny-fg: #8a1f1f;
-  --badge-bg: #eef1fb;
+  --bg: #0d1117;
+  --panel: #161b22;
+  --line: #21262d;
+  --fg: #c9d1d9;
+  --muted: #8b949e;
+  --live: #3fb950;
+  --idle: #d29922;
+  --exited: #6e7681;
+  --deny: #f85149;
+  --accent: #58a6ff;
+  --deny-bg: rgba(248, 81, 73, 0.08);
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
 }
 
 * { box-sizing: border-box; }
 
+html, body { height: 100%; }
+
 body {
   margin: 0;
+  display: flex;
+  flex-direction: column;
   font: 13px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  color: #222;
-  background: #fff;
+  color: var(--fg);
+  background: var(--bg);
 }
 
-#toolbar {
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+select, input, button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px var(--sp-1);
+}
+
+button { cursor: pointer; background: var(--panel); }
+button:hover { border-color: var(--muted); }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* --- the shell ------------------------------------------------------------- */
+
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+#brand { color: var(--accent); font-weight: 600; }
+
+#nav { display: flex; gap: var(--sp-3); }
+
+#nav a { color: var(--muted); padding: 0 var(--sp-1); }
+#nav a[aria-current="page"] {
+  color: var(--fg);
+  border-bottom: 2px solid var(--accent);
+}
+
+#proxy-state { margin-left: auto; color: var(--muted); }
+#stream-state { color: var(--muted); }
+
+#view {
+  flex: 1;
+  min-height: 0;                 /* children scroll; the shell never does */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* --- shared vocabulary ------------------------------------------------------ */
+
+/* Every counter aligns its digits, so a ticking value never wobbles. */
+.count, td.time, td.status, td.dur, td.bytes, .num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* One pattern for empty/loading/error, always with concrete text. */
+.state-msg {
+  margin: 0;
+  padding: var(--sp-5);
+  color: var(--muted);
+  text-align: center;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--exited);
+  flex: none;
+}
+.dot.working, .dot.live { background: var(--live); }
+.dot.waiting, .dot.idle { background: var(--idle); }
+.dot.deny-storm, .dot.stuck, .dot.deny { background: var(--deny); }
+.dot.done, .dot.archived, .dot.exited { background: var(--exited); }
+
+/* The pulse is opacity-only — no motion for anyone, none at all when the
+   reader asked for reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .dot.pulse { animation: dot-pulse 1.6s ease-in-out infinite; }
+  @keyframes dot-pulse { 50% { opacity: 0.35; } }
+}
+
+.meter {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+.meter-fill { display: block; height: 100%; background: var(--accent); }
+.meter-fill.hot { background: var(--deny); }
+
+.badge {
+  display: inline-block;
+  padding: 0 var(--sp-1);
+  margin-right: var(--sp-1);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--panel);
+  color: var(--muted);
+}
+
+/* Diff lines, for the config tab's rule diffs (rendered in wave 2). */
+.diff-line { white-space: pre-wrap; }
+.diff-add { color: var(--live); }
+.diff-del { color: var(--deny); }
+.diff-hunk { color: var(--accent); }
+.diff-file { color: var(--muted); }
+
+/* The overview's card grid: collapses to one column on its own at ~700px. */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: var(--sp-4);
+}
+
+/* --- the calls table (today's UI, scoped) ------------------------------------ */
+
+.calls {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.calls .toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.4em 1em;
-  padding: 0.5em 0.75em;
-  background: #f6f6f6;
+  gap: var(--sp-1) var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
 
-#toolbar label {
+.calls .toolbar label {
   display: inline-flex;
   align-items: center;
-  gap: 0.35em;
+  gap: var(--sp-1);
   color: var(--muted);
 }
 
-#toolbar select,
-#toolbar input,
-#toolbar button {
-  font: inherit;
-  color: #222;
+.calls .toolbar .count { margin-left: auto; color: var(--muted); }
+
+.calls .table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;                /* sideways at half-screen, downward always */
 }
 
-#status {
-  display: flex;
-  gap: 1.5em;
-  padding: 0.3em 0.75em;
-  color: var(--muted);
-  border-bottom: 1px solid var(--line);
-}
-
-table {
+.calls table {
   width: 100%;
   border-collapse: collapse;
 }
 
-thead th {
+.calls thead th {
   position: sticky;
   top: 0;
-  background: #fff;
+  background: var(--bg);
   text-align: left;
   font-weight: 600;
-  padding: 0.3em 0.6em;
+  padding: var(--sp-1) var(--sp-2);
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
 
-td {
-  padding: 0.15em 0.6em;
-  border-bottom: 1px solid #f0f0f0;
+.calls td {
+  padding: 2px var(--sp-2);
+  border-bottom: 1px solid var(--panel);
   vertical-align: top;
   white-space: nowrap;
 }
 
-td.path {
+.calls td.path {
   max-width: 30em;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-td.session {
+.calls td.session {
   cursor: pointer;
   text-decoration: underline dotted;
 }
-
-td.time,
-td.dur,
-td.bytes {
-  color: var(--muted);
+.calls.fixed td.session {
+  cursor: default;
+  text-decoration: none;
 }
 
-tr.deny {
-  background: var(--deny-bg);
-}
+.calls td.time, .calls td.dur, .calls td.bytes { color: var(--muted); }
 
-tr.deny td.decision,
-tr.deny td.status {
-  color: var(--deny-fg);
-}
+.calls tr.deny { background: var(--deny-bg); }
+.calls tr.deny td.decision, .calls tr.deny td.status { color: var(--deny); }
 
-tr.pending {
-  opacity: 0.6;
-}
+.calls tr.pending { opacity: 0.55; }
 
-tr.tunnel td.status {
-  color: var(--muted);
-  font-style: italic;
-}
-
-.badge {
-  display: inline-block;
-  padding: 0 0.35em;
-  margin-right: 0.35em;
-  border: 1px solid #c3c9e0;
-  border-radius: 3px;
-  background: var(--badge-bg);
-}
+.calls tr.tunnel td.status { color: var(--muted); font-style: italic; }

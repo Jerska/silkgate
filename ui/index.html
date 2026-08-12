@@ -3,51 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>silkgate — audit</title>
+  <title>silkgate</title>
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
-  <header id="toolbar">
-    <label>session
-      <select id="f-session">
-        <option value="">all</option>
-        <option value="null">(unattributed)</option>
-      </select>
-    </label>
-    <label>decision
-      <select id="f-decision">
-        <option value="">all</option>
-        <option value="allow">allow</option>
-        <option value="deny">deny</option>
-      </select>
-    </label>
-    <label>method <input id="f-method" size="8" placeholder="GET"></label>
-    <label>host <input id="f-host" size="20" placeholder="substring"></label>
-    <label>window
-      <select id="f-window">
-        <option value="all">all</option>
-        <option value="15m">15m</option>
-        <option value="1h">1h</option>
-        <option value="24h">24h</option>
-      </select>
-    </label>
-    <label><input type="checkbox" id="f-follow" checked> follow</label>
-    <button id="f-clear" type="button">clear</button>
-  </header>
-  <div id="status">
+  <header id="topbar">
+    <span id="brand">silkgate</span>
+    <nav id="nav">
+      <a id="nav-overview" href="#/">overview</a>
+      <a id="nav-traffic" href="#/traffic">traffic</a>
+    </nav>
     <span id="proxy-state">proxy: …</span>
-    <span id="row-count"></span>
-    <span id="stream-state"></span>
-  </div>
-  <table>
-    <thead>
-      <tr>
-        <th>TIME</th><th>SESSION</th><th>DECISION</th><th>METHOD</th><th>HOST</th>
-        <th>PATH</th><th>STATUS</th><th>DUR</th><th>BYTES</th><th>ACTIONS</th>
-      </tr>
-    </thead>
-    <tbody id="rows"></tbody>
-  </table>
+    <span id="stream-state" title="the live event stream">…</span>
+  </header>
+  <main id="view"></main>
 </body>
 </html>
