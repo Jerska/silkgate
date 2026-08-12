@@ -369,12 +369,13 @@ leave the host. `--no-settings` skips the projection.
   from before `--branch` still works: `--with git`, clone inside the guest, then on the
   host `git fetch <dir> branch:branch`. Never run git in a directory a guest wrote — the
   hook risk applies in full.
-- A launch started in a detached background shell must close stdin: append `</dev/null`
-  to the `silkgate` invocation. `msb exec` streams stdin to the guest and waits for EOF,
-  and a detached shell hands it a pipe that never closes. The Tier-1 probe then times
-  out (`msb exec did not return within 15s`) on every attempt while the guest is
-  healthy. Silkgate then refuses the unproven session — a clean teardown, exit 1,
-  nothing leaks. A foreground launch needs nothing.
+- A backgrounded launch needs no stdin ritual on a current checkout: silkgate's own
+  probe and harvest execs close their stdin (`test/test_tier1_probe.py` pins it). On
+  a checkout older than 2026-08-13, append `</dev/null` to the invocation. There,
+  `msb exec` inherits the caller's stdin and waits for EOF, and a detached shell's
+  pipe never closes, so the Tier-1 probe times out (`msb exec did not return within
+  15s`) while the guest is healthy and the session is refused — a clean teardown,
+  exit 1, nothing leaks.
 - An exit of 137 with one bare `Killed` line means the kernel inside the VM ended the
   guest command, most often the OOM killer. Give the guest more memory and rerun. A
   `--branch` teardown still harvests: the commits survive, and only an unwritten
