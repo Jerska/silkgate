@@ -57,6 +57,7 @@ MITM_CA = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
 SILK_DIR = Path.home() / ".silkgate"
 LOG_DIR = SILK_DIR / "logs"
 SESSIONS_DIR = SILK_DIR / "sessions"
+ARCHIVE_DIR = SILK_DIR / "archive"            # ended sessions, one dir per sid
 CA_DIR = SILK_DIR / "ca"                      # public MITM cert only, never the key
 DOCKER_CFG_DIR = SILK_DIR / "docker"          # our own DOCKER_CONFIG — see docker_env()
 GUEST_CONTEXT = "/silkgate/CONTEXT.md"        # what the guest is told about its sandbox
@@ -604,6 +605,14 @@ def _wait_proxy_ready(proc, ports, log_path):
 LOG_RETAIN_DAYS = 30
 LOG_RETAIN_COUNT = 20
 _LOG_PATTERNS = ("proxy-*.log", "proxy-*.rules", "standalone-*.rules", "events-*.jsonl")
+
+
+def _retain_days(var, default):
+    """One retention knob: the env override where it parses, the default otherwise."""
+    try:
+        return float(os.environ.get(var, "") or default)
+    except ValueError:
+        return default
 
 
 def _prune_logs():
@@ -1297,6 +1306,37 @@ def _read_journal(path):
     return records
 
 
+def _clean_abs_path(value):
+    """Whether a meta path is absolute and free of control characters — the bar it must
+    clear before reaching git argv, an rmtree decision, or a terminal."""
+    s = str(value)
+    return s.startswith("/") and not any(ord(c) < 0x20 or ord(c) == 0x7f for c in s)
+
+
+def _check_meta_fields(meta):
+    """Why this meta.json's fields cannot be used, or None — shared by the live registry
+    and the archive, because archived metas reach git argv too (wave 2 reads them), so
+    they are held to read_meta's bar. Every field is optional on read; only a present
+    field with a bad value refuses."""
+    sandbox = meta.get("sandbox")
+    if sandbox is not None and not _SANDBOX_RE.fullmatch(str(sandbox)):
+        return f"its meta.json names sandbox {sandbox!r}"
+    if meta.get("branch") is not None:
+        # Branch metas add git argv (branch, base) and an rmtree decision (repo_root via
+        # _reap_derived_workspace) — same refusal as sandbox above for a planted meta.
+        branch, base = str(meta["branch"]), str(meta.get("base", ""))
+        if not _BRANCH_RE.fullmatch(branch) or ".." in branch or not _BASE_RE.fullmatch(base):
+            return f"its meta.json names branch {branch!r}"
+    elif meta.get("checkout") is not None:
+        # A checkout meta carries base into git argv the same way a branch one does.
+        if not _BASE_RE.fullmatch(str(meta.get("base", ""))):
+            return f"its meta.json names base {meta.get('base')!r}"
+    for field in ("git_dir", "workspace"):
+        if meta.get(field) is not None and not _clean_abs_path(meta[field]):
+            return f"its meta.json has invalid {field} field"
+    return None
+
+
 def read_meta(name):
     """One session's meta.json, or None when there is no such session.
 
@@ -1312,15 +1352,9 @@ def read_meta(name):
         return None
     if meta.get("name") != name:
         die(f"session {name!r}: its meta.json names session {meta.get('name')!r} — refusing it")
-    sandbox = meta.get("sandbox")
-    if sandbox is not None and not _SANDBOX_RE.fullmatch(str(sandbox)):
-        die(f"session {name!r}: its meta.json names sandbox {sandbox!r} — refusing it")
-    if meta.get("branch") is not None:
-        # Branch metas add git argv (branch, base) and an rmtree decision (repo_root via
-        # _reap_derived_workspace) — same refusal as sandbox above for a planted meta.
-        branch, base = str(meta["branch"]), str(meta.get("base", ""))
-        if not _BRANCH_RE.fullmatch(branch) or ".." in branch or not _BASE_RE.fullmatch(base):
-            die(f"session {name!r}: its meta.json names branch {branch!r} — refusing it")
+    bad = _check_meta_fields(meta)
+    if bad:
+        die(f"session {name!r}: {bad} — refusing it")
     return meta
 
 
@@ -1332,6 +1366,42 @@ def list_metas():
         if d.name.startswith(".") or not _name_ok(d.name):   # not something silkgate created
             continue
         m = read_meta(d.name)
+        if m:
+            metas.append(m)
+    return metas
+
+
+def read_archived_meta(sid):
+    """One archived session's meta.json, or None when no archive holds that sid.
+
+    The archive is read with read_meta's suspicion: the sid is a path component of
+    ARCHIVE_DIR, the meta must name the sid of the directory it was found in, and every
+    field check read_meta applies holds here too — archived metas reach git argv in
+    wave 2, so a planted one gets the same refusal a planted live one does."""
+    if not _SID_RE.fullmatch(sid or ""):
+        die(f"invalid archive sid {sid!r}")
+    meta = _read_json(ARCHIVE_DIR / sid / "meta.json")
+    if meta is None:
+        return None
+    if meta.get("sid") != sid:
+        die(f"archived session {sid!r}: its meta.json names sid {meta.get('sid')!r} — "
+            "refusing it")
+    bad = _check_meta_fields(meta)
+    if bad:
+        die(f"archived session {sid!r}: {bad} — refusing it")
+    return meta
+
+
+def list_archived_metas():
+    """Every archived session's meta, oldest first — a sid opens with its UTC stamp, so
+    the plain name sort is chronological."""
+    if not ARCHIVE_DIR.is_dir():
+        return []
+    metas = []
+    for d in sorted(ARCHIVE_DIR.iterdir()):
+        if not _SID_RE.fullmatch(d.name):            # not something silkgate archived
+            continue
+        m = read_archived_meta(d.name)
         if m:
             metas.append(m)
     return metas
@@ -2284,12 +2354,77 @@ def _remove_sandbox(sandbox):
     return not any(line.split()[:1] == [sandbox] for line in listed.stdout.splitlines()[1:])
 
 
-def _teardown_session(meta):
+# What a session's archive keeps of the guest's captured output: the last stretch of it,
+# bounded twice (lines asked of msb, bytes written) so a chatty guest cannot balloon its
+# own archive.
+_SNAPSHOT_TAIL_LINES = 5000
+_SNAPSHOT_MAX_BYTES = 1 << 20
+
+
+def _snapshot_output(sandbox, sdir):
+    """Best-effort tail of the guest's output into the session dir, pre-archive.
+    Fail-open like all bookkeeping: a guest whose log can no longer be read must not
+    block its own teardown."""
+    lines, err = _run_msb_logs(sandbox, tail_n=_SNAPSHOT_TAIL_LINES)
+    if err is not None:
+        say(f"warning: no guest-output snapshot for {sandbox}: {err}")
+        return
+    data = ("\n".join(lines) + "\n").encode("utf-8", "replace") if lines else b""
+    try:
+        (sdir / "output.log").write_bytes(data[-_SNAPSHOT_MAX_BYTES:])
+    except OSError as e:
+        say(f"warning: could not write the guest-output snapshot: {e}")
+
+
+# Retention for ~/.silkgate/archive, favouring keeping like the audit logs above: an
+# archived session goes only when BOTH older than the age AND beyond the newest
+# ARCHIVE_RETAIN_COUNT, every removal is announced, and SILKGATE_ARCHIVE_RETAIN_DAYS=0
+# (or less) keeps everything.
+ARCHIVE_RETAIN_DAYS = 30
+ARCHIVE_RETAIN_COUNT = 50
+
+
+def _prune_archive():
+    """Apply the archive retention policy above; runs where archives are created."""
+    days = _retain_days("SILKGATE_ARCHIVE_RETAIN_DAYS", ARCHIVE_RETAIN_DAYS)
+    if days <= 0:
+        return
+    cutoff = time.time() - days * 86400
+    stamped = []
+    try:
+        entries = list(ARCHIVE_DIR.iterdir())
+    except OSError:
+        return
+    for d in entries:
+        if not _SID_RE.fullmatch(d.name):            # not something silkgate archived
+            continue
+        try:
+            stamped.append((d.stat().st_mtime, d))
+        except OSError:                              # vanished mid-scan: already gone
+            continue
+    stamped.sort(reverse=True)
+    for mtime, d in stamped[ARCHIVE_RETAIN_COUNT:]:
+        if mtime >= cutoff:
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        say(f"pruned archived session {d.name} — older than {days:g}d and beyond the "
+            f"newest {ARCHIVE_RETAIN_COUNT} (SILKGATE_ARCHIVE_RETAIN_DAYS=0 keeps "
+            "everything)")
+
+
+def _teardown_session(meta, archive=True):
     """Stop and rm the guest, and only then free the session dir and its port — in that
     order, because while a guest that can reach the port may still exist, the port must
     stay reserved, or the next session inherits a guest policed by the wrong ruleset. A
     sandbox that cannot be removed therefore keeps its session, port and all, and this
     dies so no caller mistakes it for gone.
+
+    With `archive` (the default) the session dir is not deleted but finished and moved
+    whole to ARCHIVE_DIR/<sid>: a last guest-output snapshot while the guest still
+    exists, the `down` journal record, an "ended" stamp in meta, then one atomic rename
+    (same filesystem). All of that is bookkeeping — fail-open, warn and continue — while
+    the sandbox removal keeps its fail-closed die. archive=False is for a session never
+    handed over (`up`'s unwind), which is removed whole as it always was.
 
     Ends by stopping the shared proxy if the registry is now empty. Every path that
     removes a session runs through here, so the proxy's lifetime follows the registry
@@ -2298,14 +2433,34 @@ def _teardown_session(meta):
     considered it its own to stop."""
     name = meta.get("name")
     sandbox = meta.get("sandbox") or (sandbox_name(name) if name else None)
+    sdir = session_dir(name) if name else None
+    archive = archive and sdir is not None and sdir.is_dir()
+    if archive and sandbox:
+        _snapshot_output(sandbox, sdir)              # the guest's log dies with the VM
     if sandbox and not _remove_sandbox(sandbox):
         die(f"msb rm {sandbox} failed — session {name!r} kept, its proxy port still "
             f"reserved; remove the sandbox manually, then `silkgate down {name}`")
     if name:
         # The claim goes first, while meta.json still pins the port for pick_port; the
-        # rmtree is then what genuinely frees it.
+        # rename (or rmtree) is then what genuinely frees it.
         _release_port(name, meta.get("port"))
-        shutil.rmtree(session_dir(name), ignore_errors=True)
+        if archive:
+            _journal(name, "down")
+            sid = meta.get("sid") or _new_sid(name)  # pre-feature metas: minted here
+            try:
+                _write_json(sdir / "meta.json", {**meta, "sid": sid, "ended": now_iso()})
+            except OSError as e:
+                say(f"warning: could not stamp 'ended' into {name!r}'s meta: {e}")
+            try:
+                ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+                sdir.rename(ARCHIVE_DIR / sid)
+            except OSError as e:
+                say(f"warning: could not archive session {name!r} ({e}) — removing it "
+                    "instead")
+                shutil.rmtree(sdir, ignore_errors=True)
+            _prune_archive()
+        else:
+            shutil.rmtree(sdir, ignore_errors=True)
     _maybe_stop_proxy()
 
 
@@ -2954,8 +3109,10 @@ def cmd_up(args):
         # cannot leave it half-removed.
         with _deferred_interrupts():
             if provisioned:
+                # A session never handed over leaves nothing worth archiving.
                 _teardown_session(read_meta(name) or
-                                  {"name": name, "sandbox": sandbox_name(name)})
+                                  {"name": name, "sandbox": sandbox_name(name)},
+                                  archive=False)
             else:
                 _release_port(name)     # a claim pick_port made, however far it got
             if spec and ws:
