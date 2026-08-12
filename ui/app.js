@@ -251,12 +251,19 @@ async function refreshSessions() {
 async function refreshMetrics() {
   let data;
   try {
-    data = await fetchJSON("/api/metrics");
+    const resp = await fetch("/api/metrics");
+    if (resp.status === 404) {
+      // Not available yet (no backend): stop asking while this mount lasts —
+      // the next metrics-consuming mount probes again.
+      ctx.metrics = null;
+      stopMetricsPoll();
+      return;
+    }
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    data = await resp.json();
   } catch {
-    // Not available yet (the backend lands in parallel): stop asking while
-    // this mount lasts — the next metrics-consuming mount probes again.
-    ctx.metrics = null;
-    stopMetricsPoll();
+    // A transient failure (ui server restart, one bad response): keep the
+    // last payload on screen and let the next interval retry.
     return;
   }
   ctx.metrics = data;
