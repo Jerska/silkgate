@@ -574,9 +574,23 @@ _CAPTURE_BLOCK_MAX = 256 * 1024      # stored chars per content block; over = st
                                      # appending, keep counting, mark truncated — long
                                      # completions are legitimate, so capture degrades
                                      # instead of dying
-_CAPTURE_TOTAL_MAX = 2 * 1024 * 1024 # bytes fed per SSE response; over = the decoder
-                                     # dies — an unbounded stream must not grow open-
-                                     # block state forever
+_CAPTURE_TOTAL_MAX = 2 * 1024 * 1024 # decoded content chars per SSE turn (text, tool
+                                     # JSON and thinking alike); over = the decoder
+                                     # dies, flushed first — measured on content, not
+                                     # wire bytes, so SSE and stream=false agree on
+                                     # "too long" no matter how finely the upstream
+                                     # slices its deltas
+_CAPTURE_PREAMBLE_MAX = 2 * 1024 * 1024 # wire bytes before message_start; over = the
+                                     # decoder dies — a stream that long with no
+                                     # message is not the grammar we parse
+_CAPTURE_EVENT_MAX = 64 * 1024       # accumulated data: chars pending for one SSE
+                                     # event; over = the decoder dies — a real event
+                                     # is a few KiB, and an endless data: run must not
+                                     # grow the pending-event list forever
+_CAPTURE_BLOCKS_MAX = 64             # concurrently open blocks; over = the decoder
+                                     # dies — the API opens a handful and closes each,
+                                     # and a stream that only opens blocks is growing
+                                     # state, not content
 _CAPTURE_JSON_MAX = 2 * 1024 * 1024  # buffered stream=false body; over = the decoder
                                      # dies — this is the one place capture buffers,
                                      # so it is the one place a cap guards memory
@@ -655,9 +669,12 @@ class _AnthropicCapture:
             raise ValueError(f"unknown capture mode: {mode!r}")
         self._sse = mode == "sse"
         self._buf = b""                  # partial SSE line / the whole stream=false body
-        self._total = 0                  # bytes fed, for the caps
+        self._total = 0                  # bytes fed, for the preamble and JSON caps
+        self._decoded = 0                # content chars decoded, for the total cap
+        self._started = False            # a message_start arrived; the preamble is over
         self._event = None               # pending SSE event type
         self._data = []                  # accumulated data: lines for the pending event
+        self._data_len = 0               # their length, for the event cap
         self._blocks = {}                # index -> open block accumulator
         self._model = None
         self._message_id = None
@@ -692,6 +709,12 @@ class _AnthropicCapture:
                 block["parts"].append(text)
                 block["stored"] += len(text)
         block["chars"] += len(text)
+
+    def _count(self, n):
+        """Every decoded content char, stored or not, spends the turn's budget."""
+        self._decoded += n
+        if self._decoded > _CAPTURE_TOTAL_MAX:
+            raise ValueError("decoded content exceeds _CAPTURE_TOTAL_MAX")
 
     def _close_block(self, index, block):
         """The content_block record (plus sightings), scanned and redacted here —
@@ -730,8 +753,8 @@ class _AnthropicCapture:
             if self._total > _CAPTURE_JSON_MAX:
                 raise ValueError("stream=false body exceeds _CAPTURE_JSON_MAX")
             return []
-        if self._total > _CAPTURE_TOTAL_MAX:
-            raise ValueError("SSE stream exceeds _CAPTURE_TOTAL_MAX")
+        if not self._started and self._total > _CAPTURE_PREAMBLE_MAX:
+            raise ValueError("SSE preamble exceeds _CAPTURE_PREAMBLE_MAX")
         out = []
         while True:
             nl = self._buf.find(b"\n")
@@ -777,17 +800,21 @@ class _AnthropicCapture:
             self._event = value
         elif field == "data":
             self._data.append(value)
+            self._data_len += len(value)
+            if self._data_len > _CAPTURE_EVENT_MAX:
+                raise ValueError("SSE event exceeds _CAPTURE_EVENT_MAX")
         # unknown fields (id:, retry:) are ignored, per the grammar
         return []
 
     def _dispatch(self):
         event, data = self._event, "\n".join(self._data)
-        self._event, self._data = None, []
+        self._event, self._data, self._data_len = None, [], 0
         if not data or self._ended:
             return []
         payload = json.loads(data)
         etype = event or payload.get("type")
         if etype == "message_start":
+            self._started = True
             msg = payload["message"]
             self._model = msg.get("model")
             self._message_id = msg.get("id")
@@ -798,22 +825,31 @@ class _AnthropicCapture:
             block = payload["content_block"]
             acc = self._new_block(block.get("type"), tool_name=block.get("name"),
                                   tool_id=block.get("id"))
+            self._blocks[payload["index"]] = acc
+            if len(self._blocks) > _CAPTURE_BLOCKS_MAX:
+                raise ValueError("open blocks exceed _CAPTURE_BLOCKS_MAX")
             if acc["type"] == "text" and block.get("text"):
                 self._append(acc, block["text"])
+                self._count(len(block["text"]))
             elif acc["type"] == "thinking" and block.get("thinking"):
                 acc["chars"] += len(block["thinking"])
-            self._blocks[payload["index"]] = acc
+                self._count(len(block["thinking"]))
             return []
         if etype == "content_block_delta":
             acc = self._blocks[payload["index"]]
             delta = payload["delta"]
             dtype = delta.get("type")
+            # Appending precedes counting, so a flush after the fatal delta still
+            # holds every char that fit the budget.
             if dtype == "text_delta":
                 self._append(acc, delta["text"])
+                self._count(len(delta["text"]))
             elif dtype == "input_json_delta":
                 self._append(acc, delta["partial_json"])
+                self._count(len(delta["partial_json"]))
             elif dtype == "thinking_delta":
                 acc["chars"] += len(delta["thinking"])   # chars only, never the text
+                self._count(len(delta["thinking"]))
             # unknown delta types (signature_delta among them) are ignored
             return []
         if etype == "content_block_stop":
@@ -960,10 +996,19 @@ def responseheaders(flow: http.HTTPFlow) -> None:
                         _capture_write(_flow, _state, rec)
                 except Exception as e:
                     # The decoder is dead; the flow is not. Pop it so later chunks
-                    # skip it, say why once, and keep counting.
+                    # skip it, say why once, and keep counting. What it already
+                    # parsed — open blocks, the model, the token counts — is
+                    # flushed rather than discarded with it: the turns that die
+                    # here are the long ones, the last a dashboard can spare.
                     _flow.metadata.pop("capture", None)
                     _capture_write(_flow, _state, {"kind": "capture_error", "reason":
                                                    f"decoder died: {e.__class__.__name__}"})
+                    try:
+                        for rec in decoder.flush():
+                            _capture_write(_flow, _state, rec)
+                        _flow.metadata["capture_summary"] = decoder.summary()
+                    except Exception:
+                        pass
             return chunk
 
         # The stream assignment comes before decoder attachment: a capture setup bug
@@ -1026,6 +1071,15 @@ def _conclude(flow, reason=""):
             extras.update(decoder.summary())
         except Exception:
             pass
+    else:
+        # A decoder the tap killed mid-stream left its summary behind, so the
+        # enrichment survives the death that cost the transcript.
+        summary = flow.metadata.pop("capture_summary", None)
+        if summary:
+            try:
+                extras.update(summary)
+            except Exception:
+                pass
     start = getattr(flow.request, "timestamp_start", None)
     if start is not None and state.get("first_chunk_ts") is not None:
         extras["ttfb_ms"] = int(round((state["first_chunk_ts"] - start) * 1000))

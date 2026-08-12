@@ -1212,5 +1212,107 @@ class IdentityEncoding(CaptureCase):
                          "the rewrite is for captured flows only")
 
 
+def sse_event(name, payload):
+    return sse([(name, payload)])
+
+
+def text_delta(index, text):
+    return sse_event("content_block_delta",
+                     {"type": "content_block_delta", "index": index,
+                      "delta": {"type": "text_delta", "text": text}})
+
+
+def block_start(index, btype="text", **fields):
+    return sse_event("content_block_start",
+                     {"type": "content_block_start", "index": index,
+                      "content_block": {"type": btype, **fields}})
+
+
+class TotalCapSalvage(CaptureCase):
+    """r2 finding 3: a turn that dies at the total cap used to lose the model, the
+    token counts and the already-parsed block — the long turns, exactly the ones a
+    cost dashboard needs. The tap now flushes the popped decoder first."""
+
+    def test_a_turn_dying_at_the_total_cap_keeps_model_and_tokens(self):
+        piece = "x" * 48_000
+        events = turn_events()
+        f = self.captured_request()
+        chunks = [sse(events[:2]),                     # message_start, block 0 opens
+                  sse([events[4]])]                    # message_delta: output_tokens 42
+        budget = proxy_addon._CAPTURE_TOTAL_MAX
+        fatal = budget // len(piece) + 1               # one delta past the budget
+        chunks += [text_delta(0, piece) for _ in range(fatal)]
+        self.respond(f, chunks)
+
+        records = self.capture_records()
+        self.assertEqual([r["kind"] for r in records],
+                         ["turn_start", "capture_error", "content_block", "turn_end"])
+        turn_start, err, block, turn_end = records
+        self.assertEqual(turn_start["model"], CAPTURE_MODEL)
+        self.assertIn("decoder died: ValueError", err["reason"])
+        self.assertTrue(block["truncated"])
+        self.assertEqual(block["chars"], fatal * len(piece), "chars is the true length")
+        self.assertEqual(len(block["text"]), proxy_addon._CAPTURE_BLOCK_MAX)
+        self.assertEqual(turn_end["output_tokens"], 42)
+        self.assertTrue(turn_end["incomplete"])
+        resp = self.audit_response()
+        self.assertEqual(resp["model"], CAPTURE_MODEL,
+                         "the summary survives the decoder's death")
+        self.assertEqual(resp["tokens_in"], 25)
+        self.assertEqual(resp["tokens_out"], 42)
+
+
+class DecodedCharBudget(AddonCase):
+    """The total cap meters decoded content, not wire bytes, so the SSE and JSON
+    modes agree on "too long" whatever the upstream's delta granularity — plus the
+    two growth paths the old wire cap bounded implicitly, now bounded by name."""
+
+    def start(self, *extra):
+        d = proxy_addon._AnthropicCapture("sse")
+        for chunk in (sse(turn_events()[:1]),) + extra:
+            d.feed(chunk)
+        return d
+
+    def test_fine_grained_deltas_never_hit_the_total_cap(self):
+        """4-char deltas amplify ~30x on the wire; 100 KiB of content used to die
+        at the 2 MiB wire cap and must now decode to a complete turn."""
+        d = self.start(sse(turn_events()[1:2]))
+        piece = text_delta(0, "abcd")
+        wire = len(sse(turn_events()[:2]))
+        for _ in range(25_000):                        # ~3 MiB of wire, 100_000 chars
+            d.feed(piece)
+            wire += len(piece)
+        self.assertGreater(wire, 2 * 1024 * 1024, "the premise: over the old wire cap")
+        records = []
+        for name, payload in turn_events()[3:]:
+            records.extend(d.feed(sse_event(name, payload)))
+        self.assertEqual([r["kind"] for r in records], ["content_block", "turn_end"])
+        self.assertEqual(records[0]["chars"], 100_000)
+        self.assertEqual(records[1], {"kind": "turn_end", "stop_reason": "end_turn",
+                                      "output_tokens": 42})
+
+    def test_keepalives_after_message_start_never_kill(self):
+        """The preamble cap ends at message_start: a slow turn's keepalive volume
+        is not content and must not spend the turn's budget."""
+        d = self.start()
+        filler = b": keepalive\n" * 100_000
+        for _ in range(3):                             # 3.6 MB, over the preamble cap
+            d.feed(filler)
+        self.assertEqual(d.summary()["model"], CAPTURE_MODEL)
+
+    def test_an_endless_data_run_dies_at_the_event_cap(self):
+        d = self.start()
+        line = b"data: " + b"x" * 32_768 + b"\n"
+        with self.assertRaises(ValueError):
+            for _ in range(3):                         # 96 KiB pending for one event
+                d.feed(line)
+
+    def test_a_stream_that_only_opens_blocks_dies(self):
+        d = self.start()
+        with self.assertRaises(ValueError):
+            for i in range(proxy_addon._CAPTURE_BLOCKS_MAX + 1):
+                d.feed(block_start(i, text=""))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
