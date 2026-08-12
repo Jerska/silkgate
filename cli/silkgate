@@ -4049,7 +4049,14 @@ def _metrics_snapshot():
     cost one msb subprocess per TTL, not one each — the lock makes the racers wait
     on the one runner and then read its answer. An empty registry skips the
     subprocess outright, and a failed run is cached like a good one, so a hung msb
-    is not re-poked every poll."""
+    is not re-poked every poll.
+
+    Each row is msb's own entry keyed to the session, with one honest rename: msb's
+    memory gauge is the VMM process's host-side RSS — real memory the sandbox costs,
+    not guest usage, and legitimately above the guest cap at times — so it is served
+    as `memory_rss_bytes`, a name no consumer can mistake for a fraction of the cap.
+    `memory_limit_bytes` stays its own independent field for the UI to render or
+    not; the endpoint never frames the two as a ratio."""
     with _METRICS_LOCK:
         now = time.monotonic()
         if (_METRICS_CACHE["at"] is not None
@@ -4069,8 +4076,10 @@ def _metrics_snapshot():
             for m in metas:
                 entry = by_sandbox.get(m["sandbox"])
                 if entry is not None:
-                    metrics.append({"session": m["name"],
-                                    **{k: v for k, v in entry.items() if k != "name"}})
+                    row = {k: v for k, v in entry.items() if k != "name"}
+                    if "memory_bytes" in row:
+                        row["memory_rss_bytes"] = row.pop("memory_bytes")
+                    metrics.append({"session": m["name"], **row})
         payload = {"sampled": now_iso(), "ttl": UI_METRICS_TTL, "metrics": metrics}
         _METRICS_CACHE.update(at=now, payload=payload)
         return payload

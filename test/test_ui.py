@@ -887,6 +887,21 @@ class UiMetricsTest(UiServerTest):
         self.assertEqual(got["metrics"], [])
         self.assertEqual(len(calls), 1, "a hung msb is not re-poked inside the TTL")
 
+    def test_memory_gauge_is_served_as_rss_beside_an_untouched_limit(self):
+        """msb's memory gauge is the VMM process's host RSS, which can honestly read
+        above the guest cap — so the row names it memory_rss_bytes and keeps the
+        limit a separate field, never a denominator."""
+        self.write_session("s1")
+        fake = [{"name": "sg-s1", "cpu_percent": 3, "memory_bytes": 880_000_000,
+                 "memory_limit_bytes": 512 << 20, "uptime_secs": 60}]
+        with mock.patch.object(MOD, "_run_msb_metrics", lambda: fake):
+            _, got = self.get_json("/api/metrics")
+        row = got["metrics"][0]
+        self.assertEqual(row["memory_rss_bytes"], 880_000_000)
+        self.assertNotIn("memory_bytes", row, "the ambiguous name must not survive")
+        self.assertEqual(row["memory_limit_bytes"], 512 << 20)
+        self.assertEqual(row["cpu_percent"], 3, "other gauges pass through unchanged")
+
 
 # -- /api/session/<ident>/diff ------------------------------------------------------------
 
