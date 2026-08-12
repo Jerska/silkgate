@@ -7,7 +7,7 @@
 
 // el("div", { class: "card", title: t }, "text", childNode, …) — attributes by
 // assignment for the safe common ones, setAttribute for the rest; string
-// children become text nodes. There is no path from a value to innerHTML.
+// children become text nodes. There is no path from a value to parsed markup.
 export function el(tag, attrs, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
