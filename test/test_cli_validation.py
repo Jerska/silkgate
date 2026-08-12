@@ -1267,6 +1267,55 @@ class TestHarvestWiring(CliCase):
         self.assertEqual(meta["workspace"], str(self.tmp / "ws"))
         self.assertIn("teardown", calls)
 
+    def test_run_harvests_before_teardown_and_reaps_on_success(self):
+        # Harvest first: the guest's gitdir dies with the VM at teardown.
+        code, calls, meta = self.drive_run(harvest_ok=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ["harvest", "teardown", "reap"])
+        self.assertEqual(meta["branch"], "nb")
+
+    def test_run_exits_1_and_keeps_the_workspace_when_harvest_fails(self):
+        # run_guest returned 0; the failed banking must not let that green run mask it.
+        code, calls, _ = self.drive_run(harvest_ok=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, ["harvest", "teardown"])
+
+    def drive_down(self, *, harvest_ok):
+        """`down NAME` with the same seams -> (SystemExit code or None, ordered calls)."""
+        calls = []
+        meta = {"name": "d1", "sandbox": "sg-d1", "workspace": "/w", **self.FAKE_SPEC}
+
+        def harvest(m):
+            calls.append("harvest")
+            return harvest_ok
+
+        with mock.patch.object(sys, "argv", ["silkgate", "down", "d1"]), \
+                self.no_preflight(), \
+                mock.patch.object(sg, "read_meta", lambda name: dict(meta)), \
+                mock.patch.object(sg, "_harvest_branch", harvest), \
+                mock.patch.object(sg, "_teardown_session",
+                                  lambda m: calls.append("teardown")), \
+                mock.patch.object(sg, "_reap_derived_workspace",
+                                  lambda m: calls.append("reap")), \
+                mock.patch.object(sg, "list_metas", lambda: []), \
+                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(sg, "say", lambda *a, **k: None):
+            try:
+                sg.main()
+            except SystemExit as caught:
+                return caught.code, calls
+        return None, calls
+
+    def test_down_reaps_and_exits_normally_when_harvest_banks(self):
+        code, calls = self.drive_down(harvest_ok=True)
+        self.assertIsNone(code)
+        self.assertEqual(calls, ["harvest", "teardown", "reap"])
+
+    def test_down_exits_1_and_keeps_the_workspace_when_harvest_fails(self):
+        code, calls = self.drive_down(harvest_ok=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, ["harvest", "teardown"])
+
 
 class TestCheckoutSessions(GitRepoCase):
     """--checkout [REF]: a disposable, guest-local checkout of the enclosing repo, with
