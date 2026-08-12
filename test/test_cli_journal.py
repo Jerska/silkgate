@@ -546,7 +546,7 @@ class TestMetaAdditions(JournalCase):
         seen = {}
 
         def spy(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
-                context=None, context_paths=(), brief=None):
+                context=None, context_paths=(), memory=None, cpus=None, brief=None):
             seen.update(meta=meta_extra, brief=brief, rules_text=rules_text)
             raise SystemExit(42)
 
@@ -749,7 +749,8 @@ class TestExecBrief(JournalCase):
         landed = []
 
         def fake_provision(name, image, port, rules_text, ruleset, mounts, ws, env,
-                           meta_extra, context=None, context_paths=(), brief=None):
+                           meta_extra, context=None, context_paths=(), memory=None,
+                           cpus=None, brief=None):
             self.assertIsNone(brief, "run's brief never rides the provision copy")
             self.write_session(name, **meta_extra)
 

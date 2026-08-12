@@ -45,9 +45,9 @@ policy, so audit-log denies are the staleness signal.
 |---|---|---|
 | The Claude Code endpoint list: `/v1/messages` and `count_tokens`, `/v1/models`, the `claude_code` paths, `domain_info`, the Console oauth prefix | [`profiles/claude/rules.txt`](../profiles/claude/rules.txt) | Re-derive the list from fresh audit logs at the pinned version. Grep audit logs for denies on `api.anthropic.com` and `platform.claude.com`. |
 | `max_body=10m` on the two POSTed Anthropic paths, `64k` on oauth | `profiles/claude/rules.txt` | Grep audit logs for 413 answers. Request bodies grow with new tool shapes. |
-| GitHub smart-HTTP facts: the `?service=` requirement, protocol v2 with a v0 fallback, `max_body=1m` for negotiation | `profiles/git/rules.txt` | Clone and fetch a public repository through the profile, and assert zero denies and no 413. |
-| The GitHub content hosts `raw.githubusercontent.com` and `codeload.github.com` | `profiles/git/rules.txt` | Fetch a raw file and a tarball through the profile. |
-| GitHub LFS infrastructure by name (`lfs.github.com`, `github-cloud.*`), the no-redirect path forms, and the S3 501 on a doubled Authorization header | `cli/silkgate` (`--github-read` / `--github-write`) | Run a live LFS clone and push against a scratch repository, and assert zero denies. |
+| GitHub smart-HTTP facts: the `?service=` requirement, protocol v2 with a v0 fallback, `max_body=1m` for negotiation | [`profiles/github/rules.txt`](../profiles/github/rules.txt) | Clone and fetch a public repository through the profile, and assert zero denies and no 413. |
+| The GitHub content hosts `raw.githubusercontent.com` and `codeload.github.com` | `profiles/github/rules.txt` | Fetch a raw file and a tarball through the profile. |
+| GitHub LFS infrastructure by name (`lfs.github.com`, `github-cloud.*`), the no-redirect path forms, and the S3 501 on a doubled Authorization header | `profiles/github-read/rules.txt` and `profiles/github-write/rules.txt` | Run a live LFS clone and push against a scratch repository, and assert zero denies. |
 | npm needs only `registry.npmjs.org/**` GET | `profiles/node/rules.txt` | Install a package in a guest and grep the audit log for denies. |
 | pip needs only `pypi.org/simple/**` and `files.pythonhosted.org/**` GET | `profiles/python/rules.txt` | Install a package in a guest and grep the audit log for denies. |
 

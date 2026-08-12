@@ -46,9 +46,15 @@ SHARDS = {
     "oracles-rest": ["test_verify_oracles"],  # the module's remainder, ~5 s
     "lifecycle": ["test_proxy_lifecycle"],  # the module's remainder, ~4 s
     "rest-validation": ["test_cli_validation"],  # 160 tests, ~0.6 s
-    "rest-checks": ["test_addon", "test_verify_checks"],  # 155 tests, ~0.1 s
-    "rest-misc": [  # 126 tests, ~1.3 s
+    "rest-checks": [  # 194 tests, ~1.3 s
+        "test_addon",
+        "test_capture_decoder",
+        "test_capture_tap",
+        "test_verify_checks",
+    ],
+    "rest-misc": [  # 206 tests, ~1.3 s
         "test_cli_branch_ingest",
+        "test_cli_journal",
         "test_cli_logs",
         "test_relay",
         "test_scripts",
