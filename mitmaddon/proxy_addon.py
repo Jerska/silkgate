@@ -632,6 +632,37 @@ _SECRET_PATTERNS = [(name, re.compile(pattern)) for name, pattern in (
 # prefix: a real key that merely starts like a dummy must still be sighted.
 _SECRET_ALLOWLIST = frozenset({"sk-ant-DUMMY-replaced-by-egress-proxy"})
 
+# Every shape above needs one of these literals somewhere in its match, so _redact
+# skips a pattern's pass after one C-speed substring test — the passes run on the
+# event loop every session shares, and twenty regex scans of a full block cost ~50 ms
+# where twenty str finds cost well under one. (Folding the shapes into one alternation
+# measures SLOWER than the passes: the alternation forfeits each pattern's literal-
+# prefix fast path.) Absence of a literal proves absence of a match; presence just
+# runs the pass that would have run anyway, so redaction semantics cannot change.
+# A pattern with no entry here runs unconditionally — the default is correctness.
+_SECRET_TRIGGERS = {
+    "anthropic-api-key":       ("sk-ant-",),
+    "openai-api-key":          ("T3BlbkFJ",),
+    "github-pat":              ("ghp_",),
+    "github-oauth":            ("gho_",),
+    "github-app-token":        ("ghu_", "ghs_"),
+    "github-fine-grained-pat": ("github_pat_",),
+    "gitlab-pat":              ("glpat-",),
+    "aws-access-key-id":       ("AKIA",),
+    "slack-bot-token":         ("xoxb-",),
+    "slack-user-token":        ("xoxp-",),
+    "slack-webhook-url":       ("hooks.slack.com/services/",),
+    "stripe-live-key":         ("k_live_",),
+    "google-api-key":          ("AIza",),
+    "sendgrid-api-key":        ("SG.",),
+    "twilio-api-key":          ("SK",),
+    "npm-token":               ("npm_",),
+    "pypi-token":              ("pypi-AgEIcHlwaS5vcmc",),
+    "huggingface-token":       ("hf_",),
+    "private-key-pem":         ("-----BEGIN ",),
+    "jwt":                     ("eyJ",),
+}
+
 
 def _redact(text):
     """(text with secret spans replaced, names of the patterns that hit).
@@ -642,6 +673,9 @@ def _redact(text):
     """
     seen = []
     for name, pattern in _SECRET_PATTERNS:
+        triggers = _SECRET_TRIGGERS.get(name)
+        if triggers and not any(t in text for t in triggers):
+            continue
         replaced = pattern.sub(
             lambda m, _n=name: m.group(0) if m.group(0) in _SECRET_ALLOWLIST
             else f"[redacted:{_n}]", text)

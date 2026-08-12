@@ -1339,5 +1339,69 @@ class DecodedCharBudget(AddonCase):
                 d.feed(block_start(i, text=""))
 
 
+# One realistic token per pattern: if a trigger literal in _SECRET_TRIGGERS drifts
+# from its pattern, the skipped pass stops sighting and the loop below says which.
+SECRET_TOKENS = [
+    ("anthropic-api-key",       "sk-ant-api03-" + "a" * 24),
+    ("openai-api-key",          "sk-" + "a" * 20 + "T3BlbkFJ" + "b" * 20),
+    ("github-pat",              "ghp_" + "a" * 36),
+    ("github-oauth",            "gho_" + "a" * 36),
+    ("github-app-token",        "ghs_" + "a" * 36),
+    ("github-fine-grained-pat", "github_pat_" + "a" * 82),
+    ("gitlab-pat",              "glpat-" + "a" * 20),
+    ("aws-access-key-id",       "AKIA" + "B" * 16),
+    ("slack-bot-token",         "xoxb-1234567890-1234567890123-abcdef"),
+    ("slack-user-token",        "xoxp-1234567890-1234567890123-abcdef"),
+    ("slack-webhook-url",       "https://hooks.slack.com/services/T12345/B12345/"
+                                + "x" * 10),
+    ("stripe-live-key",         "rk_live_" + "a" * 16),
+    ("google-api-key",          "AIza" + "a" * 35),
+    ("sendgrid-api-key",        "SG." + "a" * 20 + "." + "b" * 20),
+    ("twilio-api-key",          "SK" + "0" * 32),
+    ("npm-token",               "npm_" + "a" * 36),
+    ("pypi-token",              "pypi-AgEIcHlwaS5vcmc" + "a" * 20),
+    ("huggingface-token",       "hf_" + "a" * 34),
+    ("private-key-pem",         "-----BEGIN OPENSSH PRIVATE KEY-----"),
+    ("jwt",                     "eyJ" + "a" * 10 + ".eyJ" + "b" * 10 + "." + "c" * 10),
+]
+
+
+class TriggeredRedaction(unittest.TestCase):
+    """r2 finding 14: twenty regex passes cost ~49 ms per full block on the loop
+    every session shares. Each pass now hides behind a substring test that proves
+    it cannot match; these pin that the gate never eats a sighting."""
+
+    def test_every_pattern_still_sights_through_its_trigger(self):
+        for name, token in SECRET_TOKENS:
+            with self.subTest(pattern=name):
+                redacted, seen = proxy_addon._redact(f"the value {token} leaked")
+                self.assertEqual(seen, [name])
+                self.assertNotIn(token, redacted)
+                self.assertIn(f"[redacted:{name}]", redacted)
+
+    def test_the_trigger_table_names_exactly_the_pattern_set(self):
+        """A pattern added or renamed without its trigger runs unscreened (safe,
+        slow); a stale trigger key is a typo this catches."""
+        self.assertEqual(set(proxy_addon._SECRET_TRIGGERS),
+                         {name for name, _ in proxy_addon._SECRET_PATTERNS})
+        self.assertEqual(len(SECRET_TOKENS), len(proxy_addon._SECRET_PATTERNS))
+
+    def test_several_patterns_in_one_block_all_sight_once(self):
+        pat, key = "ghp_" + "a" * 36, "AKIA" + "B" * 16
+        redacted, seen = proxy_addon._redact(f"pat {pat} key {key} again {pat}")
+        self.assertEqual(seen, ["github-pat", "aws-access-key-id"],
+                         "declaration order, one sighting per pattern")
+        self.assertNotIn(pat, redacted)
+        self.assertNotIn(key, redacted)
+        self.assertEqual(redacted.count("[redacted:github-pat]"), 2)
+
+    def test_the_allowlisted_dummy_neither_rewrites_nor_sights(self):
+        text = "dummy sk-ant-DUMMY-replaced-by-egress-proxy real sk-ant-" + "z" * 24
+        redacted, seen = proxy_addon._redact(text)
+        self.assertEqual(seen, ["anthropic-api-key"])
+        self.assertIn("sk-ant-DUMMY-replaced-by-egress-proxy", redacted)
+        self.assertNotIn("z" * 24, redacted)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
