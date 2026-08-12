@@ -97,8 +97,8 @@ percent-decodes once (`%2e%2e` becomes `..`), then resolves `.` and `..` with
 
 ## Options
 
-**Every option widens one dimension: methods, body size, query params, headers, or a
-credential.**
+**Every option widens one dimension — methods, body size, query params, headers, or a
+credential — except `capture`, which records instead.**
 
 | Option | Effect | Default |
 |---|---|---|
@@ -111,6 +111,7 @@ credential.**
 | `h:<name>=<value>` | forward the header only if its value equals `<value>` | — |
 | `h:<name>~<regex>` | forward the header only if `<regex>` fullmatches (no spaces — use `\s`) | — |
 | `inject_auth=<name>` | if the request already carries the header named in `SILKGATE_EGRESS_SECRET_<NAME>` (`header: value`), replace its value with the host-held secret — never added when absent | — |
+| `capture=<format>` | decode the response body and record it in the capture file (`anthropic` is the only format) | not captured |
 
 Two notes. Per-rule body content rules are deferred — only the `max_body` size exists.
 Option tokens are whitespace-split, so an option value cannot contain a space (use `\s` in

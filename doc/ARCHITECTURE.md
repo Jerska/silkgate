@@ -171,6 +171,87 @@ on proves which session sent it, below the guest. The proxy maps that port to th
 ruleset snapshot and fails closed on any gap. [PROXY.md](./PROXY.md) specifies the port
 pool, the control socket, the secrets flow, and the on-disk layout.
 
+## The capture trail
+
+**Capture is observability, never enforcement: a rule that opts in gets its response
+bodies decoded and recorded, and no capture failure can change a flow.** A
+`capture=<format>` option on a rule ([DSL.md](./DSL.md)) feeds a decoder from the proxy's
+response tap. The decoder writes `turn_start`, `content_block` and `turn_end` records to
+the file named by `SILKGATE_EGRESS_CAPTURE_FILE`, joined to the audit trail by flow id.
+The CLI stamps `X-Silkgate-Exec` on an exec's API traffic, and the proxy strips it at the
+boundary. Each captured turn therefore names the exec that sent it. Thinking blocks are
+recorded as lengths only. A secret match is stored redacted, with a `secret_sighting`
+record that names the pattern and never the value. Every capture failure is fail-open:
+the flow, its byte counts and its audit record are unchanged. A captured flow enriches
+the audit response record with model, token counts and stop reason, and every allowed
+flow carries `ttfb_ms`. Proof: `test/test_cli_journal.py` pins the capture-file wiring
+and its retention, and the addon's own tests pin the decoder.
+
+## The session archive
+
+**A session that silkgate hands over ends in the archive, never in silent deletion.** At
+teardown the CLI snapshots the guest's last output, journals the `down` event, stamps
+`ended` into `meta.json`, and renames the session directory to
+`~/.silkgate/archive/<sid>/`. The rename is atomic because the archive and the session
+registry share one filesystem. The sid packs a UTC stamp, the session name and six random
+hex characters, so a plain name sort is a time sort. An archived session holds these
+files:
+
+| File | Content |
+|---|---|
+| `meta.json` | the session's meta, plus `sid`, `ended` and `last_rc` when an exec recorded one |
+| `rules.txt` | the composed ruleset text the proxy enforced |
+| `journal.jsonl` | one JSON record per event: `created`, `exec_start`, `exec_end`, `harvest`, `frozen`, `resumed`, `killed`, `down` |
+| `output.log` | the last 5000 lines of guest output, at most 1 MiB |
+| `brief.md` | the operator's `--brief` file, when one was given |
+
+The archive is bookkeeping and therefore fail-open: a failed snapshot or rename warns and
+the teardown completes. Sandbox removal stays fail-closed: an unremovable sandbox keeps
+its session and the command dies. `silkgate ls -a` lists archives, and the audit UI reads
+them. Proof: `test/test_cli_journal.py` pins the layout, the record order and both
+failure rules.
+
+## What the journal records
+
+**The journal records what the operator asked for and never a secret's value.** An exec's
+`argv` contains the operator's prompt, and that record is the feature: the journal exists
+to reconstruct a session after it ends. Environment variables appear as names only,
+because values can hold credentials. The journal file carries mode 0600. The guest cannot
+read the journal or the archive: both live under `~/.silkgate` on the host, and silkgate
+refuses every mount of that directory. Proof: `test/test_cli_journal.py` pins the
+names-only rule and the file mode.
+
+## Retention
+
+**Silkgate removes an old file only when it is both beyond the newest-count guard and
+older than its age knob.** One rule covers audit logs, capture files and archived
+sessions. A knob at 0 or less turns retention off for its own kind alone. Silkgate
+announces every removal.
+
+| Kind | Age default | Count guard | Knob |
+|---|---|---|---|
+| `proxy-*.log`, `proxy-*.rules`, `standalone-*.rules`, `events-*.jsonl` | 30 days | newest 20 per kind | `SILKGATE_LOG_RETAIN_DAYS` |
+| `capture-*.jsonl` | 7 days | newest 20 | `SILKGATE_CAPTURE_RETAIN_DAYS` |
+| `archive/<sid>/` | 30 days | newest 50 | `SILKGATE_ARCHIVE_RETAIN_DAYS` |
+
+The files a live proxy writes never go: `proxy.json` names them and the prune checks it.
+Capture files keep a shorter default because they hold conversation content, which is
+bulkier and more sensitive than audit metadata. Proof: `test/test_cli_journal.py` and
+`test/test_cli_logs.py` pin both halves of the rule.
+
+## The audit UI
+
+**The `silkgate ui` server carries no auth, by decision: the 127.0.0.1 bind is the
+boundary.** Only processes on the host can connect, and a guest's Tier-1 rules allow only
+its own proxy port, so no guest reaches it. The server must never bind beyond loopback.
+For remote use, open an SSH tunnel to the loopback port. A future `--bind` flag requires
+token auth first. Inside the boundary, the server still refuses what a hostile web page
+can send through the operator's own browser: every request must carry a loopback `Host`
+header, and a present `Origin` header must be loopback too. Browsers always send `Origin`
+on a cross-origin POST. Every control endpoint (freeze, resume, down, kill, diff) is
+POST-only, so a cross-site page cannot drive one. Proof: `test/test_ui.py` pins the
+matrix.
+
 ## Tier 1 enforcement
 
 **Tier 1 needs no nested VM, no `pf`, and no `nft`: microsandbox terminates the guest's
