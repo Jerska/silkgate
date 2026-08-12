@@ -107,7 +107,7 @@ class CliCase(unittest.TestCase):
         seen = {}
 
         def spy(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
-                context=None, context_paths=()):
+                context=None, context_paths=(), memory=None, cpus=None):
             seen.update(name=name, mounts=mounts, ws=ws, env=env, meta=meta_extra,
                         context=context)
             raise SystemExit(42)
@@ -1789,9 +1789,10 @@ class TestMemoryFlag(CliCase):
             created = self.create_argv(argv)
             self.assertIn(("-m", "512M"), list(zip(created, created[1:])), argv)
 
-    def test_no_flag_passes_no_dash_m(self):
+    def test_no_flag_defaults_to_1g(self):
         for argv in (["run", "--", "true"], ["up"]):
-            self.assertNotIn("-m", self.create_argv(argv), argv)
+            created = self.create_argv(argv)
+            self.assertIn(("-m", "1G"), list(zip(created, created[1:])), argv)
 
     def test_the_builder_itself_defaults_to_no_dash_m(self):
         with mock.patch.object(sg, "_msb", lambda: "msb"):
@@ -1829,9 +1830,12 @@ class TestCpusFlag(CliCase):
             created = self.create_argv(argv)
             self.assertIn(("-c", "2"), list(zip(created, created[1:])), argv)
 
-    def test_no_flag_passes_no_dash_c(self):
+    def test_no_flag_defaults_to_half_the_hosts_cpus(self):
+        # The CLI's own formula, recomputed here so the pin holds on any host.
+        expected = str(max(1, (os.cpu_count() or 2) // 2))
         for argv in (["run", "--", "true"], ["up"]):
-            self.assertNotIn("-c", self.create_argv(argv), argv)
+            created = self.create_argv(argv)
+            self.assertIn(("-c", expected), list(zip(created, created[1:])), argv)
 
     def test_both_flags_land_together(self):
         for argv in (["run", "--memory", "512M", "--cpus", "2", "--", "true"],

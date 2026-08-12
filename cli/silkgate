@@ -2659,8 +2659,6 @@ def cmd_run(args):
     proxy_was_running = _proxy_running()        # --port is the base port iff WE start it
     rc, provisioned, branch_ready, proxy = 1, False, False, None
     create_env = list(args.env) + (list(_BRANCH_ENV) if args.branch else [])
-    create_kw = {k: v for k, v in (("memory", args.memory),
-                                   ("cpus", args.cpus)) if v}    # no flag, no -m / -c
     github_meta = {"github_read": github_read, "github_write": github_write} \
         if (github_read or github_write) else {}
     try:
@@ -2671,7 +2669,7 @@ def cmd_run(args):
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           meta_extra, ctx, ctx_paths, **create_kw)
+                           meta_extra, ctx, ctx_paths, memory=args.memory, cpus=args.cpus)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -2791,8 +2789,6 @@ def cmd_up(args):
     image = ensure_image(profiles, args.image, base=args.base)
     provisioned = False
     create_env = list(args.env) + (list(_BRANCH_ENV) if args.branch else [])
-    create_kw = {k: v for k, v in (("memory", args.memory),
-                                   ("cpus", args.cpus)) if v}    # no flag, no -m / -c
     github_meta = {"github_read": github_read, "github_write": github_write} \
         if (github_read or github_write) else {}
     try:
@@ -2804,7 +2800,7 @@ def cmd_up(args):
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           meta_extra, ctx, ctx_paths, **create_kw)
+                           meta_extra, ctx, ctx_paths, memory=args.memory, cpus=args.cpus)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -4735,6 +4731,11 @@ def main():
                        help=f"don't describe the sandbox to the guest ({GUEST_CONTEXT} and "
                             "$SILKGATE_CONTEXT)")
 
+    # Session guests default to 1G and half the host's CPUs — msb's own 512M / 1 vCPU
+    # OOM-kills a guest that runs an agent beside a test suite. Both are limits the
+    # host scheduler shares, not reservations, so oversubscription across guests is safe.
+    default_cpus = str(max(1, (os.cpu_count() or 2) // 2))
+
     p = sub.add_parser("run", help="run an egress-locked guest behind the proxy")
     profile_opts(p)
     p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
@@ -4743,12 +4744,12 @@ def main():
                         "necessarily here (default: 8090)")
     p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")
-    p.add_argument("--memory", metavar="SIZE", type=_memory_arg,
-                   help="guest memory size as digits then M or G, e.g. 512M or 1G — passed "
-                        "to msb create as -m (default: msb's own size)")
-    p.add_argument("--cpus", metavar="COUNT", type=_cpus_arg,
+    p.add_argument("--memory", metavar="SIZE", type=_memory_arg, default="1G",
+                   help="guest memory size as digits then M or G, e.g. 512M or 2G — passed "
+                        "to msb create as -m (default: %(default)s)")
+    p.add_argument("--cpus", metavar="COUNT", type=_cpus_arg, default=default_cpus,
                    help="guest virtual CPU count as a positive integer, e.g. 2 — passed "
-                        "to msb create as -c (default: msb's own count)")
+                        "to msb create as -c (default: %(default)s, half the host's CPUs)")
     p.add_argument("-v", "--mount", action="append", default=[], metavar="SRC:DST[:ro|rw]",
                    type=_mount_arg,
                    help="mount host directory SRC at DST in the guest, read-only unless the "
@@ -4822,12 +4823,12 @@ def main():
     env_opt(p)
     p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")
-    p.add_argument("--memory", metavar="SIZE", type=_memory_arg,
-                   help="guest memory size as digits then M or G, e.g. 512M or 1G — passed "
-                        "to msb create as -m (default: msb's own size)")
-    p.add_argument("--cpus", metavar="COUNT", type=_cpus_arg,
+    p.add_argument("--memory", metavar="SIZE", type=_memory_arg, default="1G",
+                   help="guest memory size as digits then M or G, e.g. 512M or 2G — passed "
+                        "to msb create as -m (default: %(default)s)")
+    p.add_argument("--cpus", metavar="COUNT", type=_cpus_arg, default=default_cpus,
                    help="guest virtual CPU count as a positive integer, e.g. 2 — passed "
-                        "to msb create as -c (default: msb's own count)")
+                        "to msb create as -c (default: %(default)s, half the host's CPUs)")
     p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
                    help="shared-proxy scan floor when this command starts it: the pool "
                         "lands on the first free 16-port range at or above this, not "
