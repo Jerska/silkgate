@@ -1247,6 +1247,55 @@ def _new_sid(name):
     return f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{name}-{uuid4().hex[:6]}"
 
 
+def _journal(name, event, **fields):
+    """Append one event record to a session's journal (journal.jsonl in its dir).
+
+    Observability is fail-open where enforcement stays fail-closed: the journal, the
+    output snapshot and the archive rename warn via say() and continue, because a
+    teardown must never be blocked by bookkeeping — so this never raises. Each record
+    is one JSON line landed with a single os.write on an O_APPEND descriptor, so
+    concurrent execs interleave whole records, never bytes.
+
+    Privacy: an exec's argv contains the operator's prompt — recording it is the
+    feature. Environment variables appear as names only, never values.
+    """
+    _journal_into(session_dir(name), event, **fields)
+
+
+def _journal_into(sdir, event, **fields):
+    """_journal against an explicit directory — for the one record (`created`) that
+    must land in the staging dir, before the rename makes the session appear."""
+    try:
+        record = json.dumps({"ts": now_iso(), "event": event, **fields})
+        fd = os.open(sdir / "journal.jsonl",
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (record + "\n").encode())
+        finally:
+            os.close(fd)
+    except Exception as e:                     # never raise: bookkeeping, not enforcement
+        say(f"warning: could not journal {event!r} for {sdir.name}: {e}")
+
+
+def _read_journal(path):
+    """Parsed journal records, oldest first. Torn or foreign lines are skipped rather
+    than fatal: a crash can cut an append mid-line, and one bad line must not hide the
+    history around it."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    records = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
+
+
 def read_meta(name):
     """One session's meta.json, or None when there is no such session.
 
@@ -2149,6 +2198,9 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
                 "port": port, "image": image, "workspace": ws,
                 "created": now_iso(), **meta_extra}
         _write_json(tmp / "meta.json", meta)
+        # Into the staging dir, right after meta.json: the rename below is what makes
+        # the session appear, so it appears with its journal already begun.
+        _journal_into(tmp, "created", meta=meta)
         try:
             tmp.rename(sdir)                             # atomic claim; fails if name raced us
             owned = True
@@ -2568,21 +2620,30 @@ def _ingest_bundle(meta, bundle, tip):
 def _harvest_branch(meta):
     """Bundle out of the guest and ingest; True iff the workspace holds nothing durable."""
     token, detail = _bundle_in_guest(meta)
+    tip = detail if token == "SILKGATE_BUNDLED" else None
     if token == "SILKGATE_NO_COMMITS":
         since = "the last harvest" if meta.get("branch_ingested") else "the base commit"
         say(f"no commits since {since} — nothing to ingest")
-        return True
-    if token == "SILKGATE_NO_BRANCH":
+        ok, result = True, "no_commits"
+    elif token == "SILKGATE_NO_BRANCH":
         say(f"the guest deleted branch {meta['branch']!r} — nothing to ingest")
-        return True
-    if token == "SILKGATE_BUNDLED":
-        return _ingest_bundle(meta, Path(meta["workspace"]) / ".silkgate.bundle", detail)
-    if meta.get("branch_ingested"):
-        say(f"could not reach the guest ({detail}); refs/heads/{meta['branch']} holds the "
-            f"last harvested state — the workspace is kept")
+        ok, result = True, "no_branch"
+    elif token == "SILKGATE_BUNDLED":
+        ok = _ingest_bundle(meta, Path(meta["workspace"]) / ".silkgate.bundle", tip)
+        result = "ingested" if ok else "failed"
     else:
-        say(f"could not harvest branch {meta['branch']!r}: {detail} — the workspace is kept")
-    return False
+        if meta.get("branch_ingested"):
+            say(f"could not reach the guest ({detail}); refs/heads/{meta['branch']} holds "
+                f"the last harvested state — the workspace is kept")
+        else:
+            say(f"could not harvest branch {meta['branch']!r}: {detail} — the workspace "
+                "is kept")
+        ok, result = False, "failed"
+    # The verdict is settled before the record is cut, and _journal never raises, so a
+    # journal failure cannot change what this harvest reports.
+    _journal(meta["name"], "harvest", result=result, tip=tip,
+             detail=None if token == "SILKGATE_BUNDLED" else detail or None)
+    return ok
 
 
 def _reap_derived_workspace(meta):
