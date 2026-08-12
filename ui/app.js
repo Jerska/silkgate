@@ -106,19 +106,43 @@ async function reloadEvents() {
 // The badge answers for BOTH streams: "live" only when everything that should
 // be open is open, a suffix when capture has no backend yet, "reconnecting…"
 // the moment either trail drops — a gap in either is a gap in the picture.
+// A failed history fetch is a gap too: the stream's onopen must not dress a
+// table with no past as healthy, so the badge keeps naming it until a retry
+// lands.
 let eventsUp = null;             // null until the first open
 let captureUp = null;
+let historyDegraded = false;     // reloadEvents failed; a retry is pending
 
 function updateStreamBadge() {
   const capExpected = ctx.captureState === "live";
   if (eventsUp === false || (capExpected && captureUp === false)) {
     streamState.textContent = "reconnecting…";
   } else if (eventsUp) {
-    streamState.textContent = capExpected && captureUp
-      ? "live" : "live — no capture";
+    streamState.textContent = (capExpected && captureUp
+      ? "live" : "live — no capture")
+      + (historyDegraded ? " — history missing, retrying" : "");
   } else {
     streamState.textContent = "…";
   }
+}
+
+const HISTORY_RETRY_MS = 5000;
+let historyRetryTimer = null;
+
+function scheduleHistoryRetry() {
+  historyDegraded = true;
+  updateStreamBadge();
+  if (historyRetryTimer !== null) return;
+  historyRetryTimer = setTimeout(async () => {
+    historyRetryTimer = null;
+    try {
+      await reloadEvents();
+      historyDegraded = false;
+      updateStreamBadge();
+    } catch {
+      scheduleHistoryRetry();
+    }
+  }, HISTORY_RETRY_MS);
 }
 
 let stream = null;
@@ -149,8 +173,11 @@ function openStream(cursor) {
   stream.addEventListener("reset", async () => {
     try {
       await reloadEvents();
+      historyDegraded = false;
+      updateStreamBadge();
     } catch {
-      // the next reset or reconnect retries; the stream keeps flowing meanwhile
+      // the stream keeps flowing; the retry loop refetches the history
+      scheduleHistoryRetry();
     }
   });
 }
@@ -378,8 +405,9 @@ async function boot() {
   let cursor = null;
   try {
     cursor = await reloadEvents();
-  } catch (err) {
-    streamState.textContent = String(err);
+  } catch {
+    // With no cursor the stream tails from now; the retry loop backfills.
+    scheduleHistoryRetry();
   }
   openStream(cursor);
   bootCapture();                 // additive: the app is whole without it
