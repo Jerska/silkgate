@@ -110,6 +110,9 @@ test("journalEvent tolerates spelling drift and rejects the shapeless", () => {
   assert.equal(journalEvent("junk"), null);
   assert.deepEqual(journalEvent({ event: "exec_start", env: ["A", "B"] }).envNames,
                    ["A", "B"], "an env already reduced to names passes through");
+  assert.deepEqual(journalEvent({ event: "exec_start",
+                                  env_names: ["FOO", "PATH"] }).envNames,
+                   ["FOO", "PATH"], "env_names is the backend's actual spelling");
 });
 
 test("filesTouched maps known tool inputs to paths, requested not executed", () => {

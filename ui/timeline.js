@@ -24,8 +24,9 @@ export function journalEvent(e) {
   const event = e.event ?? e.kind ?? e.type;
   if (event == null) return null;
   let envNames = null;
-  if (Array.isArray(e.env)) envNames = e.env.map(String);
-  else if (e.env && typeof e.env === "object") envNames = Object.keys(e.env);
+  const env = e.env_names ?? e.env;         // the backend writes env_names
+  if (Array.isArray(env)) envNames = env.map(String);
+  else if (env && typeof env === "object") envNames = Object.keys(env);
   return {
     ts: e.ts ?? e.time ?? null,
     event: String(event),

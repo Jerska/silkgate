@@ -59,13 +59,13 @@ export function newSessionView() {
   }
 
   // A diff exists only where a git workspace does. Without a meta the answer
-  // is unknown — show the tab and let the endpoint speak for itself.
+  // is unknown — show the tab and let the endpoint speak for itself. The meta
+  // spells the mode as the backend's diff guard reads it: a `branch` name or a
+  // `checkout` ref, never a separate mode field.
   function hasWorkspace() {
     const m = meta();
     if (!m) return true;
-    if (m.branch) return true;
-    const mode = m.mode ?? m.workspace ?? null;
-    return mode === "branch" || mode === "checkout";
+    return Boolean(m.branch || m.checkout);
   }
 
   async function fetchDetail(force = false) {
