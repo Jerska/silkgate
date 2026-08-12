@@ -40,7 +40,9 @@ export function newCallsView({ fixedSession = null } = {}) {
 
   // Controls → route (or, pinned to a session, controls → table directly).
   // applyFilters always runs here: hashchange stays silent when nothing changed.
-  function writeFilters() {
+  // Keystroke-driven callers pass replace, so typing a filter rewrites the
+  // current history entry instead of pushing one per character.
+  function writeFilters({ replace = false } = {}) {
     if (!fixedSession) {
       const params = {};
       if (controls.session.value) params.session = controls.session.value;
@@ -49,7 +51,7 @@ export function newCallsView({ fixedSession = null } = {}) {
       if (controls.host.value.trim()) params.host = controls.host.value.trim();
       if (controls.window.value !== "all") params.window = controls.window.value;
       if (!controls.follow.checked) params.follow = "0";
-      ctx.navigate({ view: "traffic", params });
+      ctx.navigate({ view: "traffic", params }, { replace });
     }
     applyFilters();
   }
@@ -204,12 +206,12 @@ export function newCallsView({ fixedSession = null } = {}) {
       stateMsg);
 
     for (const c of [controls.session, controls.decision, controls.window]) {
-      c.addEventListener("change", writeFilters);
+      c.addEventListener("change", () => writeFilters());
     }
     for (const c of [controls.method, controls.host]) {
-      c.addEventListener("input", writeFilters);
+      c.addEventListener("input", () => writeFilters({ replace: true }));
     }
-    controls.follow.addEventListener("change", writeFilters);
+    controls.follow.addEventListener("change", () => writeFilters());
     clear.addEventListener("click", () => {
       if (fixedSession) {
         syncControls({});

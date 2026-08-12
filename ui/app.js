@@ -43,7 +43,12 @@ const ctx = {
   sessions: null,                // the last /api/sessions payload, verbatim
   metrics: null,                 // the last /api/metrics payload, or null
   metricsHistory: newHistory(),  // 30-sample rings behind the sparklines
-  navigate(route) { location.hash = buildRoute(route); },
+  // replace: rewrite the current history entry instead of pushing one — for
+  // keystroke-driven updates, where per-character entries would bury Back.
+  navigate(route, { replace = false } = {}) {
+    if (replace) location.replace(buildRoute(route));
+    else location.hash = buildRoute(route);
+  },
   refreshSessions,               // views nudge the poll after a control POST
 };
 
