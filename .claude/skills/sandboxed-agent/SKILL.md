@@ -206,17 +206,23 @@ only its own port, so a guest cannot reach another session's listener.
 
 ## Profiles: the image and the policy are one declaration
 
-**Pick capabilities with `--with NAME[@VERSION]`, repeatable: a profile carries both its
-installer and its allowlist.** A profile holds how to install itself (`setup.sh`, at
-image build time) and what it can reach (`rules.txt`, enforced by the proxy). A guest
-therefore never holds a tool whose traffic nobody allowed. The image builds on first use
-and is cached under a hash of those inputs.
+**Pick capabilities with `--with NAME[@VERSION][:ARG]`, repeatable: a profile carries
+both its installer and its allowlist.** A profile holds how to install itself
+(`setup.sh`, at image build time) and what it can reach (`rules.txt`, enforced by the
+proxy). A guest therefore never holds a tool whose traffic nobody allowed. The image
+builds on first use and is cached under a hash of those inputs.
 
 Omit the version (`--with node`) to get the one the profile pins. A named version
 installs that exact release. Anything the profile's installer can fetch upstream works,
 so `node@20.18.1` succeeds as well as the default. The version must be exact: `node@22`
 is not a prefix match and fails the build. `./cli/silkgate profiles` lists the names and
 their pinned defaults.
+
+A profile whose ARG column there shows a pattern requires `:ARG`, and the argument
+must fully match the pattern. The argument expands into the profile's rules
+and never changes the image. Repeat the name with different arguments for several
+grants. `./cli/silkgate profiles --render NAME:ARG` prints the exact rules a spec
+composes to — audit that before a launch.
 
 `--rule 'host/path GET'` adds a one-off rule. No rule can be subtracted, so a profile's
 rules are a floor: `--with node` grants `registry.npmjs.org` even to a task with no
