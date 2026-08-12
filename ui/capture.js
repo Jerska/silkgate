@@ -9,14 +9,21 @@
 // Sub-state is keyed by (session, exec). A record without an exec belongs to
 // the "unattributed" bucket for its session — never guessed into a neighbor.
 //
-// Two caps bound memory, and they shed different things:
-//   turnCap  — turns per bucket. An evicted turn folds the tokens it reported
-//              into closedTotals exactly once (an evicted OPEN turn folds what
-//              it had; its later turn_end is a no-op — the id is remembered so
-//              replays cannot resurrect it or double-count).
-//   textCap  — held text/tool-input chars per bucket. Shedding text drops
-//              payloads from the oldest blocks but never touches a token
-//              number: token meters must not drift when text falls off.
+// Four caps bound memory, and they shed different things:
+//   turnCap   — turns per bucket. An evicted turn folds the tokens it reported
+//               into closedTotals exactly once (an evicted OPEN turn folds what
+//               it had; its later turn_end is a no-op — the id is remembered so
+//               replays cannot resurrect it or double-count).
+//   textCap   — held text/tool-input chars per bucket. Shedding text drops
+//               payloads from the oldest blocks but never touches a token
+//               number: token meters must not drift when text falls off.
+//   bucketCap — (session, exec) buckets kept, across all sessions. A new pair
+//               past the cap evicts the stalest bucket whole — a wall display
+//               left up for weeks must not accumulate dead pairs forever.
+//   modelCap  — closedTotals entries per bucket. Distinct model strings arrive
+//               on somebody else's schedule; past the cap, evicted turns with
+//               a new model pool under "(other)" — sums stay exact, only the
+//               per-model split coarsens.
 
 const ERROR_CAP = 50;            // capture_error entries kept per bucket
 const SIGHTING_CAP = 100;        // secret_sighting entries kept per bucket
@@ -27,10 +34,14 @@ const EVICTED_MEMORY = 1000;     // evicted flow ids remembered per bucket; a
 const KINDS = new Set(["turn_start", "content_block", "turn_end",
                        "capture_error", "secret_sighting"]);
 
-export function newCapture({ turnCap = 200, textCap = 2_000_000 } = {}) {
+const OTHER_MODELS = "(other)";  // closedTotals pool past modelCap; parentheses
+                                 // keep it apart from any real model id
+
+export function newCapture({ turnCap = 200, textCap = 2_000_000,
+                             bucketCap = 64, modelCap = 32 } = {}) {
   // sessions: session → { execs: exec → bucket }. sessionTotals() takes one
   // session's entry; views walk buckets for the per-exec feed.
-  return { sessions: new Map(), turnCap, textCap };
+  return { sessions: new Map(), turnCap, textCap, bucketCap, modelCap };
 }
 
 // The later of two record stamps; an unparsable stamp always loses. (store.js
@@ -43,23 +54,54 @@ function laterTs(a, b) {
   return tb >= ta ? b : a;
 }
 
+function bucketCount(cap) {
+  let n = 0;
+  for (const S of cap.sessions.values()) n += S.execs.size;
+  return n;
+}
+
+// Drop the least recently touched bucket, whole — its turns, closed totals,
+// errors and sightings go with it. Stalest by lastTs; a bucket with no
+// parsable stamp counts as oldest. An emptied session entry leaves too.
+function evictStalestBucket(cap) {
+  let sKey, eKey, oldest = Infinity, found = false;
+  for (const [sname, S] of cap.sessions) {
+    for (const [exec, b] of S.execs) {
+      const t = Date.parse(b.lastTs || "");
+      const v = Number.isNaN(t) ? -Infinity : t;
+      if (!found || v < oldest) {
+        found = true;
+        oldest = v;
+        sKey = sname;
+        eKey = exec;
+      }
+    }
+  }
+  if (!found) return;
+  const S = cap.sessions.get(sKey);
+  S.execs.delete(eKey);
+  if (S.execs.size === 0) cap.sessions.delete(sKey);
+}
+
 function getBucket(cap, session, exec) {
+  let b = cap.sessions.get(session)?.execs.get(exec);
+  if (b) return b;
+  while (bucketCount(cap) >= cap.bucketCap) {
+    evictStalestBucket(cap);       // can drop an emptied session entry too
+  }
   let S = cap.sessions.get(session);
   if (!S) {
     S = { execs: new Map() };
     cap.sessions.set(session, S);
   }
-  let b = S.execs.get(exec);
-  if (!b) {
-    b = { exec, turns: new Map(), evicted: new Set(), closedTotals: new Map(),
-          errors: new Map(), sightings: new Map(), textChars: 0,
-          lastTs: null, rev: 0 };
-    S.execs.set(exec, b);
-  }
+  b = { exec, turns: new Map(), evicted: new Set(), closedTotals: new Map(),
+        errors: new Map(), sightings: new Map(), textChars: 0,
+        lastTs: null, rev: 0 };
+  S.execs.set(exec, b);
   return b;
 }
 
-function evictTurn(bucket, id) {
+function evictTurn(cap, bucket, id) {
   const t = bucket.turns.get(id);
   bucket.turns.delete(id);
   bucket.evicted.add(id);
@@ -67,8 +109,12 @@ function evictTurn(bucket, id) {
     bucket.evicted.delete(bucket.evicted.keys().next().value);  // oldest first
   }
   bucket.textChars -= t.textChars;
-  const key = t.model ?? null;
+  let key = t.model ?? null;
   let c = bucket.closedTotals.get(key);
+  if (!c && bucket.closedTotals.size >= cap.modelCap) {
+    key = OTHER_MODELS;            // a new model past the cap joins the pool
+    c = bucket.closedTotals.get(key);
+  }
   if (!c) {
     c = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0 };
     bucket.closedTotals.set(key, c);
@@ -89,7 +135,7 @@ function insertTurn(cap, bucket, id, ts) {
               blocks: new Map(), textChars: 0, rev: 0 };
   bucket.turns.set(id, t);
   while (bucket.turns.size > cap.turnCap) {
-    evictTurn(bucket, bucket.turns.keys().next().value);
+    evictTurn(cap, bucket, bucket.turns.keys().next().value);
   }
   return t;
 }

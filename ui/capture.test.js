@@ -158,6 +158,44 @@ test("errors and sightings replay onto themselves", () => {
   assert.equal(t.sightings, 1);
 });
 
+test("the bucket count is bounded — the stalest (session, exec) pair sheds", () => {
+  const cap = newCapture({ bucketCap: 2 });
+  foldAll(cap, turn({ session: "s1", exec: "e1", id: "f1", at: 0 }));
+  foldAll(cap, turn({ session: "s2", exec: "e1", id: "f2", at: 10 }));
+  foldAll(cap, turn({ session: "s3", exec: "e1", id: "f3", at: 20 }));
+  let n = 0;
+  for (const S of cap.sessions.values()) n += S.execs.size;
+  assert.equal(n, 2, "the cap holds");
+  assert.equal(cap.sessions.has("s1"), false,
+               "the stalest pair left, and its emptied session entry with it");
+  assert.equal(cap.sessions.get("s3").execs.get("e1").turns.size, 1,
+               "the newest pair folded normally");
+});
+
+test("a fold into an existing bucket never evicts anything", () => {
+  const cap = newCapture({ bucketCap: 2 });
+  foldAll(cap, turn({ session: "s1", exec: "e1", id: "f1", at: 0 }));
+  foldAll(cap, turn({ session: "s2", exec: "e1", id: "f2", at: 10 }));
+  foldAll(cap, turn({ session: "s1", exec: "e1", id: "f4", at: 20 }));
+  assert.equal(cap.sessions.has("s1"), true);
+  assert.equal(cap.sessions.has("s2"), true);
+});
+
+test("closedTotals is bounded — past modelCap, new models pool as (other)", () => {
+  // turnCap 1: every prior turn evicts into closedTotals under its model.
+  const cap = newCapture({ turnCap: 1, modelCap: 2 });
+  for (const [i, model] of ["m-1", "m-2", "m-3", "m-4"].entries()) {
+    foldAll(cap, turn({ id: `f${i}`, at: i * 10, model }));
+  }
+  const bucket = cap.sessions.get("demo").execs.get("e1");
+  assert.deepEqual([...bucket.closedTotals.keys()], ["m-1", "m-2", "(other)"],
+                   "two named models, then the pool");
+  assert.equal(bucket.closedTotals.get("(other)").turns, 1, "m-3 pooled; m-4 is live");
+  const t = sessionTotals(cap.sessions.get("demo"));
+  assert.equal(t.turns, 4, "pooling loses no turn");
+  assert.equal(t.input, 4231 * 4, "pooling loses no token");
+});
+
 test("unfoldable records answer null and change nothing", () => {
   const cap = newCapture();
   assert.equal(foldCapture(cap, null), null);
