@@ -9,9 +9,11 @@
 //                               (they were the whole hash once) and keep their
 //                               exact semantics, so old bookmarks survive
 //   #/session/<ident>?tab=…     one session's detail; tab defaults to activity
+//   #/search?q=…                global search across audit/capture/journal
 
 const TRAFFIC_PARAMS = ["session", "decision", "method", "host", "window", "follow"];
-const TABS = new Set(["activity", "calls", "config"]);
+const TABS = new Set(["activity", "calls", "diff", "config", "brief",
+                      "output", "metrics"]);
 
 function strip(hash) {
   return typeof hash === "string" && hash.startsWith("#") ? hash.slice(1) : hash || "";
@@ -40,6 +42,9 @@ export function parseRoute(hash) {
       if (v) params[k] = v;      // absent and empty read the same, as they always did
     }
     return { view: "traffic", params };
+  }
+  if (path === "/search") {
+    return { view: "search", q: query.get("q") ?? "" };
   }
   const m = /^\/session\/([^/]+)$/.exec(path);
   if (m) {
@@ -71,6 +76,10 @@ export function buildRoute(route) {
     const tab = TABS.has(route.tab) && route.tab !== "activity"
       ? "?tab=" + route.tab : "";
     return "#/session/" + encodeURIComponent(route.ident) + tab;
+  }
+  if (route.view === "search") {
+    const q = route.q ?? (route.params || {}).q ?? "";
+    return "#/search" + (q ? "?q=" + encodeURIComponent(q) : "");
   }
   return "#/";
 }

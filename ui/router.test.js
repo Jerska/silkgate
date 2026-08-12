@@ -39,6 +39,24 @@ test("session routes carry ident and a clamped tab", () => {
                "an unknown tab falls back to the default, not a blank pane");
 });
 
+test("every wave-2 tab parses and round-trips", () => {
+  for (const tab of ["diff", "config", "brief", "output", "metrics"]) {
+    const hash = `#/session/demo?tab=${tab}`;
+    assert.deepEqual(parseRoute(hash), { view: "session", ident: "demo", tab });
+    assert.equal(buildRoute(parseRoute(hash)), hash);
+  }
+});
+
+test("search routes carry q; an empty q is omitted on build", () => {
+  assert.deepEqual(parseRoute("#/search?q=api+key"),
+                   { view: "search", q: "api key" });
+  assert.deepEqual(parseRoute("#/search"), { view: "search", q: "" });
+  assert.equal(buildRoute({ view: "search", q: "api key" }), "#/search?q=api+key");
+  assert.equal(buildRoute({ view: "search", q: "" }), "#/search");
+  assert.equal(buildRoute({ view: "search", params: { q: "x" } }), "#/search?q=x",
+               "navigate() callers pass params like every other view");
+});
+
 test("session idents survive URL encoding both ways", () => {
   const ident = "a b/c%d";
   const hash = buildRoute({ view: "session", ident });
