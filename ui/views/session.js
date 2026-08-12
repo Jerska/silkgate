@@ -1,13 +1,15 @@
 // views/session.js — one session up close: a header that triages like the
-// overview card, then tabs. Wave 1 fills `activity` (the turn feed folded by
-// capture.js) and `calls` (the calls component pinned to this session);
-// `config` names itself and waits for wave 2.
+// overview card (plus the freeze/resume/down bar), then tabs. `activity` is
+// the capture feed, merged on demand with denies, responses and journal
+// events into one timeline; `calls` pins the calls component to this session;
+// `diff`, `config`, `brief`, `output` and `metrics` each read one endpoint
+// and degrade to a concrete message while its backend is missing.
 //
 // The feed renders whole blocks — capture emits blocks complete, so there is
-// no token-by-token churn — and re-renders only turns whose fold `rev` moved,
-// which is what keeps an open <details> open while other turns stream past.
-// LLM output is attacker-influenced text and reaches the DOM only as text
-// nodes; tool input renders as JSON.stringify inside a <pre>.
+// no token-by-token churn — and re-renders only items whose fold `rev` moved,
+// which is what keeps an open <details> open while other items stream past.
+// LLM output, guest stdout and diffs are attacker-influenced text and reach
+// the DOM only as text nodes; tool input renders as JSON.stringify in a <pre>.
 
 import { el, statusDot, renderDiff, sparkline, fmtTokens } from "../render.js";
 import { fmtBytes, fmtDur, fmtTime } from "../store.js";
@@ -75,7 +77,7 @@ export function newSessionView() {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       detail = await resp.json();
     } catch {
-      if (detail === null || detail === "unavailable") detail = "unavailable";
+      if (detail === null) detail = "unavailable";
       return;                      // a stale payload beats an error banner
     }
     if (!root) return;             // unmounted while the fetch was in flight
