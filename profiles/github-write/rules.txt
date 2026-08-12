@@ -1,0 +1,24 @@
+# Credentialed write for one repository, {arg}: the github-read set plus push, LFS
+# upload, and REST mutations (profile.conf supersedes a github-read instance with the
+# same arg). The advertisement admits both services, in regex form deliberately: q:
+# constraints key by param name, so a second q:service= token would silently win
+# rather than widen. git-receive-pack carries no git-protocol pin — a push negotiates
+# protocol v0. The LFS grant widens from the batch endpoint to info/lfs/** (locks and
+# verify ride the same prefix). The S3 upload authorizes itself with AWS SigV4 in the
+# Authorization header, so its rule must carry no inject_auth — a second Authorization
+# header makes S3 answer 501 — and setup.sh scopes the stub away from it for the same
+# reason.
+github.com/{arg}/info/refs            GET   q:service~git-(upload|receive)-pack  h:git-protocol=version=2  inject_auth=github
+github.com/{arg}.git/info/refs        GET   q:service~git-(upload|receive)-pack  h:git-protocol=version=2  inject_auth=github
+github.com/{arg}/git-upload-pack      POST  max_body=1m  h:content-type=application/x-git-upload-pack-request  h:accept=application/x-git-upload-pack-result  h:git-protocol=version=2  inject_auth=github
+github.com/{arg}.git/git-upload-pack  POST  max_body=1m  h:content-type=application/x-git-upload-pack-request  h:accept=application/x-git-upload-pack-result  h:git-protocol=version=2  inject_auth=github
+github.com/{arg}/git-receive-pack     POST  max_body=64m  h:content-type=application/x-git-receive-pack-request  h:accept=application/x-git-receive-pack-result  inject_auth=github
+github.com/{arg}.git/git-receive-pack POST  max_body=64m  h:content-type=application/x-git-receive-pack-request  h:accept=application/x-git-receive-pack-result  inject_auth=github
+github.com/{arg}/info/lfs/**          GET POST  max_body=1m  h:content-type~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:accept~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  inject_auth=github
+github.com/{arg}.git/info/lfs/**      GET POST  max_body=1m  h:content-type~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:accept~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  inject_auth=github
+lfs.github.com/{arg}/**               GET POST  max_body=1m  inject_auth=github
+api.github.com/repos/{arg}/**         GET POST PUT PATCH DELETE  q:*  max_body=1m  inject_auth=github
+raw.githubusercontent.com/{arg}/**    GET
+codeload.github.com/{arg}/**          GET
+github-cloud.githubusercontent.com/** GET   q:*
+github-cloud.s3.amazonaws.com/**      PUT   q:*  max_body=1024m

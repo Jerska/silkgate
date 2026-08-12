@@ -13,6 +13,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import itertools
 import json
 import os
 import shutil
@@ -2030,6 +2031,186 @@ class TestGithubGrants(CliCase):
         meta = sg.read_meta("ghv4dd")
         self.assertEqual(meta["github_read"], ["owner/repo"])
         self.assertEqual(meta["github_write"], ["org/proj"])
+
+
+class TestGithubProfiles(CliCase):
+    """The github floor and the github-read/github-write grant profiles in profiles/:
+    the read grant admits nothing a push needs, the write grant admits push and caps
+    every body, the grant governs each smart-HTTP leg whatever the --with order, and
+    the image-baked credential stubs stay URL-scoped."""
+
+    def compose(self, *specs):
+        with contextlib.redirect_stderr(io.StringIO()):        # supersedes announcements
+            return sg.load_ruleset(sg.compose_rules(sg.resolve_profiles(list(specs))))
+
+    # --- the read grant: no request a push or upload needs ---
+
+    def test_read_grant_admits_nothing_a_push_needs(self):
+        rs = self.compose("github-read:some/repo")
+        for form in ("some/repo", "some/repo.git"):
+            adv = rs.match("github.com", f"/{form}/info/refs", "GET")
+            self.assertIsNotNone(adv, form)
+            self.assertFalse(adv.query_ok("service", "git-receive-pack"),
+                             "a receive-pack advertisement must be stripped to dumb-http")
+            for method in ("POST", "GET"):
+                self.assertIsNone(rs.match("github.com", f"/{form}/git-receive-pack", method),
+                                  f"{method} git-receive-pack must match no rule")
+        self.assertFalse(any("s3.amazonaws.com" in r.raw for r in rs.rules),
+                         "read grant must hold no S3 upload rule")
+        api = rs.match("api.github.com", "/repos/some/repo/contents/x", "GET")
+        self.assertEqual(api.methods, {"GET"})
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            self.assertIsNone(rs.match("api.github.com", "/repos/some/repo/contents/x", method))
+
+    def test_read_grant_covers_fetch_with_the_credential(self):
+        rs = self.compose("github-read:some/repo")
+        for form in ("some/repo", "some/repo.git"):
+            adv = rs.match("github.com", f"/{form}/info/refs", "GET")
+            self.assertEqual(adv.inject_auth, "github", form)
+            self.assertTrue(adv.query_ok("service", "git-upload-pack"))
+            self.assertTrue(adv.header_ok("git-protocol", "version=2"))
+            up = rs.match("github.com", f"/{form}/git-upload-pack", "POST")
+            self.assertEqual(up.inject_auth, "github", form)
+            self.assertTrue(up.header_ok("content-type",
+                                         "application/x-git-upload-pack-request"))
+            batch = rs.match("github.com", f"/{form}/info/lfs/objects/batch", "POST")
+            self.assertEqual(batch.inject_auth, "github", form)
+            self.assertTrue(batch.header_ok("content-type",
+                                            "application/vnd.git-lfs+json; charset=utf-8"))
+            self.assertTrue(batch.header_ok("accept", "application/vnd.git-lfs+json"))
+
+    # --- the write grant: push, and its caps ---
+
+    def test_write_grant_admits_push(self):
+        rs = self.compose("github-write:some/repo")
+        for form in ("some/repo", "some/repo.git"):
+            adv = rs.match("github.com", f"/{form}/info/refs", "GET")
+            self.assertEqual(adv.inject_auth, "github", form)
+            self.assertTrue(adv.query_ok("service", "git-receive-pack"),
+                            "the regex q: form must admit the receive-pack advertisement")
+            self.assertTrue(adv.query_ok("service", "git-upload-pack"))
+            self.assertFalse(adv.query_ok("service", "git-evil-pack"))
+            rp = rs.match("github.com", f"/{form}/git-receive-pack", "POST")
+            self.assertEqual(rp.inject_auth, "github", form)
+            self.assertTrue(rp.header_ok("content-type",
+                                         "application/x-git-receive-pack-request"))
+            self.assertTrue(rp.header_ok("accept", "application/x-git-receive-pack-result"))
+            # push negotiates protocol v0: the pin is deliberately absent
+            self.assertFalse(rp.header_ok("git-protocol", "version=2"), form)
+        locks = rs.match("github.com", "/some/repo/info/lfs/locks", "POST")
+        self.assertEqual(locks.inject_auth, "github", "info/lfs/** must cover locks")
+        api = rs.match("api.github.com", "/repos/some/repo/pulls/1/merge", "PUT")
+        self.assertEqual(api.methods, {"GET", "POST", "PUT", "PATCH", "DELETE"})
+        self.assertEqual(api.inject_auth, "github")
+
+    def test_every_body_bearing_rule_pins_max_body(self):
+        for spec in ("github-read:some/repo", "github-write:some/repo"):
+            rs = self.compose(spec)
+            for r in rs.rules:
+                if r.methods & {"POST", "PUT", "PATCH", "DELETE"}:
+                    self.assertGreater(r.max_body, 0, f"{spec}: {r.raw}")
+
+    def test_body_caps_are_the_documented_sizes(self):
+        mib = 1024 * 1024
+        rs = self.compose("github-write:some/repo")
+        self.assertEqual(rs.match("github.com", "/some/repo/git-upload-pack", "POST").max_body, mib)
+        self.assertEqual(rs.match("github.com", "/some/repo/git-receive-pack", "POST").max_body, 64 * mib)
+        self.assertEqual(rs.match("github.com", "/some/repo/info/lfs/objects/batch", "POST").max_body, mib)
+        self.assertEqual(rs.match("lfs.github.com", "/some/repo/objects/batch", "POST").max_body, mib)
+        self.assertEqual(rs.match("api.github.com", "/repos/some/repo/issues", "POST").max_body, mib)
+        self.assertEqual(rs.match("github-cloud.s3.amazonaws.com", "/bucket/key", "PUT").max_body, 1024 * mib)
+        rr = self.compose("github-read:some/repo")
+        self.assertEqual(rr.match("github.com", "/some/repo/git-upload-pack", "POST").max_body, mib)
+        self.assertEqual(rr.match("github.com", "/some/repo/info/lfs/objects/batch", "POST").max_body, mib)
+        self.assertEqual(rr.match("lfs.github.com", "/some/repo/objects/batch", "POST").max_body, mib)
+
+    # --- storage endpoints authorize themselves ---
+
+    def test_storage_rules_carry_no_credential(self):
+        for spec in ("github-read:some/repo", "github-write:some/repo"):
+            rs = self.compose(spec)
+            cdn = rs.match("github-cloud.githubusercontent.com", "/x/y", "GET")
+            self.assertIsNotNone(cdn, spec)
+            self.assertIsNone(cdn.inject_auth, spec)
+            self.assertTrue(cdn.allow_query, spec)
+        s3 = self.compose("github-write:some/repo").match(
+            "github-cloud.s3.amazonaws.com", "/bucket/key", "PUT")
+        self.assertIsNone(s3.inject_auth, "S3 carries its own SigV4 Authorization")
+        self.assertTrue(s3.allow_query)
+
+    # --- composition: the grant governs in every --with order ---
+
+    def test_grant_governs_every_smart_http_leg_in_every_with_order(self):
+        for grant, legs in (("github-read:some/repo", ("git-upload-pack",)),
+                            ("github-write:some/repo", ("git-upload-pack",
+                                                        "git-receive-pack"))):
+            for order in itertools.permutations(["git", "github", grant]):
+                rs = self.compose(*order)
+                label = " ".join(order)
+                adv = rs.match("github.com", "/some/repo/info/refs", "GET")
+                self.assertIsNotNone(adv, label)
+                self.assertEqual(adv.inject_auth, "github", label)
+                for leg in legs:
+                    got = rs.match("github.com", f"/some/repo/{leg}", "POST")
+                    self.assertIsNotNone(got, f"{label}: {leg}")
+                    self.assertEqual(got.inject_auth, "github", f"{label}: {leg}")
+
+    def test_write_supersedes_read_for_the_same_arg_only(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            same = sg.resolve_profiles(["github-read:a/b", "github-write:a/b"])
+            other = sg.resolve_profiles(["github-read:c/d", "github-write:a/b"])
+        self.assertEqual([p.spec for p in same], ["github-write:a/b"])
+        self.assertEqual([p.spec for p in other],
+                         ["github-read:c/d", "github-write:a/b"])
+
+    # --- the arg contract ---
+
+    def test_arg_pattern_wants_exactly_owner_slash_repo(self):
+        self.refuses("requires an argument", sg.resolve_profiles, ["github-read"])
+        self.refuses("does not match", sg.resolve_profiles, ["github-read:noslash"])
+        self.refuses("does not match", sg.resolve_profiles, ["github-write:a/b/c"])
+        self.refuses("does not match", sg.resolve_profiles, ["github-read:a/b?x=1"])
+
+    def test_traversal_arg_composes_dead_rules_not_wider_ones(self):
+        # '..' passes the charset, but the addon matches normalized paths, in which
+        # '..' never survives — so the literal patterns it lands in match nothing.
+        rs = self.compose("github-read:../x")
+        self.assertIsNone(rs.match("github.com", "/x/info/refs", "GET"))
+        self.assertIsNone(rs.match("api.github.com", "/repos/x", "GET"))
+        self.assertIsNone(rs.match("api.github.com", "/x", "GET"))
+
+    # --- the image-baked credential stubs ---
+
+    def grant_setup(self, name):
+        return (sg.PROFILE_DIR / name / "setup.sh").read_text()
+
+    def test_grant_setup_scripts_are_byte_identical(self):
+        self.assertEqual(self.grant_setup("github-read"), self.grant_setup("github-write"))
+
+    def test_gitconfig_is_one_overwrite_of_url_scoped_stubs(self):
+        sh = self.grant_setup("github-read")
+        self.assertIn("> /root/.gitconfig", sh)          # overwrite, never append
+        out = self.tmp / "gitconfig"
+        subprocess.run(["sh", "-c", sh.replace("/root/.gitconfig", str(out))], check=True)
+        cfg = out.read_text()
+        for host in ("github.com", "lfs.github.com", "api.github.com"):
+            self.assertIn(f'[http "https://{host}/"]', cfg)
+        self.assertEqual(cfg.count("extraHeader"), 3)
+        self.assertNotIn("[http]", cfg, "a bare global section would bleed the stub "
+                                        "onto the SigV4 storage hosts")
+        self.assertNotIn("s3.amazonaws.com", cfg)
+        self.assertNotIn("githubusercontent.com", cfg)
+
+    # --- render sanity ---
+
+    def test_render_prints_the_expanded_grant(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            sg.cmd_profiles(mock.Mock(render=["github-read:octocat/Hello-World"]))
+        text = out.getvalue()
+        self.assertIn("# --- profile github-read:octocat/Hello-World ---", text)
+        self.assertIn("github.com/octocat/Hello-World/info/refs", text)
+        self.assertNotIn("{arg}", text)
 
 
 class TestMountProvisioning(CliCase):
