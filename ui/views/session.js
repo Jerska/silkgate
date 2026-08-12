@@ -12,7 +12,7 @@
 import { el, statusDot, renderDiff, sparkline, fmtTokens } from "../render.js";
 import { fmtBytes, fmtDur, fmtTime } from "../store.js";
 import { sessionTotals } from "../capture.js";
-import { journalEvent } from "../timeline.js";
+import { journalEvent, timelineItems, filesTouched } from "../timeline.js";
 import { newControlBar, newKillControl } from "../controls.js";
 import { triage, fmtAge } from "./overview.js";
 import { newCallsView } from "./calls.js";
@@ -175,7 +175,7 @@ export function newSessionView() {
                        + " the memory cap)"));
       } else if (b.type === "tool_use") {
         node.append(el("details", { class: "block-tool" },
-          el("summary", null, `tool: ${b.tool_name ?? "?"}`
+          el("summary", null, `running ${b.tool_name ?? "?"}…`
              + (b.truncated ? " (truncated)" : "")),
           el("pre", null, JSON.stringify(b.tool_input, null, 2) ?? "")));
       } else {
@@ -194,6 +194,80 @@ export function newSessionView() {
       node.append(el("span", { class: "caret" }, "▌"));
     }
     return node;
+  }
+
+  // One non-turn timeline item → its node. Everything in them is trail data:
+  // text nodes only, like the turns.
+  function renderItem(item) {
+    if (item.kind === "turn") return renderTurn(item.turn);
+    const when = el("span", { class: "num tl-time", title: item.ts ?? "" },
+                    fmtTime(item.ts));
+    if (item.kind === "deny") {
+      const row = item.row;
+      const node = el("div", { class: "tl tl-deny" }, when,
+        el("span", null, `deny ${row.method} ${row.host}${row.path}`
+           + (row.reason ? ` — ${row.reason}` : "")));
+      if (item.after) {
+        node.append(el("div", { class: "tl-tag" },
+          `↳ ${fmtDur(item.after.dtMs)} after ${item.after.tool} started —`
+          + " likely its consequence (wire-proximity heuristic, not proof)"));
+      }
+      return node;
+    }
+    if (item.kind === "response") {
+      const row = item.row;
+      return el("div", { class: "tl tl-resp" }, when,
+        el("span", null, `${row.status ?? "?"} ${row.method} ${row.host}${row.path}`
+           + (row.response_bytes != null
+              ? ` · ${fmtBytes(row.response_bytes)}` : "")));
+    }
+    if (item.kind === "sighting") {
+      return el("div", { class: "tl tl-alert" }, when,
+        el("span", null, `SECRET SIGHTING: ${item.pattern}`
+           + (item.index != null ? ` (block ${item.index})` : "")
+           + " — a match in a RESPONSE means the secret already left"));
+    }
+    if (item.kind === "journal") {
+      const node = journalLine(item.ev);
+      node.classList.add("tl");
+      return node;
+    }
+    return el("div", { class: "tl" });
+  }
+
+  // Reconciliation identity + change marker per item. Keys never collide
+  // across kinds (each has its own prefix); a deny re-renders if its
+  // consequence tag appears later, a turn on its fold rev, the rest never.
+  function wantEntry(item) {
+    if (item.kind === "turn") {
+      return { key: "t " + execLabel(item.exec) + " " + item.turn.id,
+               rev: item.turn.rev, item };
+    }
+    if (item.kind === "deny") {
+      return { key: "d " + item.row.id, rev: item.after ? 1 : 0, item };
+    }
+    if (item.kind === "response") {
+      return { key: "r " + item.row.id, rev: 0, item };
+    }
+    if (item.kind === "sighting") {
+      return { key: "s " + execLabel(item.exec) + " " + item.flowId
+                    + " " + (item.index ?? ""), rev: 0, item };
+    }
+    return { key: "j " + (item.ts ?? "") + " " + item.ev.event
+                  + " " + (item.ev.execId ?? ""), rev: item.ev.rc ?? -1, item };
+  }
+
+  function updateFilesPanel(scope) {
+    const files = filesTouched({ execs: new Map(scope) });
+    feed.files.hidden = files.length === 0;
+    feed.filesSummary.textContent = `files touched (requested) — ${files.length}`;
+    feed.filesList.textContent = "";
+    for (const f of files) {
+      feed.filesList.append(el("div", { class: "file-line" },
+        el("span", { class: "file-path" }, f.path),
+        el("span", { class: "num file-ops" },
+           `${[...f.tools].join("/")} ×${f.count}`)));
+    }
   }
 
   function renderFeed() {
@@ -220,13 +294,18 @@ export function newSessionView() {
     feed.kill.hidden = feed.selected === "" || scope.length !== 1
       || scope[0][0] == null;
 
-    // Errors and sightings, small enough to rebuild wholesale.
+    updateFilesPanel(scope);
+
+    // Errors always strip at the top; sightings too in turns-only mode (the
+    // merged column carries them inline instead, at their moment).
     feed.strip.textContent = "";
     for (const [, bucket] of scope) {
-      for (const s of bucket.sightings.values()) {
-        feed.strip.append(el("div", { class: "sighting" },
-          `secret sighting: ${s.pattern}`
-          + (s.index != null ? ` (block ${s.index})` : "")));
+      if (!feed.all) {
+        for (const s of bucket.sightings.values()) {
+          feed.strip.append(el("div", { class: "sighting" },
+            `secret sighting: ${s.pattern}`
+            + (s.index != null ? ` (block ${s.index})` : "")));
+        }
       }
       for (const [id, e] of bucket.errors) {
         feed.strip.append(el("div", { class: "capture-err" },
@@ -234,27 +313,51 @@ export function newSessionView() {
       }
     }
 
-    // Turns across the scope, oldest first; only changed revs re-render.
+    // What the column holds: turns only, or the merged timeline. Only changed
+    // revs re-render either way.
     const want = [];
-    for (const [exec, bucket] of scope) {
-      for (const t of bucket.turns.values()) {
-        want.push({ key: execLabel(exec) + " " + t.id, t });
-      }
-    }
-    want.sort((a, b) => (Date.parse(a.t.ts || "") || 0)
-                        - (Date.parse(b.t.ts || "") || 0));
     const seen = new Set();
-    for (const { key, t } of want) {
-      seen.add(key);
-      const have = feed.nodes.get(key);
-      if (!have || have.rev !== t.rev) {
-        const node = renderTurn(t);
+    if (feed.all) {
+      const scoped = S ? { execs: new Map(scope) } : null;
+      // Journal events follow the exec selector when they name an exec;
+      // session-level events (created, harvest, down) always show.
+      const exec = scope.length === 1 ? scope[0][0] : null;
+      const journal = (Array.isArray(detail?.journal) ? detail.journal : [])
+        .filter((e) => {
+          if (feed.selected === "") return true;
+          const id = journalEvent(e)?.execId;
+          return id == null || id === exec;
+        });
+      for (const item of timelineItems({ captureSession: scoped, session,
+                                         rows: ctx.store.rows, journal })) {
+        const w = wantEntry(item);
+        if (!seen.has(w.key)) {
+          seen.add(w.key);
+          want.push(w);
+        }
+      }
+    } else {
+      for (const [exec, bucket] of scope) {
+        for (const t of bucket.turns.values()) {
+          want.push({ key: "t " + execLabel(exec) + " " + t.id, rev: t.rev,
+                      item: { kind: "turn", turn: t },
+                      at: Date.parse(t.ts || "") || 0 });
+        }
+      }
+      want.sort((a, b) => a.at - b.at);
+      for (const w of want) seen.add(w.key);
+    }
+
+    for (const w of want) {
+      const have = feed.nodes.get(w.key);
+      if (!have || have.rev !== w.rev) {
+        const node = renderItem(w.item);
         if (have) have.node.replaceWith(node);
-        feed.nodes.set(key, { node, rev: t.rev });
+        feed.nodes.set(w.key, { node, rev: w.rev });
       }
     }
     for (const [key, have] of feed.nodes) {
-      if (!seen.has(key)) {                      // evicted turns leave the feed
+      if (!seen.has(key)) {                      // evicted items leave the feed
         have.node.remove();
         feed.nodes.delete(key);
       }
@@ -271,9 +374,12 @@ export function newSessionView() {
 
     if (want.length === 0 && feed.strip.childElementCount === 0) {
       feed.msg.textContent = ctx.captureState === "live"
-        ? "no capture records for this session yet"
+        ? (feed.all ? "nothing recorded for this session yet"
+                    : "no capture records for this session yet — the all-events"
+                      + " toggle also shows denies, responses and journal")
         : "capture not available yet — /api/capture lands with the backend;"
-          + " the calls tab works today";
+          + " the calls tab works today"
+          + (feed.all ? "" : ", and the all-events toggle shows the audit trail");
       feed.msg.hidden = false;
     } else {
       feed.msg.hidden = true;
@@ -600,8 +706,33 @@ export function newSessionView() {
       const picker = el("label", { class: "exec-pick" }, "exec ", execSel,
                         " ", killCtl.root);
       picker.hidden = true;
-      tabBody.append(el("section", { class: "activity" }, picker, strip, list, msg));
+      // Turns-only vs the merged column; flipping changes every node's
+      // identity, so the reconciler starts clean.
+      const toggle = el("input", { type: "checkbox" });
+      toggle.addEventListener("change", () => {
+        feed.all = toggle.checked;
+        feed.nodes.clear();
+        feed.list.textContent = "";
+        renderFeed();
+      });
+      const filesSummary = el("summary", null, "files touched (requested) — 0");
+      const filesList = el("div", { class: "files-list" });
+      const files = el("details", { class: "files",
+        title: "paths named in tool inputs — the wire shows intent,"
+               + " not execution" },
+        filesSummary,
+        el("p", { class: "pane-note" },
+           "what the agent asked to touch, mapped from tool inputs on the"
+           + " wire — requested, not proof of execution"),
+        filesList);
+      files.hidden = true;
+      tabBody.append(el("section", { class: "activity" },
+        el("div", { class: "feed-bar" }, picker,
+           el("label", { class: "feed-toggle" }, toggle,
+              " all events (denies, responses, journal)")),
+        files, strip, list, msg));
       feed = { execSel, kill: killCtl.root, strip, list, msg,
+               files, filesSummary, filesList, all: false,
                nodes: new Map(), selected: "", execs: null };
       renderFeed();
       fetchDetail();               // journal events feed the merged timeline

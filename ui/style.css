@@ -290,9 +290,46 @@ button:hover { border-color: var(--muted); }
 .activity {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow: auto;                /* sideways too — wide argv/paths never widen the body */
   padding: var(--sp-3);
 }
+
+.feed-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  margin-bottom: var(--sp-2);
+}
+.feed-bar .exec-pick { margin-bottom: 0; }
+.feed-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--muted);
+}
+
+/* Non-turn timeline items in the merged column. */
+.tl { padding: 2px 0; color: var(--muted); }
+.tl-time { margin-right: var(--sp-3); }
+.tl-deny { color: var(--deny); }
+.tl-tag { padding-left: var(--sp-5); color: var(--idle); }
+.tl-alert {
+  color: var(--deny);
+  font-weight: 600;
+  background: var(--deny-bg);
+  border: 1px solid var(--deny);
+  border-radius: 4px;
+  padding: var(--sp-2);
+  margin: var(--sp-1) 0;
+}
+
+.files { margin-bottom: var(--sp-2); }
+.files summary { cursor: pointer; color: var(--accent); }
+.files .pane-note { margin: var(--sp-1) 0; }
+.file-line { display: flex; gap: var(--sp-3); }
+.file-path { overflow-wrap: anywhere; }
+.file-ops { color: var(--muted); flex: none; }
 
 .exec-pick {
   display: flex;
