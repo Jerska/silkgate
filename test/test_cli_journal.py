@@ -525,6 +525,8 @@ class TestExecJournal(JournalCase):
         self.assertEqual(start["exec_id"], captured["exec_id"],
                          "the journaled id is the one threaded into the relay")
         self.assertRegex(start["exec_id"], r"^[0-9a-f]{8}$")
+        meta = sg._read_json(sg.session_dir("e1") / "meta.json")
+        self.assertEqual(meta["last_rc"], 7, "exec_end also lands meta.last_rc")
 
     def test_cmd_attach_brackets_run_guest(self):
         self.write_session("e2", command=["claude"])
@@ -534,6 +536,40 @@ class TestExecJournal(JournalCase):
         self.assertEqual([r["event"] for r in records], ["exec_start", "exec_end"])
         self.assertEqual(records[0]["via"], "attach")
         self.assertIs(records[0]["tty"], True)
+
+    def test_interrupted_exec_still_closes_its_bracket(self):
+        """A Ctrl-C raises through run_guest; the bracket must still journal exec_end
+        — rc 130, the shell convention for SIGINT — and land it in meta.last_rc."""
+        self.write_session("e3")
+        args = types.SimpleNamespace(name="e3", env=[], tty=False, cmd=["--", "true"])
+
+        def interrupted(*a, **k):
+            raise KeyboardInterrupt
+
+        with mock.patch.object(sg, "run_guest", interrupted), \
+                self.assertRaises(KeyboardInterrupt):
+            sg.cmd_exec(args)
+        records = sg._read_journal(sg.session_dir("e3") / "journal.jsonl")
+        self.assertEqual([r["event"] for r in records], ["exec_start", "exec_end"])
+        self.assertEqual(records[1]["rc"], 130)
+        self.assertEqual(sg._read_json(sg.session_dir("e3") / "meta.json")["last_rc"],
+                         130)
+
+    def test_unknowable_rc_journals_null_and_skips_last_rc(self):
+        """A die() inside run_guest carries no exit status for the guest command: the
+        bracket closes with rc null and meta gains no last_rc."""
+        self.write_session("e4")
+        args = types.SimpleNamespace(name="e4", env=[], tty=False, cmd=["--", "true"])
+
+        def dies(*a, **k):
+            raise SystemExit("not an int")
+
+        with mock.patch.object(sg, "run_guest", dies), self.assertRaises(SystemExit):
+            sg.cmd_exec(args)
+        records = sg._read_journal(sg.session_dir("e4") / "journal.jsonl")
+        self.assertEqual([r["event"] for r in records], ["exec_start", "exec_end"])
+        self.assertIsNone(records[1]["rc"])
+        self.assertNotIn("last_rc", sg._read_json(sg.session_dir("e4") / "meta.json"))
 
     def test_harvest_journals_its_verdict(self):
         meta = self.write_session("h1", branch="agent/x", base="0" * 40,

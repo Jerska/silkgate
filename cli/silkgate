@@ -1304,6 +1304,46 @@ def _journal_into(sdir, event, **fields):
         say(f"warning: could not journal {event!r} for {sdir.name}: {e}")
 
 
+def _end_exec(name, exec_id, rc):
+    """Close one exec bracket: the exec_end record, then meta["last_rc"] — the newest
+    exec's rc, kept in meta so `ls` and the dashboard can show it without reading the
+    journal. Both are bookkeeping: fail-open, never raising. last_rc is written only
+    for a known rc; a null rc stays a journal-only fact."""
+    _journal(name, "exec_end", exec_id=exec_id, rc=rc)
+    if not isinstance(rc, int):
+        return
+    mpath = session_dir(name) / "meta.json"
+    meta = _read_json(mpath)
+    if meta is None:                             # torn down mid-exec: nowhere to record
+        return
+    try:
+        _write_json(mpath, {**meta, "last_rc": rc})
+    except Exception as e:
+        say(f"warning: could not record last_rc for {name!r}: {e}")
+
+
+def _bracketed_exec(name, exec_id, run):
+    """run() under the exec_end guarantee: the bracket closes even when the run is
+    interrupted. The rc journaled for an interrupt is the shell convention where one
+    is known (Ctrl-C's KeyboardInterrupt is 130; a signal-driven SystemExit already
+    carries 128+signo) and null otherwise — null reads as "ended, status unknown",
+    distinct from an exec_start with no exec_end at all, which marks a crash of this
+    process."""
+    rc = None
+    try:
+        rc = run()
+        return rc
+    except KeyboardInterrupt:
+        rc = 130
+        raise
+    except SystemExit as e:
+        if isinstance(e.code, int):
+            rc = e.code
+        raise
+    finally:
+        _end_exec(name, exec_id, rc)
+
+
 def _read_journal(path):
     """Parsed journal records, oldest first. Torn or foreign lines are skipped rather
     than fatal: a crash can cut an append mid-line, and one bad line must not hide the
@@ -3018,9 +3058,9 @@ def cmd_run(args):
         exec_id = uuid4().hex[:8]
         _journal(name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
                  env_names=sorted({p.partition("=")[0] for p in args.env}), via="run")
-        rc = run_guest(lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
-                       cmd, tty=tty, exec_id=exec_id)
-        _journal(name, "exec_end", exec_id=exec_id, rc=rc)
+        rc = _bracketed_exec(name, exec_id, lambda: run_guest(
+            lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
+            cmd, tty=tty, exec_id=exec_id))
     finally:
         # One-shot means one-shot even interrupted: the unwind runs with the stop
         # signals deferred, so a second Ctrl-C cannot leave the session half-removed.
@@ -3208,9 +3248,9 @@ def cmd_exec(args):
     exec_id = uuid4().hex[:8]
     _journal(args.name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
              env_names=sorted({p.partition("=")[0] for p in args.env}), via="exec")
-    rc = run_guest(lambda c: msb_exec_argv(meta["sandbox"], c, tty=tty, env=args.env),
-                   cmd, tty=tty, exec_id=exec_id)
-    _journal(args.name, "exec_end", exec_id=exec_id, rc=rc)   # before sys.exit takes rc
+    rc = _bracketed_exec(args.name, exec_id, lambda: run_guest(
+        lambda c: msb_exec_argv(meta["sandbox"], c, tty=tty, env=args.env),
+        cmd, tty=tty, exec_id=exec_id))
     sys.exit(rc)
 
 
@@ -3224,9 +3264,9 @@ def cmd_attach(args):
     exec_id = uuid4().hex[:8]
     _journal(args.name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=True,
              env_names=[], via="attach")
-    rc = run_guest(lambda c: msb_exec_argv(meta["sandbox"], c, tty=True), cmd, tty=True,
-                   exec_id=exec_id)
-    _journal(args.name, "exec_end", exec_id=exec_id, rc=rc)
+    rc = _bracketed_exec(args.name, exec_id, lambda: run_guest(
+        lambda c: msb_exec_argv(meta["sandbox"], c, tty=True), cmd, tty=True,
+        exec_id=exec_id))
     sys.exit(rc)
 
 
