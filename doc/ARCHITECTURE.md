@@ -202,7 +202,7 @@ files:
 | `meta.json` | the session's meta, plus `sid`, `ended` and `last_rc` when an exec recorded one |
 | `rules.txt` | the composed ruleset text the proxy enforced |
 | `journal.jsonl` | one JSON record per event: `created`, `exec_start`, `exec_end`, `harvest`, `frozen`, `resumed`, `killed`, `down` |
-| `output.log` | the last 5000 lines of guest output, at most 1 MiB |
+| `output.log` | the last 20000 lines of guest output, at most 8 MiB; `SILKGATE_SNAPSHOT_TAIL_LINES` and `SILKGATE_SNAPSHOT_MAX_BYTES` override the two bounds |
 | `brief.md` | the operator's `--brief` file, when one was given |
 
 The archive is bookkeeping and therefore fail-open: a failed snapshot or rename warns and

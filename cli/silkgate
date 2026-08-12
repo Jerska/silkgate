@@ -2442,24 +2442,40 @@ def _remove_sandbox(sandbox):
     return not any(line.split()[:1] == [sandbox] for line in listed.stdout.splitlines()[1:])
 
 
-# What a session's archive keeps of the guest's captured output: the last stretch of it,
-# bounded twice (lines asked of msb, bytes written) so a chatty guest cannot balloon its
-# own archive.
-_SNAPSHOT_TAIL_LINES = 5000
-_SNAPSHOT_MAX_BYTES = 1 << 20
+# What a session's archive keeps of the guest's captured output: the last stretch of
+# it, bounded twice — lines asked of msb (a request msb honors or not) and bytes
+# written (enforced: sliced before the write) — so a chatty guest cannot balloon its
+# own archive. Wave 1's 5000 lines / 1 MiB truncated real agent sessions, so the
+# defaults now hold a full working transcript while the archive stays bounded:
+# ARCHIVE_RETAIN_COUNT snapshots cost at most ~400 MiB. Each env knob takes a
+# positive integer; anything else keeps the default — a cap at 0 would be no cap.
+_SNAPSHOT_TAIL_LINES = 20000     # SILKGATE_SNAPSHOT_TAIL_LINES
+_SNAPSHOT_MAX_BYTES = 8 << 20    # SILKGATE_SNAPSHOT_MAX_BYTES
+
+
+def _snapshot_cap(var, default):
+    """One snapshot knob: the env override where it parses positive, the default
+    otherwise — _retain_days' pattern, minus the 0-turns-it-off arm."""
+    try:
+        value = int(os.environ.get(var, "") or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def _snapshot_output(sandbox, sdir):
     """Best-effort tail of the guest's output into the session dir, pre-archive.
     Fail-open like all bookkeeping: a guest whose log can no longer be read must not
     block its own teardown."""
-    lines, err = _run_msb_logs(sandbox, tail_n=_SNAPSHOT_TAIL_LINES)
+    tail = _snapshot_cap("SILKGATE_SNAPSHOT_TAIL_LINES", _SNAPSHOT_TAIL_LINES)
+    cap = _snapshot_cap("SILKGATE_SNAPSHOT_MAX_BYTES", _SNAPSHOT_MAX_BYTES)
+    lines, err = _run_msb_logs(sandbox, tail_n=tail)
     if err is not None:
         say(f"warning: no guest-output snapshot for {sandbox}: {err}")
         return
     data = ("\n".join(lines) + "\n").encode("utf-8", "replace") if lines else b""
     try:
-        (sdir / "output.log").write_bytes(data[-_SNAPSHOT_MAX_BYTES:])
+        (sdir / "output.log").write_bytes(data[-cap:])
     except OSError as e:
         say(f"warning: could not write the guest-output snapshot: {e}")
 

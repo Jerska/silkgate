@@ -333,6 +333,41 @@ class TestTeardownArchive(JournalCase):
         size = (sg.ARCHIVE_DIR / sid / "output.log").stat().st_size
         self.assertLessEqual(size, sg._SNAPSHOT_MAX_BYTES)
 
+    def test_snapshot_byte_knob_slices_before_the_write_keeping_the_tail(self):
+        sid = sg._new_sid("t8")
+        meta = self.write_session("t8", sid=sid)
+        lines = [f"line {i:04d} " + "x" * 90 for i in range(200)]   # ~20 KiB
+        os.environ["SILKGATE_SNAPSHOT_MAX_BYTES"] = "1024"
+        self.addCleanup(os.environ.pop, "SILKGATE_SNAPSHOT_MAX_BYTES", None)
+        self.teardown(meta, logs=(lines, None))
+        data = (sg.ARCHIVE_DIR / sid / "output.log").read_bytes()
+        self.assertLessEqual(len(data), 1024)
+        self.assertTrue(data.endswith((lines[-1] + "\n").encode()),
+                        "the snapshot keeps the tail, not the head")
+        self.assertNotIn(lines[0].encode(), data)
+
+    def test_snapshot_tail_lines_knob_reaches_msb(self):
+        seen = []
+
+        def spy_logs(sandbox, tail_n=None, since=None):
+            seen.append(tail_n)
+            return [], None
+
+        with mock.patch.object(sg, "_run_msb_logs", spy_logs):
+            sg._snapshot_output("sg-t9", self.tmp)
+            os.environ["SILKGATE_SNAPSHOT_TAIL_LINES"] = "123"
+            self.addCleanup(os.environ.pop, "SILKGATE_SNAPSHOT_TAIL_LINES", None)
+            sg._snapshot_output("sg-t9", self.tmp)
+        self.assertEqual(seen, [sg._SNAPSHOT_TAIL_LINES, 123])
+
+    def test_snapshot_knob_that_does_not_parse_positive_keeps_the_default(self):
+        for bad in ("junk", "0", "-5", "1.5"):
+            os.environ["SILKGATE_SNAPSHOT_TAIL_LINES"] = bad
+            self.addCleanup(os.environ.pop, "SILKGATE_SNAPSHOT_TAIL_LINES", None)
+            self.assertEqual(sg._snapshot_cap("SILKGATE_SNAPSHOT_TAIL_LINES",
+                                              sg._SNAPSHOT_TAIL_LINES),
+                             sg._SNAPSHOT_TAIL_LINES, bad)
+
     def test_planted_sid_is_refused_before_the_rename(self):
         """A hostile sid in a live meta must never become the rename destination:
         `down` reaches its meta only through read_meta, which now refuses it — the
