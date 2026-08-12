@@ -12,9 +12,9 @@
 # admits the repo-root call itself. GitHub REST refuses a request that carries no
 # User-Agent (403, Request forbidden by administrative rules) and reads accept to
 # select the API media type; neither header is baseline, so the api lines forward
-# both with h:~.+ pins. Object downloads are
-# presigned in the query string and carry no credential. The raw and codeload lines
-# are anonymous too: a private file there answers 404, not 403.
+# both with h:~.+ pins. Object downloads are presigned in the query string and carry
+# no credential. The raw and codeload lines are anonymous too: a private file there
+# answers 404, not 403.
 github.com/{arg}/info/refs            GET   q:service=git-upload-pack  h:git-protocol=version=2  inject_auth=github
 github.com/{arg}.git/info/refs        GET   q:service=git-upload-pack  h:git-protocol=version=2  inject_auth=github
 github.com/{arg}/git-upload-pack      POST  max_body=1m  h:content-type=application/x-git-upload-pack-request  h:accept=application/x-git-upload-pack-result  h:git-protocol=version=2  inject_auth=github
