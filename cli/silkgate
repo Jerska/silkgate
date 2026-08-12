@@ -3662,9 +3662,14 @@ _UI_ROUTES = {
     "/capture.js": ("capture.js", "text/javascript; charset=utf-8"),
     "/pricing.js": ("pricing.js", "text/javascript; charset=utf-8"),
     "/render.js": ("render.js", "text/javascript; charset=utf-8"),
+    "/metrics.js": ("metrics.js", "text/javascript; charset=utf-8"),
+    "/search.js": ("search.js", "text/javascript; charset=utf-8"),
+    "/timeline.js": ("timeline.js", "text/javascript; charset=utf-8"),
+    "/controls.js": ("controls.js", "text/javascript; charset=utf-8"),
     "/views/overview.js": ("views/overview.js", "text/javascript; charset=utf-8"),
     "/views/session.js": ("views/session.js", "text/javascript; charset=utf-8"),
     "/views/calls.js": ("views/calls.js", "text/javascript; charset=utf-8"),
+    "/views/search.js": ("views/search.js", "text/javascript; charset=utf-8"),
 }
 
 
