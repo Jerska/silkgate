@@ -11,7 +11,30 @@
 // renders as "tunnel", not as a "pending" that would never resolve.
 
 export function newStore(cap = 5000) {
-  return { rows: new Map(), seen: new Set(), evicted: [], cap };
+  // tallies: session → {denies, requests, lastTs}, kept by fold() as rows land.
+  // They are "recent window" counters over what the store has admitted, not an
+  // all-time ledger: eviction never decrements one, and a record replayed after
+  // its row was evicted counts again — exactly like the row it re-admits.
+  return { rows: new Map(), seen: new Set(), evicted: [], cap, tallies: new Map() };
+}
+
+function tally(store, session) {
+  let t = store.tallies.get(session);
+  if (!t) {
+    t = { denies: 0, requests: 0, lastTs: null };
+    store.tallies.set(session, t);
+  }
+  return t;
+}
+
+// The later of two record stamps; an unparsable stamp always loses. Guards the
+// tallies against a resume delivering a pair's records out of trail order.
+function laterTs(a, b) {
+  const ta = Date.parse(a || "");
+  const tb = Date.parse(b || "");
+  if (Number.isNaN(tb)) return a ?? null;
+  if (Number.isNaN(ta)) return b;
+  return tb >= ta ? b : a;
 }
 
 function baseRow(rec) {
@@ -58,8 +81,10 @@ export function fold(store, rec) {
   }
   store.seen.add(key);
   let row = store.rows.get(rec.id);
+  let isNew = false;
   if (!row) {
     row = baseRow(rec);
+    isNew = true;
     store.rows.set(rec.id, row);
     while (store.rows.size > store.cap) {
       const oldest = store.rows.keys().next().value;
@@ -73,6 +98,7 @@ export function fold(store, rec) {
   if (row.decision === "deny") {
     return null;                 // a deny is terminal: nothing upgrades it
   }
+  const prevSession = row.session;
   if (d === "deny") {
     Object.assign(row, {
       ts: rec.ts ?? row.ts,
@@ -119,6 +145,21 @@ export function fold(store, rec) {
       row.state = "done";
     }
   }
+  // Tallies. A new row is one request under its session; a record that
+  // re-attributes the row (a response filling in a null session, a deny naming
+  // one) moves that count with it — moving is not the decrementing that
+  // eviction forswears, the row was simply counted in the wrong bucket.
+  const t = tally(store, row.session);
+  if (isNew) {
+    t.requests++;
+  } else if (prevSession !== row.session) {
+    tally(store, prevSession).requests--;
+    t.requests++;
+  }
+  if (d === "deny") {
+    t.denies++;                  // dedupe + terminal deny keep this to once per row
+  }
+  t.lastTs = laterTs(t.lastTs, rec.ts ?? null);
   return rec.id;
 }
 
