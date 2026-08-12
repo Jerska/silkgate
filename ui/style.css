@@ -157,6 +157,56 @@ button:hover { border-color: var(--muted); }
   gap: var(--sp-4);
 }
 
+/* --- the overview grid -------------------------------------------------------- */
+
+.overview {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-4);
+}
+
+.card {
+  display: block;
+  padding: var(--sp-3);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+}
+.card:hover { border-color: var(--muted); text-decoration: none; }
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.card-name { font-weight: 600; }
+.card-branch {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-status { color: var(--muted); margin-top: var(--sp-1); }
+
+.card-counters {
+  display: flex;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+  color: var(--muted);
+}
+.deny-hot { color: var(--deny); }
+
+.card-usage, .card-gauge {
+  display: grid;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+  color: var(--muted);
+}
+
 /* --- the calls table (today's UI, scoped) ------------------------------------ */
 
 .calls {
