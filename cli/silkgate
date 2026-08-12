@@ -1619,9 +1619,11 @@ def _msb():
     return which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
 
 
-def msb_create_argv(sandbox, image, port, *, mounts=(), env=(), copies=()):
+def msb_create_argv(sandbox, image, port, *, mounts=(), env=(), copies=(), memory=None):
     """A backgrounded, idling guest whose only egress is its own proxy port."""
     argv = [_msb(), "create", image, "--name", sandbox, "--pull", "never"]
+    if memory:                                          # sized by --memory; else msb's default
+        argv += ["-m", memory]
     for m in mounts:
         argv += ["-v", m]
     for src, dst in copies:                             # into the rootfs, before boot
@@ -2041,7 +2043,7 @@ def _mount_args(specs, *, allow_git_dir=False):
 
 
 def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
-                       context=None, context_paths=()):
+                       context=None, context_paths=(), memory=None):
     """Stage the session dir then rename it into the registry, so its appearance is atomic:
     the addon rescans on the sessions-dir mtime and must never see (and cache) a half-written
     session. Boot the guest after. On failure, undo only what is ours: the staging dir, the
@@ -2074,8 +2076,8 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
         # user's project, and a guest rewriting it changes nothing that matters.
         copies = [(sdir / "context.md", dst) for dst in context_paths] if context else []
         created = True
-        if subprocess.run(msb_create_argv(sandbox_name(name), image, port,
-                                          mounts=mounts, env=env, copies=copies)).returncode:
+        if subprocess.run(msb_create_argv(sandbox_name(name), image, port, mounts=mounts,
+                                          env=env, copies=copies, memory=memory)).returncode:
             die(f"msb create failed for session {name!r}")
     except BaseException:                                # incl. SystemExit from die()
         with _deferred_interrupts():                     # a Ctrl-C cannot halve the unwind
@@ -2653,6 +2655,7 @@ def cmd_run(args):
     proxy_was_running = _proxy_running()        # --port is the base port iff WE start it
     rc, provisioned, branch_ready, proxy = 1, False, False, None
     create_env = list(args.env) + (list(_BRANCH_ENV) if args.branch else [])
+    create_kw = {"memory": args.memory} if args.memory else {}   # no flag, no -m
     github_meta = {"github_read": github_read, "github_write": github_write} \
         if (github_read or github_write) else {}
     try:
@@ -2663,7 +2666,7 @@ def cmd_run(args):
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           meta_extra, ctx, ctx_paths)
+                           meta_extra, ctx, ctx_paths, **create_kw)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -2783,6 +2786,7 @@ def cmd_up(args):
     image = ensure_image(profiles, args.image, base=args.base)
     provisioned = False
     create_env = list(args.env) + (list(_BRANCH_ENV) if args.branch else [])
+    create_kw = {"memory": args.memory} if args.memory else {}   # no flag, no -m
     github_meta = {"github_read": github_read, "github_write": github_write} \
         if (github_read or github_write) else {}
     try:
@@ -2794,7 +2798,7 @@ def cmd_up(args):
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           meta_extra, ctx, ctx_paths)
+                           meta_extra, ctx, ctx_paths, **create_kw)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -4622,6 +4626,15 @@ def _image_arg(ref):
     return ref
 
 
+def _memory_arg(value):
+    """argparse type for --memory: the shape msb documents for -m, digits then M or G."""
+    if not re.fullmatch(r"[0-9]+[MG]", value):
+        raise argparse.ArgumentTypeError(
+            f"invalid memory size {value!r} — expected digits then M or G, "
+            "for example 512M or 1G")
+    return value
+
+
 class _MarkedParser(argparse.ArgumentParser):
     """argparse whose stderr lines carry silkgate's voice mark.
 
@@ -4715,6 +4728,9 @@ def main():
                         "necessarily here (default: 8090)")
     p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")
+    p.add_argument("--memory", metavar="SIZE", type=_memory_arg,
+                   help="guest memory size as digits then M or G, e.g. 512M or 1G — passed "
+                        "to msb create as -m (default: msb's own size)")
     p.add_argument("-v", "--mount", action="append", default=[], metavar="SRC:DST[:ro|rw]",
                    type=_mount_arg,
                    help="mount host directory SRC at DST in the guest, read-only unless the "
@@ -4788,6 +4804,9 @@ def main():
     env_opt(p)
     p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")
+    p.add_argument("--memory", metavar="SIZE", type=_memory_arg,
+                   help="guest memory size as digits then M or G, e.g. 512M or 1G — passed "
+                        "to msb create as -m (default: msb's own size)")
     p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
                    help="shared-proxy scan floor when this command starts it: the pool "
                         "lands on the first free 16-port range at or above this, not "
