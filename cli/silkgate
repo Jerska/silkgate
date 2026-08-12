@@ -2675,7 +2675,8 @@ def cmd_run(args):
         # signals deferred, so a second Ctrl-C cannot leave the session half-removed.
         with _deferred_interrupts():
             if provisioned:
-                meta = read_meta(name) or {"name": name, "sandbox": sandbox_name(name)}
+                meta = read_meta(name) or {"name": name, "sandbox": sandbox_name(name),
+                                           **(spec or {}), **({"workspace": ws} if ws else {})}
                 # Harvest while the guest is still up — its gitdir dies with the VM. A
                 # harvest that could not bank everything keeps the workspace and must not
                 # let a green guest run mask it, hence the forced nonzero exit.

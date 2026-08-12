@@ -1204,6 +1204,70 @@ class TestBranchGuards(GitRepoCase):
                             else sg._name_ok(seen["name"]))
 
 
+class TestHarvestWiring(CliCase):
+    """cmd_run's finally block and cmd_down: the harvest runs before the teardown, a
+    failed harvest keeps the workspace and forces exit 1, and a vanished meta.json still
+    harvests from the launch spec. Everything past the CLI is stubbed at module
+    attributes, as in test_run_and_up_wire_branch_through_spec_and_workspace."""
+
+    FAKE_SPEC = {"branch": "nb", "git_dir": "/g", "base": "0" * 40,
+                 "repo_root": "/r", "workspace_derived": True}
+
+    def drive_run(self, *, harvest_ok, meta_on_disk=True):
+        """`run --branch` driven past run_guest -> (exit code, ordered calls, harvest meta)."""
+        ws = str(self.tmp / "ws")
+        calls, seen = [], {}
+
+        def read_meta(name):
+            if not meta_on_disk:
+                return None
+            return {"name": name, "sandbox": sg.sandbox_name(name), "workspace": ws,
+                    **self.FAKE_SPEC}
+
+        def harvest(meta):
+            calls.append("harvest")
+            seen["meta"] = meta
+            return harvest_ok
+
+        with mock.patch.object(sys, "argv", ["silkgate", "run", "--with", "git",
+                                             "--branch", "nb", "--", "true"]), \
+                self.no_preflight(), \
+                mock.patch.object(sg, "_branch_spec", lambda *a: dict(self.FAKE_SPEC)), \
+                mock.patch.object(sg, "_branch_workspace", lambda spec, name: (ws, [])), \
+                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
+                mock.patch.object(sg, "_proxy_running", lambda: True), \
+                mock.patch.object(sg, "ensure_proxy",
+                                  lambda port: {"log": "/dev/null", "ports": [8090]}), \
+                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(sg, "_provision_session", lambda *a, **k: None), \
+                mock.patch.object(sg, "tier1_fault", lambda *a: None), \
+                mock.patch.object(sg, "_setup_branch_guest", lambda *a: None), \
+                mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
+                mock.patch.object(sg, "read_meta", read_meta), \
+                mock.patch.object(sg, "_harvest_branch", harvest), \
+                mock.patch.object(sg, "_teardown_session",
+                                  lambda meta: calls.append("teardown")), \
+                mock.patch.object(sg, "_reap_derived_workspace",
+                                  lambda meta: calls.append("reap")), \
+                mock.patch.object(sg, "list_metas", lambda: []), \
+                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(sg, "say", lambda *a, **k: None), \
+                self.assertRaises(SystemExit) as caught:
+            sg.main()
+        return caught.exception.code, calls, seen.get("meta")
+
+    def test_run_harvests_from_the_launch_spec_when_meta_vanishes(self):
+        # Regression: with meta.json unreadable mid-run, the fallback meta lacked
+        # branch/base/workspace — _bundle_in_guest raised KeyError inside the finally,
+        # so _teardown_session never ran and the sandbox leaked.
+        code, calls, meta = self.drive_run(harvest_ok=True, meta_on_disk=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(meta["branch"], "nb")
+        self.assertEqual(meta["base"], "0" * 40)
+        self.assertEqual(meta["workspace"], str(self.tmp / "ws"))
+        self.assertIn("teardown", calls)
+
+
 class TestCheckoutSessions(GitRepoCase):
     """--checkout [REF]: a disposable, guest-local checkout of the enclosing repo, with
     --branch layered on top of the same validation and mounts."""
