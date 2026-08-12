@@ -294,7 +294,77 @@ button:hover { border-color: var(--muted); }
   padding: var(--sp-3);
 }
 
-.exec-pick { display: block; color: var(--muted); margin-bottom: var(--sp-2); }
+.exec-pick {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--muted);
+  margin-bottom: var(--sp-2);
+}
+
+/* One pattern for every detail pane: it scrolls itself, both ways — the body
+   never scrolls, even at half-screen with a wide diff or argv line. */
+.pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-3);
+}
+
+.pane h3 {
+  font-size: inherit;
+  color: var(--muted);
+  margin: var(--sp-4) 0 var(--sp-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.pane-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+.pane-note { color: var(--muted); }
+
+.pane pre {
+  margin: 0;
+  padding: var(--sp-2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px var(--sp-4);
+  margin: 0;
+}
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+
+.journal-line { padding: 2px 0; }
+.j-time { color: var(--muted); margin-right: var(--sp-3); }
+.j-event.bad { color: var(--deny); }
+.j-detail {
+  color: var(--muted);
+  padding-left: var(--sp-5);
+  overflow-wrap: anywhere;
+}
+
+.cfg-extra { margin-top: var(--sp-3); }
+.cfg-extra summary { cursor: pointer; color: var(--accent); }
+
+.metric-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-1) 0;
+}
+.metric-label { color: var(--muted); width: 10em; flex: none; }
+.metric-row .spark { width: 240px; height: 32px; }
 
 .feed-strip .sighting { color: var(--deny); }
 .feed-strip .capture-err { color: var(--idle); }

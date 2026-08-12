@@ -9,14 +9,18 @@
 // LLM output is attacker-influenced text and reaches the DOM only as text
 // nodes; tool input renders as JSON.stringify inside a <pre>.
 
-import { el, statusDot, fmtTokens } from "../render.js";
-import { fmtBytes, fmtDur } from "../store.js";
+import { el, statusDot, renderDiff, sparkline, fmtTokens } from "../render.js";
+import { fmtBytes, fmtDur, fmtTime } from "../store.js";
 import { sessionTotals } from "../capture.js";
+import { journalEvent } from "../timeline.js";
 import { newControlBar, newKillControl } from "../controls.js";
 import { triage, fmtAge } from "./overview.js";
 import { newCallsView } from "./calls.js";
 
-const TABS = ["activity", "calls", "config"];
+const TABS = ["activity", "calls", "diff", "config", "brief", "output", "metrics"];
+const DETAIL_MS = 5000;          // min gap between /api/session/<ident> fetches
+const OUTPUT_TAIL = 500;
+const OUTPUT_MIN_MS = 1000;      // min gap between manual output refreshes
 
 export function newSessionView() {
   let ctx = null;
@@ -29,9 +33,18 @@ export function newSessionView() {
   let ctlBar = null;
   let tabBar, tabBody;
 
-  // The active tab's teardown state: a mounted calls view, or a feed.
+  // The active tab's teardown state: a mounted calls view, a feed, or a pane.
   let callsView = null;
   let feed = null;                 // {list, strip, execSel, execs, selected, nodes}
+  let cfgPane = null;
+  let briefPane = null;
+  let metricsPane = null;
+
+  // The /api/session/<ident> payload feeds the config and brief tabs and the
+  // activity timeline's journal events. Fetched on mount and re-fetched at
+  // most every DETAIL_MS while a consuming tab is up.
+  let detail = null;               // null | "unavailable" | the payload
+  let detailAt = 0;
 
   function meta() {
     for (const m of ctx.sessions?.sessions ?? []) {
@@ -41,6 +54,34 @@ export function newSessionView() {
       if (String(m?.sid ?? m?.name) === ident) return m;
     }
     return null;
+  }
+
+  // A diff exists only where a git workspace does. Without a meta the answer
+  // is unknown — show the tab and let the endpoint speak for itself.
+  function hasWorkspace() {
+    const m = meta();
+    if (!m) return true;
+    if (m.branch) return true;
+    const mode = m.mode ?? m.workspace ?? null;
+    return mode === "branch" || mode === "checkout";
+  }
+
+  async function fetchDetail(force = false) {
+    const now = Date.now();
+    if (!force && now - detailAt < DETAIL_MS) return;
+    detailAt = now;
+    try {
+      const resp = await fetch(`/api/session/${encodeURIComponent(ident)}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      detail = await resp.json();
+    } catch {
+      if (detail === null || detail === "unavailable") detail = "unavailable";
+      return;                      // a stale payload beats an error banner
+    }
+    if (!root) return;             // unmounted while the fetch was in flight
+    if (tab === "config") renderConfig();
+    if (tab === "brief") renderBrief();
+    if (tab === "activity" && feed) renderFeed();
   }
 
   // --- header ---------------------------------------------------------------
@@ -69,6 +110,7 @@ export function newSessionView() {
       ? "unknown session" : s.label;
     head.branch.textContent = m?.branch ? String(m.branch) : "";
     ctlBar?.sync();
+    if (head.diffTab) head.diffTab.hidden = !hasWorkspace();
     updateMetrics();
   }
 
@@ -238,6 +280,276 @@ export function newSessionView() {
     }
   }
 
+  // --- the diff tab -----------------------------------------------------------
+  // Everything in it comes back from a guest-side git run, so the pane wears
+  // the untrusted label and renders through renderDiff/textContent only. The
+  // diff never runs on its own — one POST per explicit click.
+
+  function renderDiffResult(out, body) {
+    out.textContent = "";
+    if (body.mode != null) {
+      out.append(el("div", { class: "pane-note" }, `mode: ${body.mode}`));
+    }
+    const status = typeof body.status === "string" ? body.status : "";
+    out.append(el("h3", null, "git status --porcelain"),
+               status.trim() === ""
+                 ? el("p", { class: "state-msg" }, "clean — nothing to report")
+                 : el("pre", { class: "porcelain" }, status));
+    out.append(el("h3", null, "diff"));
+    const diffText = typeof body.diff === "string" ? body.diff : "";
+    if (diffText.trim() === "") {
+      out.append(el("p", { class: "state-msg" }, "empty diff"));
+    } else {
+      out.append(renderDiff(diffText));
+    }
+    if (body.truncated) {
+      out.append(el("div", { class: "diff-trunc" },
+                    "the server truncated this diff"));
+    }
+  }
+
+  function showDiffTab() {
+    const btn = el("button", { type: "button" }, "load diff");
+    const out = el("div");
+    const msg = el("p", { class: "state-msg" });
+    msg.textContent = hasWorkspace()
+      ? "nothing loaded — the diff runs in the guest on demand, never on its own"
+      : "this session has no git workspace to diff";
+    btn.disabled = !hasWorkspace();
+    tabBody.append(el("section", { class: "pane diff-pane" },
+      el("div", { class: "pane-bar" }, btn,
+         el("span", { class: "badge untrusted" }, "untrusted — guest output")),
+      out, msg));
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      out.textContent = "";
+      msg.textContent = "diffing…";
+      msg.hidden = false;
+      let resp;
+      let body = null;
+      try {
+        resp = await fetch(`/api/session/${encodeURIComponent(ident)}/diff`,
+                           { method: "POST" });
+        try {
+          body = await resp.json();
+        } catch {
+          // no JSON body — the status alone will have to explain
+        }
+      } catch {
+        msg.textContent = "ui server unreachable";
+        btn.disabled = false;
+        return;
+      }
+      if (!out.isConnected) return;          // the tab was torn down meanwhile
+      btn.disabled = false;
+      if (resp.status === 409) {
+        msg.textContent = `cannot diff: ${body?.error ?? "conflict"}`;
+      } else if (resp.status === 429) {
+        msg.textContent = "a diff is already running — try again in a moment";
+      } else if (!resp.ok) {
+        msg.textContent = body?.error
+          ? `diff failed: ${body.error}`
+          : `diff not available yet — the endpoint lands with the backend`
+            + ` (HTTP ${resp.status})`;
+      } else {
+        msg.hidden = true;
+        renderDiffResult(out, body ?? {});
+      }
+    });
+  }
+
+  // --- the config tab -----------------------------------------------------------
+
+  // Key/value rendering for the meta: argv holds the operator prompt and every
+  // value is trail data, so nothing here is markup — dt/dd text only.
+  function kvList(obj) {
+    const dl = el("dl", { class: "kv" });
+    for (const [k, v] of Object.entries(obj)) {
+      dl.append(el("dt", null, k),
+                el("dd", null, typeof v === "string" ? v : JSON.stringify(v)));
+    }
+    return dl;
+  }
+
+  function journalLine(ev) {
+    const parts = [ev.event];
+    if (ev.execId != null) parts.push(`exec ${ev.execId}`);
+    if (ev.rc != null) parts.push(`rc ${ev.rc}`);
+    if (ev.tty != null) parts.push(ev.tty ? "tty" : "no tty");
+    const node = el("div", { class: "journal-line" },
+      el("span", { class: "num j-time", title: ev.ts ?? "" }, fmtTime(ev.ts)),
+      el("span", { class: "j-event" + (ev.rc != null && ev.rc !== 0 ? " bad" : "") },
+         parts.join(" · ")));
+    if (ev.argv) {
+      node.append(el("div", { class: "j-detail" }, "argv: " + ev.argv.join(" ")));
+    }
+    if (ev.envNames?.length) {
+      node.append(el("div", { class: "j-detail" },
+                     "env: " + ev.envNames.join(" ")));
+    }
+    return node;
+  }
+
+  function renderConfig() {
+    if (!cfgPane) return;
+    cfgPane.textContent = "";
+    const m = meta();
+    if (detail === null) {
+      cfgPane.append(el("p", { class: "state-msg" }, "loading session detail…"));
+      return;
+    }
+    if (detail === "unavailable") {
+      cfgPane.append(el("p", { class: "state-msg" },
+        "session detail not available yet — GET /api/session/<ident> lands"
+        + " with the backend"));
+      if (m) {
+        cfgPane.append(el("h3", null, "meta (from /api/sessions)"), kvList(m));
+      }
+      return;
+    }
+    const info = detail.session && typeof detail.session === "object"
+      ? detail.session : m;
+    cfgPane.append(el("h3", null, "invocation"));
+    cfgPane.append(info ? kvList(info)
+                        : el("p", { class: "state-msg" }, "no meta known"));
+    cfgPane.append(el("h3", null, "journal"));
+    const events = (Array.isArray(detail.journal) ? detail.journal : [])
+      .map(journalEvent).filter(Boolean);
+    if (events.length === 0) {
+      cfgPane.append(el("p", { class: "state-msg" }, "empty journal"));
+    } else {
+      cfgPane.append(...events.map(journalLine));
+    }
+    for (const key of ["rules", "pointers"]) {
+      if (detail[key] != null) {
+        cfgPane.append(el("details", { class: "cfg-extra" },
+          el("summary", null, key),
+          el("pre", null, JSON.stringify(detail[key], null, 2))));
+      }
+    }
+  }
+
+  // --- the brief tab --------------------------------------------------------------
+
+  function renderBrief() {
+    if (!briefPane) return;
+    briefPane.textContent = "";
+    if (detail === null) {
+      briefPane.append(el("p", { class: "state-msg" }, "loading session detail…"));
+      return;
+    }
+    if (detail === "unavailable") {
+      briefPane.append(el("p", { class: "state-msg" },
+        "session detail not available yet — GET /api/session/<ident> lands"
+        + " with the backend"));
+      return;
+    }
+    const b = detail.brief;
+    if (b == null) {
+      briefPane.append(el("p", { class: "state-msg" },
+                          "no brief recorded for this session"));
+      return;
+    }
+    briefPane.append(el("div", { class: "pane-bar" },
+      el("span", { class: "pane-note" }, `source: ${b.source ?? "?"}`),
+      b.source === "workspace"
+        ? el("span", { class: "badge untrusted" }, "guest-writable — untrusted")
+        : null,
+      b.sha256
+        ? el("span", { class: "num", title: String(b.sha256) },
+             `sha256 ${String(b.sha256).slice(0, 12)}…`)
+        : null,
+      b.truncated ? el("span", { class: "pane-note" }, "(truncated)") : null));
+    briefPane.append(el("pre", { class: "brief-text" }, b.text ?? ""));
+  }
+
+  // --- the output tab --------------------------------------------------------------
+
+  function showOutputTab() {
+    const refresh = el("button", { type: "button" }, "refresh");
+    const label = el("span", { class: "num" });
+    const pre = el("pre", { class: "output-text" });
+    const msg = el("p", { class: "state-msg" }, "loading output…");
+    pre.hidden = true;
+    refresh.hidden = meta()?.state === "archived";   // a done guest is done
+    tabBody.append(el("section", { class: "pane output-pane" },
+      el("div", { class: "pane-bar" }, refresh, label,
+         el("span", { class: "badge untrusted" }, "untrusted — guest stdout")),
+      pre, msg));
+    async function load() {
+      let body;
+      try {
+        const resp = await fetch(`/api/session/${encodeURIComponent(ident)}`
+                                 + `/output?tail=${OUTPUT_TAIL}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        body = await resp.json();
+      } catch (err) {
+        if (pre.isConnected) {
+          msg.textContent = "output not available yet — the endpoint lands"
+            + ` with the backend (${err.message})`;
+          msg.hidden = false;
+        }
+        return;
+      }
+      if (!pre.isConnected) return;
+      const lines = Array.isArray(body.lines) ? body.lines
+        : typeof body.lines === "string" ? body.lines.split("\n") : [];
+      pre.textContent = lines.join("\n");
+      pre.hidden = false;
+      label.textContent = `showing last ${lines.length} lines`
+        + (body.truncated ? " (truncated)" : "")
+        + (body.source != null ? ` · ${body.source}` : "");
+      msg.hidden = lines.length > 0;
+      if (lines.length === 0) msg.textContent = "no output yet";
+    }
+    refresh.addEventListener("click", () => {
+      refresh.disabled = true;     // one manual refresh per second, no faster
+      setTimeout(() => { refresh.disabled = false; }, OUTPUT_MIN_MS);
+      load();
+    });
+    load();
+  }
+
+  // --- the metrics tab --------------------------------------------------------------
+
+  function renderMetricsTab() {
+    if (!metricsPane) return;
+    metricsPane.textContent = "";
+    const rows = ctx.metrics?.metrics;
+    const m = Array.isArray(rows)
+      ? rows.find((r) => r?.session === session) : null;
+    if (!m) {
+      metricsPane.append(el("p", { class: "state-msg" },
+        ctx.metrics === null
+          ? "metrics not available yet — /api/metrics lands with the backend"
+          : "no metrics for this session in the last sample"));
+      return;
+    }
+    const h = ctx.metricsHistory?.bySession.get(session);
+    const row = (label, value, series) => el("div", { class: "metric-row" },
+      el("span", { class: "metric-label" }, label),
+      el("span", { class: "num metric-value" }, value),
+      series ? sparkline(series, { width: 240, height: 32 }) : null);
+    const mem = m.memory_bytes != null
+      ? fmtBytes(m.memory_bytes)
+        + (m.memory_limit_bytes != null
+           ? ` / ${fmtBytes(m.memory_limit_bytes)}` : "")
+      : "—";
+    metricsPane.append(
+      row("cpu", m.cpu_percent != null ? `${m.cpu_percent}%` : "—", h?.cpu),
+      row("mem (VMM RSS)", mem, h?.mem),
+      row("net", `↓${fmtBytes(m.net_rx_bytes ?? 0)} ↑${fmtBytes(m.net_tx_bytes ?? 0)}`,
+          null),
+      row("disk", `r${fmtBytes(m.disk_read_bytes ?? 0)}`
+                  + ` w${fmtBytes(m.disk_write_bytes ?? 0)}`, null),
+      m.uptime_secs != null ? row("up", fmtAge(m.uptime_secs * 1000), null) : null,
+      ctx.metrics.sampled != null
+        ? el("p", { class: "pane-note num" },
+             `sampled ${fmtTime(ctx.metrics.sampled)} · 30-sample history,`
+             + " collected while this tab or the overview is open")
+        : null);
+  }
+
   // --- tabs -------------------------------------------------------------------
 
   function teardownTab() {
@@ -246,6 +558,9 @@ export function newSessionView() {
       callsView = null;
     }
     feed = null;
+    cfgPane = null;
+    briefPane = null;
+    metricsPane = null;
     tabBody.textContent = "";
   }
 
@@ -289,9 +604,25 @@ export function newSessionView() {
       feed = { execSel, kill: killCtl.root, strip, list, msg,
                nodes: new Map(), selected: "", execs: null };
       renderFeed();
-    } else {
-      tabBody.append(el("p", { class: "state-msg" },
-                        `${tab} — wave 2 fills this tab`));
+      fetchDetail();               // journal events feed the merged timeline
+    } else if (tab === "diff") {
+      showDiffTab();
+    } else if (tab === "config") {
+      cfgPane = el("section", { class: "pane config-pane" });
+      tabBody.append(cfgPane);
+      renderConfig();
+      fetchDetail();
+    } else if (tab === "brief") {
+      briefPane = el("section", { class: "pane brief-pane" });
+      tabBody.append(briefPane);
+      renderBrief();
+      fetchDetail();
+    } else if (tab === "output") {
+      showOutputTab();
+    } else if (tab === "metrics") {
+      metricsPane = el("section", { class: "pane metrics-pane" });
+      tabBody.append(metricsPane);
+      renderMetricsTab();
     }
   }
 
@@ -317,6 +648,7 @@ export function newSessionView() {
       ...TABS.map((t) => el("a", { href: "#/session/" + encodeURIComponent(ident)
                                          + (t === "activity" ? "" : "?tab=" + t),
                                    dataset: { tab: t } }, t)));
+    head.diffTab = [...tabBar.children].find((a) => a.dataset.tab === "diff");
     tabBody = el("div", { class: "tab-body" });
     root = el("section", { class: "session" },
       el("header", { class: "session-head" },
@@ -332,6 +664,7 @@ export function newSessionView() {
     host.appendChild(root);
     updateHead();
     showTab(route.tab);
+    fetchDetail(true);
     ticker = setInterval(updateHead, 1000);   // idle labels move with time alone
   }
 
@@ -356,6 +689,12 @@ export function newSessionView() {
     if (payload.sessions.has(session) || payload.polled) {
       updateHead();
       if (feed) renderFeed();
+      renderMetricsTab();
+    }
+    // The journal grows as the session lives (exec ends, freezes, harvests);
+    // ride the sessions poll, throttled inside fetchDetail.
+    if (payload.polled && (tab === "config" || tab === "activity")) {
+      fetchDetail();
     }
   }
 
@@ -368,7 +707,11 @@ export function newSessionView() {
       feed.execs = null;
       renderFeed();
     }
+    renderMetricsTab();
   }
 
-  return { mount, unmount, onFlush, onRoute, rebuild, wantsMetrics: true };
+  return { mount, unmount, onFlush, onRoute, rebuild,
+           // Only the metrics tab consumes the 2 s sampling poll; the header's
+           // one-line summary rides whatever the last consumer fetched.
+           get wantsMetrics() { return tab === "metrics"; } };
 }
