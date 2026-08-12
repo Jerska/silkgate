@@ -54,7 +54,7 @@ export function captureError({ session = "demo", id = "flow-err", at = 0 } = {})
 export function secretSighting({ session = "demo", exec = "e1", id = "flow-sec",
                                  at = 0, index = 1 } = {}) {
   return { ts: ts(at), kind: "secret_sighting", id, session,
-           host: "api.anthropic.com", exec, pattern: "anthropic api key", index };
+           host: "api.anthropic.com", exec, pattern: "anthropic-api-key", index };
 }
 
 // A believable session: two execs, one unattributed record, an error and a
