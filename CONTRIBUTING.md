@@ -48,9 +48,12 @@ description in the imperative, lowercase. The body explains the why when the tit
 Keep history linear: rebase, never merge-commit.
 
 A commit authored inside a silkgate guest carries that session's identity,
-`Claude (silkgate/<session>) <claude-<session>@silkgate.invalid>`, and a host commit
-carries your own. The mix is deliberate — it records where each change was made — so
-never rewrite one identity into the other.
+`Claude (silkgate/<session>) <claude-<session>@silkgate.invalid>`. That identity marks
+the commit as unreviewed guest output and stays through harvest and review. After the
+owner reviews the branch, the host agent re-authors the guest commits to the owner's
+identity, before the merge to main. The credit moves to the owner, who answers for the
+review — never to the agent that operates the host. A host commit carries the owner's
+identity from the start.
 
 ## Documentation style
 
