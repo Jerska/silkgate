@@ -119,7 +119,7 @@ button:hover { border-color: var(--muted); }
 /* The pulse is opacity-only — no motion for anyone, none at all when the
    reader asked for reduced motion. */
 @media (prefers-reduced-motion: no-preference) {
-  .dot.pulse { animation: dot-pulse 1.6s ease-in-out infinite; }
+  .dot.pulse, .caret { animation: dot-pulse 1.6s ease-in-out infinite; }
   @keyframes dot-pulse { 50% { opacity: 0.35; } }
 }
 
@@ -206,6 +206,94 @@ button:hover { border-color: var(--muted); }
   margin-top: var(--sp-2);
   color: var(--muted);
 }
+
+/* --- the session detail -------------------------------------------------------- */
+
+.session {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.session-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.session-name { font-weight: 600; }
+.session-branch, .session-metrics { color: var(--muted); }
+.session-head .num { color: var(--muted); }
+
+.tabs {
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+}
+.tabs a { color: var(--muted); padding: var(--sp-1) 0; }
+.tabs a[aria-current="page"] {
+  color: var(--fg);
+  border-bottom: 2px solid var(--accent);
+}
+
+.tab-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.activity {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-3);
+}
+
+.exec-pick { display: block; color: var(--muted); margin-bottom: var(--sp-2); }
+
+.feed-strip .sighting { color: var(--deny); }
+.feed-strip .capture-err { color: var(--idle); }
+
+.turn {
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.turn-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  color: var(--muted);
+}
+.turn-model { color: var(--fg); }
+
+.block-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-top: var(--sp-2);
+}
+
+.block-tool { margin-top: var(--sp-2); }
+.block-tool summary { cursor: pointer; color: var(--accent); }
+.block-tool pre {
+  margin: var(--sp-1) 0 0;
+  padding: var(--sp-2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+.block-note { color: var(--muted); font-style: italic; }
+.turn-error { color: var(--deny); margin-top: var(--sp-1); }
+
+.caret { color: var(--live); }
 
 /* --- the calls table (today's UI, scoped) ------------------------------------ */
 
