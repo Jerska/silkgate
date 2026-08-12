@@ -1813,6 +1813,54 @@ class TestMemoryFlag(CliCase):
                               ["up", f"--memory={bad}"])
 
 
+class TestCpusFlag(CliCase):
+    """--cpus sets the guest's virtual CPU count. The count must land in the msb create
+    argv as -c COUNT — nothing ever recreates a sandbox from session metadata, so that
+    argv is the flag's whole effect — and a count msb would not parse must die at the
+    command line, before any sandbox work starts."""
+
+    # The capture helper is TestMemoryFlag's, unchanged: the two flags share one
+    # plumbing path, and this class pins the -c half of it.
+    create_argv = TestMemoryFlag.create_argv
+
+    def test_cpus_lands_in_msb_create_for_run_and_up(self):
+        for argv in (["run", "--cpus", "2", "--", "true"],
+                     ["up", "--cpus", "2"]):
+            created = self.create_argv(argv)
+            self.assertIn(("-c", "2"), list(zip(created, created[1:])), argv)
+
+    def test_no_flag_passes_no_dash_c(self):
+        for argv in (["run", "--", "true"], ["up"]):
+            self.assertNotIn("-c", self.create_argv(argv), argv)
+
+    def test_both_flags_land_together(self):
+        for argv in (["run", "--memory", "512M", "--cpus", "2", "--", "true"],
+                     ["up", "--memory", "512M", "--cpus", "2"]):
+            created = self.create_argv(argv)
+            pairs = list(zip(created, created[1:]))
+            self.assertIn(("-m", "512M"), pairs, argv)
+            self.assertIn(("-c", "2"), pairs, argv)
+
+    def test_the_builder_itself_defaults_to_no_dash_c(self):
+        with mock.patch.object(sg, "_msb", lambda: "msb"):
+            created = sg.msb_create_argv("sg-x", "img", 8090, cpus="4")
+            self.assertIn(("-c", "4"), list(zip(created, created[1:])))
+            self.assertNotIn("-c", sg.msb_create_argv("sg-x", "img", 8090))
+
+    def test_a_positive_integer_survives_parsing(self):
+        for count in ("1", "2", "8", "16"):
+            self.assertEqual(sg._cpus_arg(count), count)
+
+    def test_a_malformed_count_dies_at_the_command_line(self):
+        # Exit code 2 is argparse's, raised while parsing — structurally before any
+        # proxy, image, or msb work, which is why nothing here needs a mock.
+        for bad in ("0", "-1", "abc", "1.5", "", "01", "+2", "2G"):
+            self.refuses_argv("invalid cpu count", "--cpus",
+                              ["run", f"--cpus={bad}", "--", "true"])
+            self.refuses_argv("invalid cpu count", "--cpus",
+                              ["up", f"--cpus={bad}"])
+
+
 class TestGuestBriefMounts(CliCase):
     """session_context keys the /workspace sentence on the mount at /workspace and lists
     every other mount with its mode."""
