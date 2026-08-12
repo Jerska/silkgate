@@ -232,16 +232,18 @@ silkgate run --with git --with claude --branch agent/fix-flaky-test -- \
 ```
 
 A persistent session works the same way (`up --branch … --name bar`), and
-`silkgate harvest bar` banks its commits mid-session without a stop.
+`silkgate harvest bar` banks its commits mid-session without a stop. `harvest` also works
+against a `run` session — `run` prints its session name at startup.
 
-At `down`, and on every `harvest`, the guest's commits come out as a bundle. The host
-fetches it under `fetch.fsckObjects`, then promotes fast-forward-only with one
-compare-and-swap: a branch that already exists, that someone else moved, or whose harvested
-history the guest rewrote is refused, and the refused commits stay reachable at
+At `run` teardown, at `down`, and on every `harvest`, the guest's commits come out as a
+bundle. The host fetches it under `fetch.fsckObjects`, then promotes fast-forward-only with
+one compare-and-swap: a branch that already exists, that someone else moved, or whose
+harvested history the guest rewrote is refused, and the refused commits stay reachable at
 `refs/silkgate/<session>/<branch>`. The derived workspace under `<repo>/.silkgate/sandboxes/`
 is deleted at teardown — uncommitted files die with it, and the guest's brief says so —
 except when a harvest was unable to bank everything, in which case it is kept and named.
-Commits made after the last harvest live only in the VM, so `harvest` long sessions at
+That failed harvest also makes `run` and `down` exit 1, even when the guest command exited
+0. Commits made after the last harvest live only in the VM, so `harvest` long sessions at
 milestones.
 
 With LFS in use, `.git/lfs` is mounted read-write in either mode — the one piece of host
