@@ -15,6 +15,7 @@ import { parseRoute, buildRoute, legacyRedirect } from "./router.js";
 import { newCallsView } from "./views/calls.js";
 import { newOverviewView } from "./views/overview.js";
 import { newSessionView } from "./views/session.js";
+import { newSearchView } from "./views/search.js";
 
 const ROW_CAP = 5000;            // newest rows kept; older ones fall off the top
 const CAPTURE_LIMIT = 2000;      // /api/capture history page
@@ -25,6 +26,7 @@ const METRICS_POLL_MS = 2000;    // only while a metrics-consuming view is mount
 const viewHost = document.getElementById("view");
 const proxyState = document.getElementById("proxy-state");
 const streamState = document.getElementById("stream-state");
+const searchBox = document.getElementById("search-box");
 const navLinks = {
   overview: document.getElementById("nav-overview"),
   traffic: document.getElementById("nav-traffic"),
@@ -280,6 +282,7 @@ let viewKey = null;              // which mount the current view answers for
 function makeView(route) {
   if (route.view === "traffic") return newCallsView();
   if (route.view === "session") return newSessionView();
+  if (route.view === "search") return newSearchView();
   return newOverviewView();
 }
 
@@ -287,6 +290,11 @@ function syncNav(route) {
   for (const [name, a] of Object.entries(navLinks)) {
     if (route.view === name) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
+  }
+  // The box mirrors the route's query, but never mid-keystroke.
+  if (route.view === "search" && document.activeElement !== searchBox
+      && searchBox.value !== (route.q ?? "")) {
+    searchBox.value = route.q ?? "";
   }
 }
 
@@ -320,6 +328,11 @@ function dispatch() {
 
 async function boot() {
   window.addEventListener("hashchange", dispatch);
+  searchBox.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      ctx.navigate({ view: "search", q: searchBox.value.trim() });
+    }
+  });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") stopPolls();
     else startPolls();

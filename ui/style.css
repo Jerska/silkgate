@@ -77,7 +77,9 @@ button:hover { border-color: var(--muted); }
   border-bottom: 2px solid var(--accent);
 }
 
-#proxy-state { margin-left: auto; color: var(--muted); }
+#search-box { margin-left: auto; width: 220px; min-width: 80px; }
+
+#proxy-state { color: var(--muted); }
 #stream-state { color: var(--muted); }
 
 #view {
@@ -302,6 +304,36 @@ button:hover { border-color: var(--muted); }
 .turn-error { color: var(--deny); margin-top: var(--sp-1); }
 
 .caret { color: var(--live); }
+
+/* --- global search ------------------------------------------------------------ */
+
+.search {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-4);
+}
+
+.search-group h2 {
+  font-size: inherit;
+  color: var(--muted);
+  margin: var(--sp-4) 0 var(--sp-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.search-hit {
+  display: flex;
+  gap: var(--sp-3);
+  padding: 2px 0;
+  min-width: 0;
+}
+.search-time { color: var(--muted); flex: none; }
+.search-session { flex: none; }
+.search-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* --- the calls table (today's UI, scoped) ------------------------------------ */
 
