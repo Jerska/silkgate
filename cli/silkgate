@@ -180,12 +180,49 @@ def _image_error(ref):
             "extra Dockerfile directive")
 
 
+def _arg_error(arg):
+    """Why `arg` cannot land inside generated rule text, or None. A rule is one
+    whitespace-separated line, so whitespace or a control character in an arg is rule
+    injection and is refused unconditionally, whatever pattern the profile declares —
+    everything finer is the declaring profile's arg_pattern's question."""
+    if not arg:
+        return "empty argument — drop the ':' or name an argument"
+    if any(c.isspace() or not c.isprintable() for c in arg):
+        return (f"invalid argument {arg!r} — whitespace and control characters never pass; "
+                "the argument lands inside rule syntax")
+    return None
+
+
+def _parse_spec(spec):
+    """Split `NAME[@VERSION][:ARG]` into (name, version, arg), or raise ValueError.
+
+    Charset questions only: the name resolves later, against the profiles that exist,
+    and the arg's shape against the profile's declared arg_pattern. Neither a name nor
+    a version can contain ':', so the first ':' opens the arg — which may itself
+    contain more of them."""
+    head, sep, arg = spec.partition(":")
+    name, vsep, version = head.partition("@")
+    if vsep and not version:
+        raise ValueError(
+            f"{spec!r} pins an empty version — drop the '@' or name a version (an unset shell "
+            "variable expands to this, and would quietly install the default instead)")
+    bad = _version_error(version) if version else None
+    if bad:
+        raise ValueError(bad)
+    if sep:
+        bad = _arg_error(arg)
+        if bad:
+            raise ValueError(f"{spec!r}: {bad}")
+    return name, version or None, arg if sep else None
+
+
 class Profile:
-    """One resolved `--with name[@version]`: its files, its version, its metadata."""
+    """One resolved `--with name[@version][:arg]`: its files, version, arg, metadata."""
 
-    __slots__ = ("name", "version", "dir", "conf", "rules", "setup", "env", "packages")
+    __slots__ = ("name", "version", "arg", "arg_pattern", "dir", "conf", "rules", "setup",
+                 "env", "packages")
 
-    def __init__(self, name, version=None):
+    def __init__(self, name, version=None, arg=None):
         self.name, self.dir = name, PROFILE_DIR / name
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) or not self.dir.is_dir():
             avail = ", ".join(sorted(p.name for p in PROFILE_DIR.iterdir() if p.is_dir()))
@@ -203,10 +240,37 @@ class Profile:
             bad = _version_error(self.version)      # a profile.conf default is checked too
             if bad:
                 die(f"profile {name!r}: {bad}")
+        # The arg contract, both halves load-checked: a declared arg_pattern must be a
+        # usable full-match regex, and a {arg} placeholder without one is a rules line
+        # nothing may ever fill — refused at load so `profiles` lists the defect too.
+        self.arg_pattern = self.conf.get("arg_pattern")
+        if self.arg_pattern is not None:
+            if not self.arg_pattern:
+                die(f"profile {name!r}: empty arg_pattern — name a full-match pattern "
+                    "or drop the key")
+            try:
+                re.compile(self.arg_pattern)
+            except re.error as e:
+                die(f"profile {name!r}: bad arg_pattern {self.arg_pattern!r} — {e}")
+        elif "{arg}" in self.rules:
+            die(f"profile {name!r}: rules.txt uses {{arg}} but profile.conf declares no "
+                "arg_pattern — declare one or drop the placeholder")
+        if arg is not None:
+            bad = _arg_error(arg)       # unconditional, wherever the arg came from
+            if bad:
+                die(f"profile {name!r}: {bad}")
+            if self.arg_pattern is None:
+                die(f"profile {name!r} takes no argument "
+                    "(its profile.conf declares no arg_pattern)")
+            if not re.fullmatch(self.arg_pattern, arg):
+                die(f"profile {name!r}: argument {arg!r} does not match its arg_pattern "
+                    f"{self.arg_pattern!r}")
+        self.arg = arg
 
     @property
     def spec(self):
-        return f"{self.name}@{self.version}" if self.version else self.name
+        base = f"{self.name}@{self.version}" if self.version else self.name
+        return f"{base}:{self.arg}" if self.arg is not None else base
 
     def env_pairs(self):
         return [ln for ln in self.env.splitlines() if ln.strip() and not ln.startswith("#")]
@@ -231,14 +295,27 @@ def _read_if(path):
 
 
 def resolve_profiles(specs, *, allow_verify_only=False):
-    """Turn `--with` specs into Profiles, in the order given (which the image hash keeps)."""
+    """Turn `--with` specs into Profiles, in the order given (which the image hash keeps).
+
+    Each distinct (name, version, arg) instance lands once: exact duplicate specs and
+    respellings that resolve the same — `node` beside `node@<its default>` — deduplicate
+    silently, and each surviving instance expands its rules once.
+    """
     profiles = []
     for spec in specs:
-        name, _, version = spec.partition("@")
+        try:
+            name, version, arg = _parse_spec(spec)
+        except ValueError as e:
+            die(str(e))
         if name in _VERIFY_ONLY and not allow_verify_only:
             die(f"profile {name!r} is for `silkgate verify` only — it opens the Debian mirrors "
                 "so the containment check can install its probe tools through the proxy")
-        profiles.append(Profile(name, version or None))
+        p = Profile(name, version, arg)
+        if p.arg_pattern is not None and p.arg is None:
+            die(f"profile {name!r} requires an argument — write {name}:ARG, with an ARG "
+                f"that fully matches its arg_pattern {p.arg_pattern!r}")
+        if all((p.name, p.version, p.arg) != (q.name, q.version, q.arg) for q in profiles):
+            profiles.append(p)
     have = {p.name for p in profiles}
     for p in profiles:
         missing = [r for r in re.split(r"[,\s]+", p.conf.get("requires", "")) if r and r not in have]
@@ -4607,16 +4684,12 @@ def _mount_arg(spec):
 
 
 def _with_arg(spec):
-    """argparse type for --with: `name[@version]`. The name is resolved later, against the
-    profiles that exist; only the version is a charset question, and it is asked here."""
-    _, sep, version = spec.partition("@")
-    if sep and not version:
-        raise argparse.ArgumentTypeError(
-            f"{spec!r} pins an empty version — drop the '@' or name a version (an unset shell "
-            "variable expands to this, and would quietly install the default instead)")
-    bad = _version_error(version) if version else None
-    if bad:
-        raise argparse.ArgumentTypeError(bad)
+    """argparse type for --with: `name[@version][:arg]`. The name is resolved later,
+    against the profiles that exist; the version and arg charsets are asked here."""
+    try:
+        _parse_spec(spec)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
     return spec
 
 
@@ -4680,10 +4753,10 @@ def main():
     sub = ap.add_subparsers(dest="command", required=True)
 
     def profile_opts(p, *, rules_only=False):
-        p.add_argument("-w", "--with", dest="with_", action="append", metavar="PROFILE[@VER]",
-                       type=_with_arg,
+        p.add_argument("-w", "--with", dest="with_", action="append",
+                       metavar="PROFILE[@VER][:ARG]", type=_with_arg,
                        help="a profile from profiles/ — what to install and what it may reach "
-                            "(repeatable; `silkgate profiles` lists them)")
+                            "(repeatable; `silkgate profiles` lists them and each ARG pattern)")
         if not rules_only:
             p.add_argument("--base", default=BASE_IMAGE, type=_image_arg,
                            help=f"image the profiles layer onto (default: {BASE_IMAGE})")

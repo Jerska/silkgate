@@ -522,6 +522,117 @@ class TestProfileRequires(CliCase):
                          ["helper", "needy", "greedy"])
 
 
+class ArgProfileCase(CliCase):
+    """Shared fixtures for parameterized profiles. The mechanism is exercised on fixture
+    profiles under a temp PROFILE_DIR — profiles are user-addable data, so nothing here
+    needs (or gets) a real profile in profiles/."""
+
+    TMPL = {"profile.conf": "arg_pattern = [a-z]+/[a-z]+\n",
+            "rules.txt": "example.com/{arg}/** GET POST\n"}
+    PLAIN = {"rules.txt": "example.com/** GET\n"}
+
+    def profile_dir(self, profiles):
+        """Point PROFILE_DIR at a temp tree holding `profiles` ({name: {file: text}})."""
+        pdir = self.tmp / "profiles"
+        for name, files in profiles.items():
+            (pdir / name).mkdir(parents=True)
+            for fname, content in files.items():
+                (pdir / name / fname).write_text(content)
+        previous = sg.PROFILE_DIR
+        sg.PROFILE_DIR = pdir
+        self.addCleanup(setattr, sg, "PROFILE_DIR", previous)
+        return pdir
+
+
+class TestProfileArgSpecs(ArgProfileCase):
+    """NAME[@VERSION][:ARG] parsing and the arg contract. An arg lands inside rule
+    syntax, so a malformed arg is rule injection: whitespace and control characters are
+    refused unconditionally at the spec parser, everything finer by the profile's own
+    full-match arg_pattern."""
+
+    def test_parse_spec_splits_all_three_parts(self):
+        self.assertEqual(sg._parse_spec("node"), ("node", None, None))
+        self.assertEqual(sg._parse_spec("node@22.11.0"), ("node", "22.11.0", None))
+        self.assertEqual(sg._parse_spec("tmpl:owner/repo"), ("tmpl", None, "owner/repo"))
+        self.assertEqual(sg._parse_spec("tmpl@1.2:o/r"), ("tmpl", "1.2", "o/r"))
+        # The first ':' opens the arg, which may itself contain more of them.
+        self.assertEqual(sg._parse_spec("tmpl:a:b"), ("tmpl", None, "a:b"))
+
+    def test_version_errors_survive_the_new_grammar(self):
+        with self.assertRaises(ValueError):
+            sg._parse_spec("node@")
+        with self.assertRaises(ValueError):
+            sg._parse_spec("node@1 2:arg")
+
+    def test_whitespace_and_control_chars_refused_unconditionally(self):
+        for bad in ("a b", "a\tb", "a\nb", "a\rb", "\x01", "a\x7f", "\x1b[31m", ""):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                sg._parse_spec(f"tmpl:{bad}")
+
+    def test_bad_arg_via_flag_names_the_flag(self):
+        self.refuses_argv("whitespace and control", "--with",
+                          ["build", "--with", "tmpl:a\tb"])
+        self.refuses_argv("empty argument", "--with", ["build", "--with", "tmpl:"])
+
+    def test_arg_to_a_no_arg_profile_refused(self):
+        self.profile_dir({"plain": self.PLAIN})
+        self.refuses("takes no argument", sg.resolve_profiles, ["plain:x/y"])
+
+    def test_missing_arg_names_profile_and_pattern(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        message = self.refuses("requires an argument", sg.resolve_profiles, ["tmpl"])
+        self.assertIn("'tmpl'", message)
+        self.assertIn("[a-z]+/[a-z]+", message)
+
+    def test_mismatched_arg_names_profile_and_pattern(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        message = self.refuses("does not match", sg.resolve_profiles, ["tmpl:UPPER/x"])
+        self.assertIn("'tmpl'", message)
+        self.assertIn("[a-z]+/[a-z]+", message)
+
+    def test_pattern_is_a_full_match_not_a_search(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        self.refuses("does not match", sg.resolve_profiles, ["tmpl:a/b/c"])
+        self.refuses("does not match", sg.resolve_profiles, ["tmpl:a/b!"])
+        self.assertEqual(sg.resolve_profiles(["tmpl:a/b"])[0].arg, "a/b")
+
+    def test_placeholder_without_pattern_is_a_load_error(self):
+        self.profile_dir({"broken": {"rules.txt": "example.com/{arg}/** GET\n"}})
+        self.refuses("arg_pattern", sg.Profile, "broken")
+
+    def test_bad_and_empty_patterns_are_load_errors(self):
+        self.profile_dir({"badre": {"profile.conf": "arg_pattern = [unclosed\n"},
+                          "hollow": {"profile.conf": "arg_pattern =\n"}})
+        self.refuses("bad arg_pattern", sg.Profile, "badre")
+        self.refuses("empty arg_pattern", sg.Profile, "hollow")
+
+    def test_spec_property_carries_the_arg(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        self.assertEqual(sg.resolve_profiles(["tmpl:a/b"])[0].spec, "tmpl:a/b")
+
+
+class TestProfileInstanceDedup(ArgProfileCase):
+    """Each distinct (name, version, arg) instance lands once, silently."""
+
+    def test_exact_duplicates_dedupe_silently(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            profiles = sg.resolve_profiles(["tmpl:a/b", "tmpl:a/b"])
+        self.assertEqual([p.spec for p in profiles], ["tmpl:a/b"])
+        self.assertEqual(err.getvalue(), "")
+
+    def test_respellings_of_the_default_version_dedupe(self):
+        self.profile_dir({"verd": {"profile.conf": "default_version = 1.0\n"}})
+        profiles = sg.resolve_profiles(["verd", "verd@1.0"])
+        self.assertEqual([p.spec for p in profiles], ["verd@1.0"])
+
+    def test_distinct_args_are_distinct_instances(self):
+        self.profile_dir({"tmpl": self.TMPL})
+        profiles = sg.resolve_profiles(["tmpl:a/b", "tmpl:c/d"])
+        self.assertEqual([p.spec for p in profiles], ["tmpl:a/b", "tmpl:c/d"])
+
+
 class TestEmptyAllowlist(CliCase):
     """No --with and no --rule is the strictest policy silkgate can express."""
 
