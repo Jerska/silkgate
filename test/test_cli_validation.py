@@ -1957,6 +1957,22 @@ class TestGithubProfiles(CliCase):
             self.assertIsNotNone(got, f"{method} on the bare repo root under write")
             self.assertEqual(got.inject_auth, "github", method)
 
+    def test_api_rules_forward_user_agent_and_accept(self):
+        # GitHub REST answers 403 "User-Agent required" without one, and accept
+        # selects the API media type; neither is baseline, so the api lines opt in.
+        for spec in ("github-read:some/repo", "github-write:some/repo"):
+            rs = self.compose(spec)
+            for path in ("/repos/some/repo", "/repos/some/repo/contents/x"):
+                rule = rs.match("api.github.com", path, "GET")
+                label = f"{spec}: {path}"
+                self.assertTrue(rule.header_ok("user-agent", "git/2.45.0"), label)
+                self.assertTrue(rule.header_ok("accept", "application/vnd.github+json"),
+                                label)
+                self.assertFalse(rule.header_ok("user-agent", ""),
+                                 f"{label}: the ~.+ pin wants a non-empty value")
+                self.assertFalse(rule.header_ok("x-exfil", "data"),
+                                 f"{label}: the pins must not widen to h:*")
+
     def test_every_body_bearing_rule_pins_max_body(self):
         for specs in (("git", "github", "github-read:some/repo"),
                       ("git", "github", "github-write:some/repo")):

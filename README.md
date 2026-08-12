@@ -341,7 +341,9 @@ control hosts, never a global one, for the same reason.
 Two gaps remain. `gh` is not installed and GraphQL is not reachable. The grants steer
 the guest to the REST API instead, through their context snippets. Call
 `api.github.com/repos/OWNER/REPO/...` with any `Authorization` value, and the proxy
-replaces that value with the real credential. The `raw.githubusercontent.com` and
+replaces that value with the real credential. GitHub REST refuses a request that
+carries no `User-Agent` header, so the API rules forward `user-agent` and `accept` —
+the header that selects the API media type. The `raw.githubusercontent.com` and
 `codeload.github.com` lines stay anonymous even inside a grant, so a private file there
 answers 404. Fetch private content over git or the REST API instead.
 

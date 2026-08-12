@@ -9,7 +9,10 @@
 # the LFS endpoint derivation is unstable, so both hosts stay. The api.github.com
 # grant is two lines for the same both-forms reason: repos/{arg}/** compiles to a
 # pattern whose literal slash must be present, so the bare repos/{arg} line is what
-# admits the repo-root call itself. Object downloads are
+# admits the repo-root call itself. GitHub REST refuses a request that carries no
+# User-Agent (403, Request forbidden by administrative rules) and reads accept to
+# select the API media type; neither header is baseline, so the api lines forward
+# both with h:~.+ pins. Object downloads are
 # presigned in the query string and carry no credential. The raw and codeload lines
 # are anonymous too: a private file there answers 404, not 403.
 github.com/{arg}/info/refs            GET   q:service=git-upload-pack  h:git-protocol=version=2  inject_auth=github
@@ -19,8 +22,8 @@ github.com/{arg}.git/git-upload-pack  POST  max_body=1m  h:content-type=applicat
 github.com/{arg}/info/lfs/objects/batch      POST  max_body=1m  h:content-type~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:accept~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  inject_auth=github
 github.com/{arg}.git/info/lfs/objects/batch  POST  max_body=1m  h:content-type~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:accept~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  inject_auth=github
 lfs.github.com/{arg}/**               GET POST  max_body=1m  inject_auth=github
-api.github.com/repos/{arg}            GET   q:*  inject_auth=github
-api.github.com/repos/{arg}/**         GET   q:*  inject_auth=github
+api.github.com/repos/{arg}            GET   q:*  h:user-agent~.+  h:accept~.+  inject_auth=github
+api.github.com/repos/{arg}/**         GET   q:*  h:user-agent~.+  h:accept~.+  inject_auth=github
 raw.githubusercontent.com/{arg}/**    GET
 codeload.github.com/{arg}/**          GET
 github-cloud.githubusercontent.com/** GET   q:*
