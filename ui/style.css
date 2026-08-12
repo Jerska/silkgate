@@ -143,12 +143,20 @@ button:hover { border-color: var(--muted); }
   color: var(--muted);
 }
 
-/* Diff lines, for the config tab's rule diffs (rendered in wave 2). */
-.diff-line { white-space: pre-wrap; }
-.diff-add { color: var(--live); }
-.diff-del { color: var(--deny); }
-.diff-hunk { color: var(--accent); }
-.diff-file { color: var(--muted); }
+/* Diff lines: one .dl per line, long lines scroll the pane sideways —
+   .diff sits inside a pane that owns overflow, the body never scrolls. */
+.diff { overflow-x: auto; }
+.dl { white-space: pre; }
+.dl-add { color: var(--live); }
+.dl-del { color: var(--deny); }
+.dl-hunk { color: var(--accent); }
+.dl-file { color: var(--fg); font-weight: 600; }
+.dl-meta { color: var(--muted); }
+.diff-trunc { color: var(--idle); padding: var(--sp-2) 0; }
+
+/* Inline sparklines: a shape, not a chart — one accent stroke, no fill. */
+.spark { width: 120px; height: 24px; flex: none; }
+.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1; }
 
 /* The overview's card grid: collapses to one column on its own at ~700px. */
 .grid {

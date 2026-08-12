@@ -40,26 +40,82 @@ export function meterBar(frac) {
   return el("span", { class: "meter" }, fill);
 }
 
-// Unified-diff line classes, for the config tab's rule diffs (wave 2 renders
-// them; the vocabulary ships now so the styles and tests can pin it). File
-// headers before hunk/add: "+++ b/x" starts with "+" too.
+// Unified-diff line classes, one per prefix: add/del/hunk/file/meta/ctx. File
+// headers before add/del — "+++ b/x" starts with "+" too. `meta` is git's
+// bookkeeping between the file header and the hunks (diff --git, index, mode
+// and rename lines, binary notes); everything unclaimed is context.
+const DIFF_META = ["diff ", "index ", "new file mode", "deleted file mode",
+                   "old mode", "new mode", "rename from", "rename to",
+                   "similarity index", "dissimilarity index",
+                   "copy from", "copy to", "Binary files", "\\ No newline"];
+
 export function diffLineClass(line) {
-  if (line.startsWith("+++") || line.startsWith("---")) return "diff-file";
-  if (line.startsWith("@@")) return "diff-hunk";
-  if (line.startsWith("+")) return "diff-add";
-  if (line.startsWith("-")) return "diff-del";
-  return "";
+  if (line.startsWith("+++") || line.startsWith("---")) return "file";
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  if (DIFF_META.some((p) => line.startsWith(p))) return "meta";
+  return "ctx";
 }
 
-// A diff as one element, one div per line, classified by diffLineClass and
-// written via textContent — diffs quote guest-written files, so they get the
-// same inert treatment as every other record-derived string.
-export function renderDiff(text) {
+// A diff as classified lines, capped: a guest can emit a diff of any size, and
+// 20k lines is past what anyone reads in a pane. Pure, so the cap and the
+// class mapping pin down in node; renderDiff is its DOM twin.
+export const DIFF_LINE_CAP = 20_000;
+
+export function diffLines(text, cap = DIFF_LINE_CAP) {
+  const all = String(text ?? "").split("\n");
+  const kept = all.length > cap ? all.slice(0, cap) : all;
+  return { lines: kept.map((l) => ({ cls: diffLineClass(l), text: l })),
+           dropped: all.length - kept.length };
+}
+
+// One <div class="dl dl-<cls>"> per line, written via textContent — diffs quote
+// guest-written files, so they get the same inert treatment as every other
+// record-derived string. Past the cap, a footer says how much was dropped.
+export function renderDiff(text, cap = DIFF_LINE_CAP) {
+  const { lines, dropped } = diffLines(text, cap);
   const box = el("div", { class: "diff" });
-  for (const line of String(text ?? "").split("\n")) {
-    box.append(el("div", { class: ("diff-line " + diffLineClass(line)).trim() }, line));
+  for (const l of lines) {
+    box.append(el("div", { class: "dl dl-" + l.cls }, l.text));
+  }
+  if (dropped > 0) {
+    box.append(el("div", { class: "diff-trunc" },
+                  `… ${dropped} more lines not shown (${cap}-line cap)`));
   }
   return box;
+}
+
+// Sparkline geometry: values → "x,y x,y …" for an SVG <polyline>. Only finite
+// numbers survive the filter — record-derived junk cannot reach the SVG, and a
+// null sample is a gap, never a zero. The scale is min–max per series (a
+// sparkline shows shape, not magnitude). Fewer than two points draw nothing.
+export function sparkPoints(values, width, height, pad = 2) {
+  const v = (values ?? []).filter((x) => typeof x === "number"
+                                         && Number.isFinite(x));
+  if (v.length < 2) return "";
+  const min = Math.min(...v);
+  const span = (Math.max(...v) - min) || 1;
+  const step = (width - 2 * pad) / (v.length - 1);
+  return v.map((n, i) =>
+    (pad + i * step).toFixed(1) + ","
+    + (height - pad - ((n - min) / span) * (height - 2 * pad)).toFixed(1))
+    .join(" ");
+}
+
+// The inline sparkline itself. SVG nodes need their own namespace — el() only
+// speaks HTML — and everything set on them here is a computed number.
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+export function sparkline(values, { width = 120, height = 24 } = {}) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "spark");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("aria-hidden", "true");
+  const line = document.createElementNS(SVG_NS, "polyline");
+  line.setAttribute("points", sparkPoints(values, width, height));
+  svg.append(line);
+  return svg;
 }
 
 // Token counts read at a glance: 999 → "999", 12345 → "12.3k", 2.5e6 → "2.50M".

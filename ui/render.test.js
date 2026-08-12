@@ -4,7 +4,8 @@
 // DOM-free. Never served, never imported by served files.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { diffLineClass, fmtTokens, fmtCost } from "./render.js";
+import { diffLineClass, diffLines, DIFF_LINE_CAP, sparkPoints,
+         fmtTokens, fmtCost } from "./render.js";
 
 test("fmtTokens: readable magnitudes, and null is not a zero", () => {
   assert.equal(fmtTokens(0), "0");
@@ -26,12 +27,47 @@ test("fmtCost: always an estimate, never a guessed zero", () => {
   assert.equal(fmtCost(123.4), "~$123");
 });
 
-test("diffLineClass: file headers before hunks and signs", () => {
-  assert.equal(diffLineClass("+++ b/rules.txt"), "diff-file");
-  assert.equal(diffLineClass("--- a/rules.txt"), "diff-file");
-  assert.equal(diffLineClass("@@ -1,3 +1,4 @@"), "diff-hunk");
-  assert.equal(diffLineClass("+allow github.com"), "diff-add");
-  assert.equal(diffLineClass("-deny *"), "diff-del");
-  assert.equal(diffLineClass(" context"), "");
-  assert.equal(diffLineClass(""), "");
+test("diffLineClass: every prefix maps, file headers before signs", () => {
+  assert.equal(diffLineClass("+++ b/rules.txt"), "file");
+  assert.equal(diffLineClass("--- a/rules.txt"), "file");
+  assert.equal(diffLineClass("@@ -1,3 +1,4 @@"), "hunk");
+  assert.equal(diffLineClass("+allow github.com"), "add");
+  assert.equal(diffLineClass("-deny *"), "del");
+  for (const meta of ["diff --git a/x b/x", "index 3f2a1c9..d4e5f60 100644",
+                      "new file mode 100644", "deleted file mode 100644",
+                      "old mode 100644", "new mode 100755",
+                      "rename from a", "rename to b", "similarity index 90%",
+                      "copy from a", "copy to b",
+                      "Binary files a/x and b/x differ",
+                      "\\ No newline at end of file"]) {
+    assert.equal(diffLineClass(meta), "meta", meta);
+  }
+  assert.equal(diffLineClass(" context"), "ctx");
+  assert.equal(diffLineClass(""), "ctx");
+});
+
+test("diffLines caps at 20k lines and counts what it dropped", () => {
+  assert.equal(DIFF_LINE_CAP, 20_000);
+  const small = diffLines("+a\n-b\n c");
+  assert.equal(small.dropped, 0);
+  assert.deepEqual(small.lines.map((l) => l.cls), ["add", "del", "ctx"]);
+  assert.deepEqual(small.lines.map((l) => l.text), ["+a", "-b", " c"]);
+  const big = diffLines(Array.from({ length: 7 }, (_, i) => "+" + i).join("\n"), 5);
+  assert.equal(big.lines.length, 5);
+  assert.equal(big.dropped, 2);
+  assert.equal(diffLines(null).lines.length, 1, "null reads as one empty line");
+});
+
+test("sparkPoints: only finite numbers reach the SVG, min-max scaled", () => {
+  const pts = sparkPoints([0, "junk", 5, null, 10, NaN], 100, 20);
+  assert.match(pts, /^(\d+(\.\d)?,\d+(\.\d)?)( \d+(\.\d)?,\d+(\.\d)?)*$/,
+               "nothing but numeric pairs, whatever the input held");
+  assert.equal(pts.split(" ").length, 3, "junk and nulls dropped, not zeroed");
+  assert.equal(pts.split(" ")[0], "2.0,18.0", "min lands at the bottom");
+  assert.equal(pts.split(" ")[2], "98.0,2.0", "max lands at the top");
+  assert.equal(sparkPoints([7], 100, 20), "", "one point draws nothing");
+  assert.equal(sparkPoints([], 100, 20), "");
+  const flat = sparkPoints([3, 3, 3], 100, 20);
+  assert.ok(flat.split(" ").every((p) => p.endsWith(",18.0")),
+            "a flat series is a flat line, not a divide-by-zero");
 });
