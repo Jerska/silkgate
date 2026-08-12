@@ -525,8 +525,8 @@ class UiStreamTest(UiServerTest):
         live = MOD.LOG_DIR / "events-live.jsonl"
         live.write_text(line_a + "\n" + line_b + "\n")
         self.proxy_meta(events=live)
-        s, _ = self.sse_open(cursor_header=f"events-live.jsonl:{len(line_a) + 1}")
-        data = self.read_until(s, line_b.encode())
+        s, body = self.sse_open(cursor_header=f"events-live.jsonl:{len(line_a) + 1}")
+        data = self.read_until(s, line_b.encode(), got=body)
         self.assertNotIn(line_a.encode(), data,
                          "the record before the cursor must not be replayed")
         self.assertIn(f"id: events-live.jsonl:{len(line_a) + len(line_b) + 2}".encode(),
