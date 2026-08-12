@@ -149,12 +149,25 @@ def run_shard(name):
     sys.exit(0 if result.wasSuccessful() else 1)
 
 
+def port_floor(name):
+    """A disjoint free-port scan floor for each shard worker.
+
+    test_proxy_lifecycle probes free-port ranges bind-then-release, so two
+    workers scanning from one floor can both see a range free before either
+    binds it for real. Each worker gets its own floor through
+    FASTTEST_PORT_FLOOR (honored by that module's _free_pool_base), which is
+    what lets InterruptTest run in a shard apart from the rest of the module.
+    """
+    return 23000 + 2000 * list(SHARDS).index(name)
+
+
 def run_shard_process(name):
     return subprocess.run(
         [sys.executable, os.path.abspath(__file__), "--shard", name],
         capture_output=True,
         text=True,
         cwd=ROOT,
+        env=dict(os.environ, FASTTEST_PORT_FLOOR=str(port_floor(name))),
     )
 
 
