@@ -6,7 +6,7 @@
 # 403 the guest will report as silkgate policy. When the pinned version is bumped, re-derive
 # this list from a fresh audit log rather than widening a rule here. Body caps sit only on
 # the two POSTed paths; max_body defaults to 0, and a GET needs no body.
-api.anthropic.com/v1/messages                    POST  q:*  h:*  max_body=10m  inject_auth=anthropic
+api.anthropic.com/v1/messages                    POST  q:*  h:*  max_body=10m  inject_auth=anthropic  capture=anthropic
 api.anthropic.com/v1/messages/count_tokens       POST  q:*  h:*  max_body=10m  inject_auth=anthropic
 api.anthropic.com/v1/messages                    GET   q:*  h:*  inject_auth=anthropic
 api.anthropic.com/v1/models                      GET   q:*  h:*  inject_auth=anthropic
