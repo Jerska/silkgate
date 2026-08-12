@@ -410,9 +410,9 @@ class ArrivalObserverTest(unittest.TestCase):
         self.addCleanup(held.close)
         # Not a kernel-assigned number: the observer must get through its tcp
         # bind before it can fail on udp, and the ephemeral range is exactly
-        # where every concurrent fasttest worker's live sockets sit — a pick
+        # where every concurrent tests.py worker's live sockets sit — a pick
         # there loses the tcp side often enough to flake. Below the ephemeral
-        # floors (32768 Linux, 49152 macOS) and fasttest's port floors (23000
+        # floors (32768 Linux, 49152 macOS) and tests.py's port floors (23000
         # and up), nothing else in the suite ever lands.
         for port in range(21000, 23000):
             if _port_free(port):

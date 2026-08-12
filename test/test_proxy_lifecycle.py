@@ -269,12 +269,12 @@ def _lan_ip():
 def _free_pool_base(size):
     """A base port with `size` consecutive free ports above it.
 
-    The scan floor comes from FASTTEST_PORT_FLOOR when fasttest sets it: this
+    The scan floor comes from TESTS_PORT_FLOOR when tests.py sets it: this
     probe is bind-then-release, so two worker processes scanning one range can
     both see it free before either binds it for real. A disjoint floor per
     worker keeps each one's listeners, squatters and probes in its own range.
     """
-    floor = int(os.environ.get("FASTTEST_PORT_FLOOR", "23000"))
+    floor = int(os.environ.get("TESTS_PORT_FLOOR", "23000"))
     for base in range(floor, 60000, size + 7):
         socks = []
         try:

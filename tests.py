@@ -13,8 +13,8 @@ speedup:
 
 Usage:
 
-    python3 fasttest.py               # all shards at once
-    python3 fasttest.py --workers 2   # at most 2 shard processes at a time
+    python3 tests.py               # all shards at once
+    python3 tests.py --workers 2   # at most 2 shard processes at a time
 
 The runner refuses to start when SHARDS and discovery disagree, so a new test
 file must be named in SHARDS before the runner accepts it. A plain
@@ -58,7 +58,7 @@ SHARDS = {
 }
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-SUMMARY_MARK = "FASTTEST-SUMMARY "
+SUMMARY_MARK = "TESTS-SUMMARY "
 
 
 def shrink_poll_interval():
@@ -104,7 +104,7 @@ def assign(tests):
     for shard, entries in SHARDS.items():
         for entry in entries:
             if entry in entry_to_shard:
-                sys.exit(f"fasttest: entry {entry!r} appears in two shards")
+                sys.exit(f"tests.py: entry {entry!r} appears in two shards")
             entry_to_shard[entry] = shard
     assignment = {}
     matched = set()
@@ -123,7 +123,7 @@ def assign(tests):
         for entry in sorted(set(entry_to_shard) - matched)
     ]
     if problems:
-        print("fasttest: SHARDS does not match discovery:", file=sys.stderr)
+        print("tests.py: SHARDS does not match discovery:", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         sys.exit(2)
@@ -133,7 +133,7 @@ def assign(tests):
 def run_shard(name):
     """Worker mode: run one shard in this process and print a summary line."""
     if name not in SHARDS:
-        sys.exit(f"fasttest: unknown shard {name!r}")
+        sys.exit(f"tests.py: unknown shard {name!r}")
     shrink_poll_interval()
     tests = discover()
     assignment = assign(tests)
@@ -159,7 +159,7 @@ def port_floor(name):
     test_proxy_lifecycle probes free-port ranges bind-then-release, so two
     workers scanning from one floor can both see a range free before either
     binds it for real. Each worker gets its own floor through
-    FASTTEST_PORT_FLOOR (honored by that module's _free_pool_base), which is
+    TESTS_PORT_FLOOR (honored by that module's _free_pool_base), which is
     what lets InterruptTest run in a shard apart from the rest of the module.
     """
     return 23000 + 2000 * list(SHARDS).index(name)
@@ -171,7 +171,7 @@ def run_shard_process(name):
         capture_output=True,
         text=True,
         cwd=ROOT,
-        env=dict(os.environ, FASTTEST_PORT_FLOOR=str(port_floor(name))),
+        env=dict(os.environ, TESTS_PORT_FLOOR=str(port_floor(name))),
     )
 
 
@@ -198,7 +198,7 @@ def main():
     for shard in assignment.values():
         expected[shard] += 1
     print(
-        f"fasttest: {len(assignment)} tests in {len(SHARDS)} shards, "
+        f"tests.py: {len(assignment)} tests in {len(SHARDS)} shards, "
         f"workers={min(args.workers, len(SHARDS))}"
     )
 
@@ -217,7 +217,7 @@ def main():
                 summary = json.loads(line[len(SUMMARY_MARK):])
         if summary is None:
             failed = True
-            print(f"fasttest: shard {name} died without a summary:", file=sys.stderr)
+            print(f"tests.py: shard {name} died without a summary:", file=sys.stderr)
             sys.stderr.write(proc.stdout)
             sys.stderr.write(proc.stderr)
             rows.append((name, "?", "?", "?", "?", "?"))
@@ -226,7 +226,7 @@ def main():
         if summary["tests"] != expected[name]:
             failed = True
             print(
-                f"fasttest: shard {name} ran {summary['tests']} tests, "
+                f"tests.py: shard {name} ran {summary['tests']} tests, "
                 f"discovery assigned it {expected[name]}",
                 file=sys.stderr,
             )
