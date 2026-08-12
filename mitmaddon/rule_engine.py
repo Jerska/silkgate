@@ -20,6 +20,7 @@ Options (space-separated, after the pattern):
     h:<name>=<value>    forward header only if value == <value>   (exact)
     h:<name>~<regex>    forward header only if regex fullmatches  (no spaces; use \s)
     inject_auth=<name>  set auth header from SILKGATE_EGRESS_SECRET_<NAME>
+    capture=<format>    decode and record the response body       (formats: anthropic)
 
 Security model:
   * The allowlist bounds *capability/blast-radius* (host+path+method), NOT exfil
@@ -44,6 +45,11 @@ import sys
 from urllib.parse import unquote
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+
+# The closed set of response decoders the proxy addon implements. Validated at parse
+# time so a rules file naming a format no decoder exists for is refused before it can
+# pretend to record.
+CAPTURE_FORMATS = frozenset({"anthropic"})
 
 # --- secret parser: "<Header>: <value>" ----------------------------------------
 # Shared with cli/silkgate so launch-time validation uses the exact same rules as
@@ -223,7 +229,7 @@ def _constraint_ok(constraint, value):
 class Rule:
     __slots__ = ("raw", "host_re", "ports", "path_re", "methods", "max_body",
                  "allow_query", "query_params", "allow_all_headers", "headers", "inject_auth",
-                 "wildcard_only_host")
+                 "capture", "wildcard_only_host")
 
     def __init__(self, raw):
         tokens = raw.split()
@@ -250,6 +256,7 @@ class Rule:
         self.allow_all_headers = False
         self.headers = dict(_BASELINE)                          # per-rule overrides merge on top
         self.inject_auth = None
+        self.capture = None
         for t in tokens[1:]:
             if t in HTTP_METHODS:
                 self.methods.add(t)
@@ -267,6 +274,13 @@ class Rule:
                     self.max_body = _parse_size(v)
                 elif k == "inject_auth":
                     self.inject_auth = v
+                elif k == "capture":
+                    # A format naming no decoder is refused at parse time, like a bad
+                    # port: a rule that promises capture and records nothing reads as
+                    # observability granted in a ruleset a human reviews.
+                    if v not in CAPTURE_FORMATS:
+                        raise ValueError(f"unknown capture format: {v!r}")
+                    self.capture = v
                 else:
                     raise ValueError(f"unknown option: {t!r}")
             else:
@@ -473,6 +487,14 @@ _PARSE_ERROR_CASES = [
     "a.com:65536/** GET",           # above the port range
     "a.com:99999999/** GET",        # far outside: an unmatchable rule
     "foo.com:443:8080/** GET",      # doubled port must not parse as ports={8080}
+    "a.com/** GET capture=bogus",   # capture format outside the closed set
+    "a.com/** GET capture=",        # empty capture format decodes nothing
+]
+
+# capture= names a decoder from CAPTURE_FORMATS; absent means no capture.
+_CAPTURE_CASES = [
+    ("api.anthropic.com/v1/messages POST capture=anthropic", "anthropic"),
+    ("api.anthropic.com/v1/messages POST",                   None),
 ]
 
 # A wildcard-only host pattern warns on stderr; q:*/h:* on a named host does not.
@@ -521,6 +543,11 @@ def _selftest():
             print(f"PARSE FAIL: {line!r}  want ValueError, got a rule")
         except ValueError:
             pass
+    for line, expected in _CAPTURE_CASES:
+        got = RuleSet.parse(line).rules[0].capture
+        if got != expected:
+            fails += 1
+            print(f"CAPT  FAIL: {line!r}  want {expected!r} got {got!r}")
     for line, expected in _WARN_CASES:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
@@ -541,7 +568,8 @@ def _selftest():
             print(f"SECRET FAIL (bad):  {value!r}  want None got {got!r}")
     total = (len(_MATCH_CASES) + len(_HOST_CASES) + len(_HEADER_CASES)
              + len(_QUERY_CASES) + len(_PORT_CASES) + len(_PARSE_ERROR_CASES)
-             + len(_WARN_CASES) + len(_SECRET_GOOD) + len(_SECRET_BAD))
+             + len(_CAPTURE_CASES) + len(_WARN_CASES) + len(_SECRET_GOOD)
+             + len(_SECRET_BAD))
     print(f"{total - fails}/{total} passed")
     raise SystemExit(1 if fails else 0)
 
