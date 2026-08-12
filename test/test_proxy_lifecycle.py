@@ -370,10 +370,12 @@ class _FakeToolsCase(unittest.TestCase):
         silk = root / "silk"
         silk.mkdir()
         self._saved = {k: getattr(MOD, k) for k in
-                       ("SILK_DIR", "LOG_DIR", "SESSIONS_DIR", "PROXY_JSON", "PROXY_SOCK")}
+                       ("SILK_DIR", "LOG_DIR", "SESSIONS_DIR", "ARCHIVE_DIR",
+                        "PROXY_JSON", "PROXY_SOCK")}
         MOD.SILK_DIR = silk
         MOD.LOG_DIR = silk / "logs"
         MOD.SESSIONS_DIR = silk / "sessions"
+        MOD.ARCHIVE_DIR = silk / "archive"
         MOD.PROXY_JSON = silk / "proxy.json"
         MOD.PROXY_SOCK = silk / "proxy.sock"
         MOD.SESSIONS_DIR.mkdir()
