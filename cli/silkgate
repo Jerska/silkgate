@@ -1011,6 +1011,9 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
             lines.append(f"- `{rule.raw.split()[0]}` — {methods}{inject}")
         lines += [
             "",
+            "`*` matches one DNS label in a host and one path segment in a path.",
+            "`**` matches anything: dots in a host, slashes in a path, or an empty path.",
+            "",
             "If a package registry appears above, GET is enough to install from it. The",
             "proxy refuses anything not listed. Over plain http the refusal is a 403 whose",
             "body says `no matching rule`. Over https the refusal comes before the tunnel",

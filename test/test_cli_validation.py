@@ -1702,6 +1702,15 @@ class TestGuestBriefEgress(CliCase):
         self.assertIn("Do not retry it in a loop", ctx)
         self.assertIn("Report it, with the\nrequest that caused it", ctx)
 
+    def test_glob_legend_sits_under_the_reachable_list(self):
+        ctx = self.ctx()
+        self.assertIn("`*` matches one DNS label in a host and one path segment", ctx)
+        self.assertIn("dots in a host, slashes in a path, or an empty path", ctx)
+
+    def test_empty_allowlist_has_no_glob_legend(self):
+        # No rules, no patterns — a legend under an empty list would explain nothing.
+        self.assertNotIn("DNS label", self.ctx(""))
+
 
 if __name__ == "__main__":
     unittest.main()
