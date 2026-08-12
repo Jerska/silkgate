@@ -221,7 +221,7 @@ class Profile:
     """One resolved `--with name[@version][:arg]`: its files, version, arg, metadata."""
 
     __slots__ = ("name", "version", "arg", "arg_pattern", "dir", "conf", "rules", "setup",
-                 "env", "packages")
+                 "env", "context", "packages")
 
     def __init__(self, name, version=None, arg=None):
         self.name, self.dir = name, PROFILE_DIR / name
@@ -232,6 +232,7 @@ class Profile:
         self.rules = _read_if(self.dir / "rules.txt")
         self.setup = _read_if(self.dir / "setup.sh")
         self.env = _read_if(self.dir / "env")
+        self.context = _read_if(self.dir / "context.md")
         self.packages = [t for t in re.split(r"[,\s]+", self.conf.get("packages", "")) if t]
         default = self.conf.get("default_version")
         if version and not default:
@@ -242,7 +243,7 @@ class Profile:
             if bad:
                 die(f"profile {name!r}: {bad}")
         # The arg contract, both halves load-checked: a declared arg_pattern must be a
-        # usable full-match regex, and a {arg} placeholder without one is a rules line
+        # usable full-match regex, and a {arg} placeholder without one is a line
         # nothing may ever fill — refused at load so `profiles` lists the defect too.
         self.arg_pattern = self.conf.get("arg_pattern")
         if self.arg_pattern is not None:
@@ -253,8 +254,9 @@ class Profile:
                 re.compile(self.arg_pattern)
             except re.error as e:
                 die(f"profile {name!r}: bad arg_pattern {self.arg_pattern!r} — {e}")
-        elif "{arg}" in self.rules:
-            die(f"profile {name!r}: rules.txt uses {{arg}} but profile.conf declares no "
+        elif "{arg}" in self.rules or "{arg}" in self.context:
+            where = "rules.txt" if "{arg}" in self.rules else "context.md"
+            die(f"profile {name!r}: {where} uses {{arg}} but profile.conf declares no "
                 "arg_pattern — declare one or drop the placeholder")
         if arg is not None:
             bad = _arg_error(arg)       # unconditional, wherever the arg came from
@@ -283,10 +285,17 @@ class Profile:
         return [ln for ln in self.env.splitlines() if ln.strip() and not ln.startswith("#")]
 
     def rendered_rules(self):
-        """rules.txt with every {arg} replaced by the validated arg. rules.txt is the
-        only templated file: setup.sh and env shape the image, which an arg must never
-        touch (see image_ref, which hashes the template bytes as written)."""
+        """rules.txt with every {arg} replaced by the validated arg. rules.txt and
+        context.md are the templated files: setup.sh and env shape the image, which an
+        arg must never touch (see image_ref, which hashes the template bytes as
+        written)."""
         return self.rules.replace("{arg}", self.arg) if self.arg is not None else self.rules
+
+    def rendered_context(self):
+        """context.md with every {arg} replaced by the validated arg — the profile's
+        own addition to the guest brief, appended by session_context once per instance.
+        Session text only: it never shapes the image, so image_ref excludes it."""
+        return self.context.replace("{arg}", self.arg) if self.arg is not None else self.context
 
 
 def _parse_conf(path):
@@ -1185,6 +1194,13 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         "set your task — that is the channel. Nobody inside this machine can widen the",
         "list, so that report is the only thing that can.",
     ]
+    # A profile can ship a context.md — guidance that travels with the capability,
+    # templated like its rules — appended once per instance, so the guest learns how
+    # to use each grant it holds.
+    for p in profiles:
+        snippet = p.rendered_context().strip()
+        if snippet:
+            lines += ["", snippet]
     if github_read or github_write:
         write_set = set(github_write)
         all_repos = list(dict.fromkeys(list(github_read) + list(github_write)))

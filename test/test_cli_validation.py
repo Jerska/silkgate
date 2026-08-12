@@ -833,6 +833,43 @@ class TestProfilesListingAndRender(ArgProfileCase):
         self.refuses("does not match", self.profiles_cmd, ["tmpl:UPPER/x"])
 
 
+class TestProfileContextSnippets(ArgProfileCase):
+    """A profile's context.md rides the guest brief: templated like rules.txt with
+    {arg}, appended once per instance, and refused at load when it uses {arg} without
+    a declared arg_pattern."""
+
+    SNIP = {"profile.conf": "arg_pattern = [a-z]+/[a-z]+\n",
+            "rules.txt": "example.com/{arg}/** GET\n",
+            "context.md": "## Grant {arg}\n\n**Use the API at `example.com/{arg}`.**\n"}
+
+    def brief_for(self, specs):
+        profiles = sg.resolve_profiles(specs)
+        return sg.session_context(profiles, sg.load_ruleset(sg.compose_rules(profiles)),
+                                  persistent=False)
+
+    def test_snippet_lands_expanded_once_per_instance(self):
+        self.profile_dir({"snip": self.SNIP})
+        ctx = self.brief_for(["snip:a/b", "snip:c/d", "snip:a/b"])
+        self.assertEqual(ctx.count("## Grant a/b"), 1, ctx)
+        self.assertEqual(ctx.count("## Grant c/d"), 1, ctx)
+        self.assertNotIn("{arg}", ctx)
+
+    def test_argless_profile_snippet_appends_verbatim(self):
+        self.profile_dir({"note": {"rules.txt": "a.com/** GET\n",
+                                   "context.md": "## A note\n\n**Read this first.**\n"}})
+        ctx = self.brief_for(["note"])
+        self.assertEqual(ctx.count("## A note"), 1, ctx)
+
+    def test_profile_without_snippet_adds_nothing(self):
+        self.profile_dir({"plain": self.PLAIN})
+        self.assertNotIn("## Grant", self.brief_for(["plain"]))
+
+    def test_snippet_placeholder_without_pattern_refused_at_load(self):
+        self.profile_dir({"holey": {"rules.txt": "a.com/x GET\n",
+                                    "context.md": "hello {arg}\n"}})
+        self.refuses("context.md", sg.resolve_profiles, ["holey"])
+
+
 class TestEmptyAllowlist(CliCase):
     """No --with and no --rule is the strictest policy silkgate can express."""
 
@@ -2200,6 +2237,22 @@ class TestGithubProfiles(CliCase):
                                         "onto the SigV4 storage hosts")
         self.assertNotIn("s3.amazonaws.com", cfg)
         self.assertNotIn("githubusercontent.com", cfg)
+
+    # --- the guest brief: the grant explains itself ---
+
+    def test_grant_snippets_steer_the_guest_to_the_rest_api(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            profiles = sg.resolve_profiles(["github-read:a/b", "github-write:c/d"])
+            ctx = sg.session_context(profiles,
+                                     sg.load_ruleset(sg.compose_rules(profiles)),
+                                     persistent=False)
+        self.assertIn("## GitHub grant: a/b (read)", ctx)
+        self.assertIn("## GitHub grant: c/d (write)", ctx)
+        flat = " ".join(ctx.split())                    # the snippets hard-wrap
+        self.assertIn("api.github.com/repos/a/b", flat)
+        self.assertIn("`gh` is not installed", flat)
+        self.assertIn("GraphQL is not reachable", flat)
+        self.assertIn("Mutations need the github-write grant", flat)
 
     # --- render sanity ---
 

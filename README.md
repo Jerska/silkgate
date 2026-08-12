@@ -105,10 +105,10 @@ argument lands inside rule syntax, so a malformed argument is rule injection. Th
 parser refuses whitespace and control characters unconditionally, and the declared
 pattern decides the rest. Each refusal names the profile and its pattern.
 
-`rules.txt` is the one templated file. Every `{arg}` in it becomes the validated
-argument when the session's ruleset is composed. A `{arg}` placeholder in a profile
-with no declared pattern is a load error. `setup.sh` and `env` are never templated, so
-an argument can never affect the image. The tag's hash covers the template bytes as
+`rules.txt` and `context.md` are the templated files. Every `{arg}` in them becomes
+the validated argument — in the session's composed ruleset and in the guest context. A
+`{arg}` placeholder in a profile with no declared pattern is a load error. `setup.sh`
+and `env` are never templated, so an argument can never affect the image. The tag's hash covers the template bytes as
 written, and the slug carries each profile name once. Two sessions with different
 arguments for one profile therefore reuse one image.
 
@@ -149,7 +149,8 @@ Now: <task>"'
 
 The file lands at `/silkgate/CONTEXT.md` in the rootfs — never in `/workspace`, so it cannot
 appear in the project — plus wherever a profile's `context_path` says its harness looks for
-instructions. `--no-context` skips the whole thing.
+instructions. A profile can add its own passage: a `context.md` beside its rules, templated
+with `{arg}` the same way, appended once per instance. `--no-context` skips the whole thing.
 
 This is a courtesy, not a control. An adversarial guest ignores every word of it, so nothing
 is allowed to rely on it. What it buys is fewer wasted turns, and denials reported as
