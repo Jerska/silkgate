@@ -623,11 +623,21 @@ class TestExecMarker(JournalCase):
         self.assertIn("export ANTHROPIC_CUSTOM_HEADERS", text)
         self.assertIn(f"{sg.GUEST_EXECS}/cafe1234.pid", text)
         self.assertIn("mkdir -p", text)
+        self.assertIn(f'trap "rm -f {sg.GUEST_EXECS}/cafe1234.pid', text,
+                      "the wrapper's own EXIT trap cleans the pidfile up")
 
     def test_tty_wrapper_carries_the_marker_too(self):
         text = self.built_argv(True, "beef5678")
         self.assertIn("X-Silkgate-Exec: beef5678", text)
         self.assertIn(f"{sg.GUEST_EXECS}/beef5678.pid", text)
+        self.assertIn(f'trap "rm -f {sg.GUEST_EXECS}/beef5678.pid', text)
+        self.assertNotIn('exec "$@"', text,
+                         "an exec would replace the shell and lose the EXIT trap")
+
+    def test_unmarked_tty_wrapper_keeps_its_exec(self):
+        text = self.built_argv(True, None)
+        self.assertIn('exec "$@"', text,
+                      "no marker, no trap — the shell has nothing to stay for")
 
     def test_no_exec_id_leaves_the_relay_untouched(self):
         text = self.built_argv(False, None)
@@ -636,8 +646,10 @@ class TestExecMarker(JournalCase):
 
     def test_marker_merges_and_writes_the_pidfile_for_real(self):
         """The wrapper run by a real sh: an existing header value keeps its line, the
-        marker lands appended on a new one, and the pidfile holds the shell's pid."""
+        marker lands appended on a new one, the pidfile holds the shell's pid while
+        the command runs, and the wrapper's EXIT trap removes it after."""
         execs = self.tmp / "execs"
+        pidfile = execs / "cafe1234.pid"
         lines = []
         quiet = io.TextIOWrapper(io.BytesIO())           # the relay writes stdout.buffer
         with mock.patch.object(sg, "GUEST_EXECS", str(execs)), \
@@ -645,12 +657,13 @@ class TestExecMarker(JournalCase):
                                 {"ANTHROPIC_CUSTOM_HEADERS": "X-Existing: keepme"}), \
                 contextlib.redirect_stdout(quiet):
             rc = sg.run_guest(lambda argv: argv,
-                              ["sh", "-c", 'printf "%s\\n" "$ANTHROPIC_CUSTOM_HEADERS"'],
+                              ["sh", "-c", 'printf "%s\\n" "$ANTHROPIC_CUSTOM_HEADERS"; '
+                                           'cat "$0"; echo', str(pidfile)],
                               tty=False, on_line=lines.append, exec_id="cafe1234")
         self.assertEqual(rc, 0)
-        self.assertEqual(lines, ["X-Existing: keepme", "X-Silkgate-Exec: cafe1234"])
-        pid = (execs / "cafe1234.pid").read_text()
-        self.assertTrue(pid.isdigit(), pid)
+        self.assertEqual(lines[:2], ["X-Existing: keepme", "X-Silkgate-Exec: cafe1234"])
+        self.assertTrue(lines[2].isdigit(), lines)       # read mid-run: it existed then
+        self.assertFalse(pidfile.exists(), "the EXIT trap removes the pidfile")
 
     def test_pidfile_failure_does_not_fail_the_exec(self):
         blocker = self.tmp / "blocker"

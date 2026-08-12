@@ -2064,9 +2064,11 @@ _EXPORT_CONTEXT = ('[ -f %s ] && SILKGATE_CONTEXT=$(cat %s) && export SILKGATE_C
 # The header rides ANTHROPIC_CUSTOM_HEADERS — the SDK's escape hatch for extra request
 # headers — so the proxy can attribute an agent's API traffic to this exec; a value the
 # caller already set keeps its lines and the marker lands appended on a new one, never
-# clobbering. The pidfile is what a later kill endpoint signals the process group by.
-# Both are best-effort: a guest that cannot take them still runs its command, so the
-# whole snippet swallows its own errors.
+# clobbering. The pidfile is what the kill endpoint signals the process group by, and
+# the wrapper's own EXIT trap removes it — guest-side, so a persistent session's execs
+# dir never accumulates and the host pays no extra msb call; a missing pidfile then
+# means "already ended" to the kill endpoint. Both are best-effort: a guest that cannot
+# take them still runs its command, so the whole snippet swallows its own errors.
 def _exec_marker_sh(exec_id):
     if not exec_id:
         return ""
@@ -2074,7 +2076,8 @@ def _exec_marker_sh(exec_id):
             '${ANTHROPIC_CUSTOM_HEADERS}\n'
             f'}}X-Silkgate-Exec: {exec_id}"; export ANTHROPIC_CUSTOM_HEADERS; '
             f'{{ mkdir -p {GUEST_EXECS} && printf %s "$$" >{GUEST_EXECS}/{exec_id}.pid; }} '
-            '2>/dev/null || :; ')
+            '2>/dev/null || :; '
+            f'trap "rm -f {GUEST_EXECS}/{exec_id}.pid 2>/dev/null" EXIT; ')
 
 
 _RELAY_SH = (_EXPORT_CONTEXT
@@ -2100,7 +2103,11 @@ def run_guest(build_argv, cmd, *, tty, on_line=None, exec_id=None):
     marker = _exec_marker_sh(exec_id)
     if tty:
         # A terminal run gets no relay, so the context export needs its own tiny shell.
-        cmd = ["sh", "-c", _EXPORT_CONTEXT + marker + 'exec "$@"', "_"] + list(cmd)
+        # A marked exec keeps that shell (no exec): its EXIT trap is what removes the
+        # pidfile, and the command shares the shell's process group either way, so the
+        # kill endpoint's group signal reaches it the same.
+        tail = '"$@"' if marker else 'exec "$@"'
+        cmd = ["sh", "-c", _EXPORT_CONTEXT + marker + tail, "_"] + list(cmd)
         if sys.stdout.isatty():
             # Inheriting a real terminal is what keeps a TUI fully interactive — and
             # what lets an interrupted TUI leave that terminal in raw mode, so the
