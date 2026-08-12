@@ -1794,6 +1794,14 @@ class TestMemoryFlag(CliCase):
             created = self.create_argv(argv)
             self.assertIn(("-m", "1G"), list(zip(created, created[1:])), argv)
 
+    def test_an_explicit_memory_overrides_the_default(self):
+        for argv in (["run", "--memory", "2G", "--", "true"],
+                     ["up", "--memory", "2G"]):
+            created = self.create_argv(argv)
+            pairs = list(zip(created, created[1:]))
+            self.assertIn(("-m", "2G"), pairs, argv)
+            self.assertNotIn(("-m", "1G"), pairs, argv)
+
     def test_the_builder_itself_defaults_to_no_dash_m(self):
         with mock.patch.object(sg, "_msb", lambda: "msb"):
             created = sg.msb_create_argv("sg-x", "img", 8090, memory="1G")
@@ -1836,6 +1844,16 @@ class TestCpusFlag(CliCase):
         for argv in (["run", "--", "true"], ["up"]):
             created = self.create_argv(argv)
             self.assertIn(("-c", expected), list(zip(created, created[1:])), argv)
+
+    def test_an_explicit_cpus_count_overrides_the_default(self):
+        default = str(max(1, (os.cpu_count() or 2) // 2))
+        explicit = str(int(default) + 1)            # any count the default is not
+        for argv in (["run", "--cpus", explicit, "--", "true"],
+                     ["up", "--cpus", explicit]):
+            created = self.create_argv(argv)
+            pairs = list(zip(created, created[1:]))
+            self.assertIn(("-c", explicit), pairs, argv)
+            self.assertNotIn(("-c", default), pairs, argv)
 
     def test_both_flags_land_together(self):
         for argv in (["run", "--memory", "512M", "--cpus", "2", "--", "true"],
