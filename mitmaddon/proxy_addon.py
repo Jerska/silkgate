@@ -1246,6 +1246,15 @@ def request(flow: http.HTTPFlow) -> None:
                     removed.append(name.lower())
             stripped_headers = sorted(removed)
 
+        # 11. Capture-marked flows must come back identity-encoded: streamed chunks
+        #     arrive still content-encoded, and the tap deliberately grows no
+        #     decompressor (a zip-bomb lever), so a gzip response would bail capture
+        #     to metadata-only. Rewriting the request's Accept-Encoding is the
+        #     no-decoder fix; responseheaders still degrades fail-open if the
+        #     destination encodes anyway.
+        if rule.capture:
+            req.headers["accept-encoding"] = "identity"
+
         extras = {}
         if injected is not None:
             extras["injected"] = injected

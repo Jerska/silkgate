@@ -53,6 +53,7 @@ files.pythonhosted.org/** GET h:*
 internal.example:8080/** GET
 pypi.org/** GET inject_auth=badhost
 example.test/** GET inject_auth=absent
+capture.example/v1/messages POST h:* max_body=1k capture=anthropic
 """
 
 _rules_file = pathlib.Path(tempfile.mkdtemp()) / "rules.txt"
@@ -1102,6 +1103,113 @@ class EventsFileTest(AddonCase):
             with open(path) as fh:
                 content = fh.read()
             self.assertEqual(content, "", "control record written to events file")
+
+
+# --- LLM capture: the wave-4 capture fixes ------------------------------------
+CAPTURE_MODEL = "claude-sonnet-4-5"
+
+
+def sse(events):
+    """Encode (name, payload) pairs as the SSE bytes Anthropic would send."""
+    return b"".join(f"event: {name}\ndata: {json.dumps(payload)}\n\n".encode()
+                    for name, payload in events)
+
+
+def turn_events(text="Hi there.", output_tokens=42):
+    """One short, complete SSE turn: every record kind on the happy path."""
+    return [
+        ("message_start", {"type": "message_start", "message": {
+            "id": "msg_01FIXM", "type": "message", "role": "assistant",
+            "model": CAPTURE_MODEL, "content": [], "stop_reason": None,
+            "usage": {"input_tokens": 25, "output_tokens": 1}}}),
+        ("content_block_start", {"type": "content_block_start", "index": 0,
+                                 "content_block": {"type": "text", "text": ""}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                 "delta": {"type": "text_delta", "text": text}}),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        ("message_delta", {"type": "message_delta",
+                           "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                           "usage": {"output_tokens": output_tokens}}),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+
+
+class CaptureCase(AddonCase):
+    """Flows through the one RULES line that opts into capture, with the capture sink
+    swapped for a readable temp file. test_capture_tap.py drives the claude profile;
+    these cases pin the wave-4 capture fixes against the fixed RULES above."""
+
+    def setUp(self):
+        super().setUp()
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.capture_path = os.path.join(d.name, "capture.jsonl")
+        sink = proxy_addon._CaptureFile(self.capture_path)
+        real, proxy_addon.CAPTURE = proxy_addon.CAPTURE, sink
+        self.addCleanup(setattr, proxy_addon, "CAPTURE", real)
+        # The production sink lives as long as the process; a test's must not outlive it.
+        self.addCleanup(lambda: sink._fh and sink._fh.close())
+
+    def captured_request(self, headers=()):
+        f = self.run_request(host="capture.example", claimed="capture.example",
+                             method="POST", path="/v1/messages", headers=headers)
+        self.assertIsNone(f.response, "expected the captured request to be allowed")
+        self.assertTrue(f.metadata["egress"]["capture"], "the premise: capture is on")
+        return f
+
+    def respond(self, f, chunks, content_type="text/event-stream", status=200):
+        """Play mitmproxy's streaming: responseheaders installs the tap, every chunk
+        passes through it (b"" marks end of message), then response() concludes."""
+        f.response = tutils.tresp(status_code=status)
+        f.response.headers["content-type"] = content_type
+        proxy_addon.responseheaders(f)
+        self.assertTrue(callable(f.response.stream),
+                        "an allowed response must stream through the tap")
+        for chunk in chunks:
+            self.assertEqual(f.response.stream(chunk), chunk,
+                             "chunks pass through the tap unchanged")
+        f.response.stream(b"")
+        proxy_addon.response(f)
+
+    def capture_records(self):
+        with open(self.capture_path) as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def audit_response(self):
+        recs = [r for r in self.audit.records() if r.get("decision") == "response"]
+        self.assertEqual(len(recs), 1, "expected exactly one response record")
+        return recs[0]
+
+
+class IdentityEncoding(CaptureCase):
+    """A capture-marked request must ask for an identity-encoded response: streamed
+    chunks arrive still content-encoded, the tap grows no decompressor, so a gzip
+    response bails capture to metadata-only (owner v1 finding)."""
+
+    def test_a_gzip_declaring_flow_reaches_the_decoder_as_identity(self):
+        f = self.captured_request(headers=[(b"Accept-Encoding", b"gzip, br")])
+        self.assertEqual(f.request.headers.get("accept-encoding"), "identity")
+        # The identity response the rewrite earns is then decoded in full — the
+        # flow that declared gzip is captured, not degraded to metadata-only.
+        self.respond(f, [sse(turn_events())])
+        records = self.capture_records()
+        self.assertEqual([r["kind"] for r in records],
+                         ["turn_start", "content_block", "turn_end"])
+        self.assertEqual(self.audit_response()["model"], CAPTURE_MODEL)
+
+    def test_a_capture_flow_without_the_header_is_pinned_to_identity(self):
+        """An absent Accept-Encoding leaves the destination free to encode; the
+        rewrite pins the one flow whose body the tap must read."""
+        f = self.captured_request()
+        self.assertEqual(f.request.headers.get("accept-encoding"), "identity")
+
+    def test_a_flow_without_capture_keeps_its_accept_encoding(self):
+        f = self.run_request(host="files.pythonhosted.org",
+                             claimed="files.pythonhosted.org", path="/pkg.whl",
+                             headers=[(b"Accept-Encoding", b"gzip")])
+        self.assertIsNone(f.response, "expected the request to be allowed")
+        self.assertEqual(f.request.headers.get("accept-encoding"), "gzip",
+                         "the rewrite is for captured flows only")
 
 
 if __name__ == "__main__":
