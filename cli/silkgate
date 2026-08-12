@@ -61,6 +61,7 @@ ARCHIVE_DIR = SILK_DIR / "archive"            # ended sessions, one dir per sid
 CA_DIR = SILK_DIR / "ca"                      # public MITM cert only, never the key
 DOCKER_CFG_DIR = SILK_DIR / "docker"          # our own DOCKER_CONFIG — see docker_env()
 GUEST_CONTEXT = "/silkgate/CONTEXT.md"        # what the guest is told about its sandbox
+GUEST_BRIEF = "/silkgate/BRIEF.md"            # where --brief lands the operator's task
 GUEST_EXECS = "/silkgate/execs"               # one pidfile per exec, <exec_id>.pid
 PROXY_JSON = SILK_DIR / "proxy.json"          # shared-proxy meta (pid/ports/log/sock)
 PROXY_SOCK = SILK_DIR / "proxy.sock"          # control socket (line-delimited JSON)
@@ -2266,7 +2267,7 @@ def _mount_args(specs, *, allow_git_dir=False):
 
 
 def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
-                       context=None, context_paths=(), memory=None, cpus=None):
+                       context=None, context_paths=(), memory=None, cpus=None, brief=None):
     """Stage the session dir then rename it into the registry, so its appearance is atomic:
     the addon rescans on the sessions-dir mtime and must never see (and cache) a half-written
     session. Boot the guest after. On failure, undo only what is ours: the staging dir, the
@@ -2286,6 +2287,8 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
         (tmp / "rules.txt").write_text(rules_text)
         if context:
             (tmp / "context.md").write_text(context)
+        if brief is not None:
+            (tmp / "brief.md").write_bytes(brief)
         meta = {"name": name, "sandbox": sandbox_name(name), "sid": _new_sid(name),
                 "port": port, "image": image, "workspace": ws,
                 "created": now_iso(), **meta_extra}
@@ -2300,8 +2303,11 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
             die(f"session already exists: {sdir}")
         _push_secrets(ruleset, name)
         # The context goes into the rootfs, never the workspace: it must not appear in the
-        # user's project, and a guest rewriting it changes nothing that matters.
+        # user's project, and a guest rewriting it changes nothing that matters. The brief
+        # rides the same way, to the one path the guest is told to read.
         copies = [(sdir / "context.md", dst) for dst in context_paths] if context else []
+        if brief is not None:
+            copies.append((sdir / "brief.md", GUEST_BRIEF))
         created = True
         if subprocess.run(msb_create_argv(sandbox_name(name), image, port, mounts=mounts,
                                           env=env, copies=copies, memory=memory,
@@ -2936,6 +2942,7 @@ def cmd_run(args):
     check_env(args.env)
     _check_mount_flags(args)
     profiles, rules_text, ruleset = _session_policy(args)
+    brief = _read_brief(args.brief)             # host-side, before any provisioning
     cmd = _strip_cmd_sep(args.cmd) or profile_command(profiles)
     if not cmd:
         die("nothing to run — pass a command after -- (or --with a profile that names one)")
@@ -2968,11 +2975,14 @@ def cmd_run(args):
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, vmounts, persistent=False)
-        meta_extra = {**_session_meta(profiles, cmd), **(spec or {})}
+        meta_extra = {**_session_meta(profiles, cmd),
+                      **_observability_meta(args, rules_text, brief), "tty": tty,
+                      **(spec or {})}
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           meta_extra, ctx, ctx_paths, memory=args.memory, cpus=args.cpus)
+                           meta_extra, ctx, ctx_paths, memory=args.memory, cpus=args.cpus,
+                           brief=brief)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -3038,6 +3048,43 @@ def _session_meta(profiles, cmd):
     return {"profiles": [p.spec for p in profiles], "command": cmd}
 
 
+# --brief is copied into the rootfs like the context, so its size rides msb argv paths
+# sized for small files; anything over this is not a brief, and dying beats truncating.
+_BRIEF_MAX_BYTES = 1 << 20
+
+
+def _read_brief(path):
+    """The --brief bytes, read host-side before any provisioning — or None without the
+    flag. Dying here, on an unreadable or oversized file, costs nothing yet; the same
+    failure after a guest boots costs a teardown."""
+    if not path:
+        return None
+    try:
+        data = Path(path).read_bytes()
+    except OSError as e:
+        die(f"cannot read --brief {path}: {e.strerror or e}")
+    if len(data) > _BRIEF_MAX_BYTES:
+        die(f"--brief {path} is {len(data)} bytes — over the 1 MiB limit")
+    return data
+
+
+def _observability_meta(args, rules_text, brief):
+    """Recording-only meta fields: the rest of the ask, kept for the journal, the
+    archive and wave-2 reads — never an enforcement input. env_names holds names alone,
+    because values can be secrets. base_ref is the operator's own spelling of the base,
+    display only, beside the resolved sha "base" already pins. rules_sha256 ties the
+    session to the exact ruleset text it ran under."""
+    meta = {"env_names": sorted({p.partition("=")[0] for p in args.env}),
+            "allow_git_dir": bool(args.allow_git_dir),
+            "rules_sha256": hashlib.sha256(rules_text.encode()).hexdigest()}
+    if args.branch or args.checkout is not None:
+        meta["base_ref"] = args.checkout or "HEAD"
+    if brief is not None:
+        meta["brief_path"] = str(Path(args.brief).resolve())
+        meta["brief_sha256"] = hashlib.sha256(brief).hexdigest()
+    return meta
+
+
 def _context_for(args, profiles, ruleset, mounts, *, persistent):
     """(context text, where to put it in the guest) — or (None, ()) with --no-context.
 
@@ -3057,6 +3104,7 @@ def cmd_up(args):
     check_env(args.env)
     _check_mount_flags(args)
     profiles, rules_text, ruleset = _session_policy(args)
+    brief = _read_brief(args.brief)             # host-side, before any provisioning
     name = args.name or uuid4().hex[:6]
     _validate_name(name)
     if session_dir(name).exists():
@@ -3087,11 +3135,14 @@ def cmd_up(args):
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, vmounts, persistent=True)
-        meta_extra = {**_session_meta(profiles, profile_command(profiles)), **(spec or {})}
+        meta_extra = {**_session_meta(profiles, profile_command(profiles)),
+                      **_observability_meta(args, rules_text, brief),
+                      **(spec or {})}
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           meta_extra, ctx, ctx_paths, memory=args.memory, cpus=args.cpus)
+                           meta_extra, ctx, ctx_paths, memory=args.memory, cpus=args.cpus,
+                           brief=brief)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -5063,6 +5114,9 @@ def main():
                    help="like --checkout, but on new branch NAME whose commits land in the "
                         "host repo at teardown; beside --checkout REF, REF is the branch "
                         "base (needs --with git; owns /workspace, so no -v may target it)")
+    p.add_argument("--brief", metavar="FILE",
+                   help=f"copy FILE (≤ 1 MiB) into the guest at {GUEST_BRIEF} — the task "
+                        "brief; meta records its path and sha256")
     env_opt(p)
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
                    help="give the command a terminal, for a TUI (default: yes if stdin is a "
@@ -5094,6 +5148,9 @@ def main():
                         "host repo at down; beside --checkout REF, REF is the branch base "
                         "(needs --with git; owns /workspace, so no -v may target it)")
     profile_opts(p)
+    p.add_argument("--brief", metavar="FILE",
+                   help=f"copy FILE (≤ 1 MiB) into the guest at {GUEST_BRIEF} — the task "
+                        "brief; meta records its path and sha256")
     env_opt(p)
     p.add_argument("--image", metavar="REF", type=_image_arg,
                    help="run this image instead of the one the profiles describe")

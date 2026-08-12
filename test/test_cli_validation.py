@@ -108,9 +108,9 @@ class CliCase(unittest.TestCase):
         seen = {}
 
         def spy(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
-                context=None, context_paths=(), memory=None, cpus=None):
+                context=None, context_paths=(), memory=None, cpus=None, brief=None):
             seen.update(name=name, mounts=mounts, ws=ws, env=env, meta=meta_extra,
-                        context=context)
+                        context=context, brief=brief, rules_text=rules_text)
             raise SystemExit(42)
 
         with self.no_preflight(), \
