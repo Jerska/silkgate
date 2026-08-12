@@ -5653,8 +5653,21 @@ def _oracle_die(problems, log_path):
     die("\n".join(lines))
 
 
+def _verify_port(port):
+    """The proxy port one verify run listens on: the operator's --port verbatim when given
+    (start_proxy still dies if it is taken — an explicit port that collides must fail
+    loudly, not silently move), else the base of the first free POOL_SIZE-wide range at
+    or above DEFAULT_BASE_PORT. Verify binds three ports — the proxy's plus the two
+    oracle ports beside it (_oracle_port, offsets 1 and 2) — and the pool scan proves
+    POOL_SIZE consecutive ports free at the base it returns, which covers all three; it
+    also walks past a shared proxy holding the default pool, so verify never contends
+    with live sessions for 8090."""
+    return port if port is not None else _find_free_pool(DEFAULT_BASE_PORT)[0]
+
+
 def cmd_verify(args):
     preflight("msb", "mitmdump")
+    args.port = _verify_port(args.port)
     _reap_leaked_verify_guests()
     rules_text = compose_rules(resolve_profiles(["probe"], allow_verify_only=True))
     oracles = _VerifyOracles(args.port) if args.oracles else None
@@ -5891,7 +5904,11 @@ def main():
     p = sub.add_parser("verify", help="Tier-1 containment check in a bare debian guest")
     p.add_argument("--full", action="store_true",
                    help="also exercise the proxy path (apt through the proxy + CA trust)")
-    p.add_argument("--port", type=int, default=8090, help="proxy listen port (default: 8090)")
+    p.add_argument("--port", type=int, default=None,
+                   help="proxy listen port (default: auto-select the first free 16-port "
+                        "range at or above 8090, so a shared proxy holding the default "
+                        "pool never blocks verify; an explicit port is honored and dies "
+                        "if taken)")
     p.add_argument("--oracles", action=argparse.BooleanOptionalAction, default=True,
                    help="assert the host's own record of the run beside the guest's verdict: "
                         "the audit log must hold the decisions the probes provoked, a host "
