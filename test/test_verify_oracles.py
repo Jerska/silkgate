@@ -408,8 +408,19 @@ class ArrivalObserverTest(unittest.TestCase):
     def test_a_held_port_is_refused_naming_the_port(self):
         held = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.addCleanup(held.close)
-        held.bind(("127.0.0.1", 0))
-        message = _die_message(sg._ArrivalObserver, held.getsockname()[1])
+        # Not a kernel-assigned number: the observer must get through its tcp
+        # bind before it can fail on udp, and the ephemeral range is exactly
+        # where every concurrent fasttest worker's live sockets sit — a pick
+        # there loses the tcp side often enough to flake. Below the ephemeral
+        # floors (32768 Linux, 49152 macOS) and fasttest's port floors (23000
+        # and up), nothing else in the suite ever lands.
+        for port in range(21000, 23000):
+            if _port_free(port):
+                break
+        else:
+            raise unittest.SkipTest("no free port below the ephemeral range")
+        held.bind(("127.0.0.1", port))
+        message = _die_message(sg._ArrivalObserver, port)
         self.assertIn("arrival observer (udp)", message)
 
 
