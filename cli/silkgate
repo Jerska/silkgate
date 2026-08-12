@@ -3356,25 +3356,51 @@ def _print_table(rows):
         print("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip())
 
 
+def _journal_summary(path):
+    """(EXECS, EXIT) table cells from one journal: how many execs the session ran, and
+    the newest exec_end's rc — "-" where none closed, or the rc itself is unknown."""
+    records = _read_journal(path)
+    execs = sum(1 for r in records if r.get("event") == "exec_start")
+    last = next((r for r in reversed(records) if r.get("event") == "exec_end"), None)
+    rc = None if last is None else last.get("rc")
+    return str(execs), "-" if rc is None else str(rc)
+
+
+def _mounts_cell(meta):
+    """One meta's MOUNTS cell: the workspace mode first, then every -v mount."""
+    parts = []
+    if meta.get("branch"):
+        parts.append(f"{meta.get('workspace') or '-'} (branch {meta['branch']})")
+    elif meta.get("checkout"):
+        parts.append(f"(checkout {meta['checkout']})")
+    for entry in meta.get("mounts") or []:
+        path, _, mode = str(entry).rpartition(":")
+        parts.append(f"{path} ({mode})")
+    return ", ".join(parts) or "-"
+
+
 def cmd_ls(args):
+    show_all = bool(getattr(args, "all", False))
     metas = list_metas()
-    if not metas:
+    archived = list_archived_metas() if show_all else []
+    if not metas and not archived:
         print("no sessions")
     else:
-        statuses = _msb_statuses()
-        rows = [("NAME", "STATUS", "PORT", "MOUNTS", "AGE")]
+        statuses = _msb_statuses() if metas else {}
+        header = ("NAME", "STATUS", "PORT", "MOUNTS", "AGE", "EXECS", "EXIT")
+        rows = [header + ("ID",) if show_all else header]
         for m in metas:
-            parts = []
-            if m.get("branch"):
-                parts.append(f"{m.get('workspace') or '-'} (branch {m['branch']})")
-            elif m.get("checkout"):
-                parts.append(f"(checkout {m['checkout']})")
-            for entry in m.get("mounts") or []:
-                path, _, mode = str(entry).rpartition(":")
-                parts.append(f"{path} ({mode})")
-            rows.append((m["name"], statuses.get(m["sandbox"], "?"),
-                         str(m.get("port", "?")), ", ".join(parts) or "-",
-                         _age(m.get("created"))))
+            row = (m["name"], statuses.get(m["sandbox"], "?"),
+                   str(m.get("port", "?")), _mounts_cell(m), _age(m.get("created")),
+                   *_journal_summary(session_dir(m["name"]) / "journal.jsonl"))
+            rows.append(row + ((m.get("sid") or "-",) if show_all else ()))
+        for m in archived:
+            # The port is history, not a claim, so the cell stays empty; AGE counts
+            # from the end, the moment an archived session's clock stopped.
+            rows.append((m.get("name") or "-", "archived", "-", _mounts_cell(m),
+                         _age(m.get("ended") or m.get("created")),
+                         *_journal_summary(ARCHIVE_DIR / m["sid"] / "journal.jsonl"),
+                         m["sid"]))
         _print_table(rows)
     proxy = read_proxy()
     ident = _proxy_ident()               # identity via the control socket, never pid alone:
@@ -5290,6 +5316,9 @@ def main():
     p.set_defaults(fn=cmd_down)
 
     p = sub.add_parser("ls", help="list sessions and shared-proxy health")
+    p.add_argument("-a", "--all", action="store_true",
+                   help="include archived sessions (STATUS archived); the final ID "
+                        "column is the sid an archive is filed under")
     p.set_defaults(fn=cmd_ls)
 
     p = sub.add_parser("secret", help="manage host-held secrets in the shared proxy")

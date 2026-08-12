@@ -618,6 +618,71 @@ class TestExecJournal(JournalCase):
         self.assertIn("could not journal", err.getvalue())
 
 
+# -- ls: exec summaries and archived rows ----------------------------------------------
+
+class TestLsAll(JournalCase):
+
+    def ls_output(self, show_all=False):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            sg.cmd_ls(types.SimpleNamespace(all=show_all))
+        return out.getvalue()
+
+    def archive_session(self, name="old1", rc=3):
+        sid = sg._new_sid(name)
+        adir = sg.ARCHIVE_DIR / sid
+        adir.mkdir(parents=True)
+        sg._write_json(adir / "meta.json", {"name": name, "sid": sid, "port": 8091,
+                                            "created": sg.now_iso(),
+                                            "ended": sg.now_iso()})
+        sg._journal_into(adir, "created")
+        sg._journal_into(adir, "exec_start", exec_id="cafe1234", argv=["true"])
+        sg._journal_into(adir, "exec_end", exec_id="cafe1234", rc=rc)
+        sg._journal_into(adir, "down")
+        return sid
+
+    def test_default_ls_summarises_execs_without_archived_rows(self):
+        self.write_session("live1", created=sg.now_iso())
+        sg._journal("live1", "exec_start", exec_id="aa", argv=["true"])
+        sg._journal("live1", "exec_end", exec_id="aa", rc=7)
+        sg._journal("live1", "exec_start", exec_id="bb", argv=["true"])
+        sg._journal("live1", "exec_end", exec_id="bb", rc=0)
+        self.archive_session()
+        out = self.ls_output()
+        header, row = out.splitlines()[:2]
+        self.assertEqual(header.split(), ["NAME", "STATUS", "PORT", "MOUNTS", "AGE",
+                                          "EXECS", "EXIT"])
+        self.assertEqual(row.split()[0], "live1")
+        self.assertEqual(row.split()[-2:], ["2", "0"], "count and the newest rc")
+        self.assertNotIn("old1", out)
+        self.assertNotIn("archived", out)
+
+    def test_all_appends_archived_rows_with_their_sid(self):
+        self.write_session("live1", sid=sg._new_sid("live1"), created=sg.now_iso())
+        sid = self.archive_session(rc=3)
+        out = self.ls_output(show_all=True)
+        lines = out.splitlines()
+        self.assertEqual(lines[0].split()[-1], "ID")
+        arch = next(ln for ln in lines if "archived" in ln)
+        cols = arch.split()
+        self.assertEqual(cols[0], "old1")
+        self.assertEqual(cols[1], "archived")
+        self.assertEqual(cols[-1], sid, "the final ID column is the sid")
+        self.assertEqual(cols[-3:-1], ["1", "3"])
+
+    def test_all_alone_still_lists_an_empty_registry_as_archived_rows(self):
+        sid = self.archive_session()
+        out = self.ls_output(show_all=True)
+        self.assertNotIn("no sessions", out)
+        self.assertIn(sid, out)
+
+    def test_exec_without_end_shows_a_dash_exit(self):
+        self.write_session("live2", created=sg.now_iso())
+        sg._journal("live2", "exec_start", exec_id="aa", argv=["true"])
+        row = self.ls_output().splitlines()[1]
+        self.assertEqual(row.split()[-2:], ["1", "-"])
+
+
 # -- the exec marker in the relay ------------------------------------------------------
 
 class TestExecMarker(JournalCase):
