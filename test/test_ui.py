@@ -17,19 +17,31 @@ What is covered:
     events path, a stale start cursor, and no proxy at all
   * _events_history/_event_passes: merge order across retained files, every filter
     (since/until/session/decision/method/host), session=null, the limit, garbage lines
-  * HTTP: /api/sessions with and without a live proxy, /api/events filters + cursor +
-    naive-timestamp 400, static routes with nosniff/CSP on every response, 404 on a
-    traversal path, 405 on non-GET
+  * HTTP: /api/sessions with and without a live proxy (plus state/last_rc and the
+    archived list), /api/events filters + cursor + naive-timestamp 400, static routes
+    with nosniff/CSP on every response, 404 on a traversal path, 405 on non-GET
   * SSE: retry preamble, record frames carrying resumable cursor ids, heartbeats while
-    no proxy runs, and Last-Event-ID resume yielding only the suffix
+    no proxy runs, and Last-Event-ID resume yielding only the suffix — for the audit
+    stream and (parameterized) the capture stream
+  * wave 2: the new static routes and their traversal 404s, the CSRF/rebinding matrix,
+    /api/session/<ident> (live + archived + bad idents + brief source labeling),
+    /output (TTL cache, caps), /api/metrics (TTL, empty registry, cached failures),
+    /diff (guest/host modes, 409s, 429, truncation) with stubbed seams, /api/capture
+    history, /api/search (substring, caps, min length), and the control plane
+    (freeze/resume swap round-trip, kill argv, down through the stubbed teardown)
+  * the shipped ui/ sources (NOT the fixtures): no markup sinks, and every reference
+    in a served file resolves to a _UI_ROUTES key
   * cmd_ui: dies understandably without ui/ assets and on a taken port
 """
 import contextlib
+import hashlib
 import http.client
 import importlib.util
 import io
 import json
 import os
+import posixpath
+import re
 import socket
 import sys
 import tempfile
@@ -109,23 +121,36 @@ class UiTest(unittest.TestCase):
         self.root = Path(self._tmp.name)
         silk = self.root / "silk"
         self._saved = {k: getattr(MOD, k) for k in
-                       ("SILK_DIR", "LOG_DIR", "SESSIONS_DIR", "PROXY_JSON",
-                        "PROXY_SOCK", "UI_DIR")}
+                       ("SILK_DIR", "LOG_DIR", "SESSIONS_DIR", "ARCHIVE_DIR",
+                        "PROXY_JSON", "PROXY_SOCK", "UI_DIR")}
         self.addCleanup(self._restore)
         MOD.SILK_DIR = silk
         MOD.LOG_DIR = silk / "logs"
         MOD.SESSIONS_DIR = silk / "sessions"
+        MOD.ARCHIVE_DIR = silk / "archive"
         MOD.PROXY_JSON = silk / "proxy.json"
         MOD.PROXY_SOCK = silk / "proxy.sock"
         MOD.UI_DIR = self.root / "ui"
         MOD.LOG_DIR.mkdir(parents=True)
         MOD.SESSIONS_DIR.mkdir(parents=True)
         MOD.UI_DIR.mkdir()
+        # The wave-2 caches and the busy set live once per process; every test
+        # starts them cold so no test reads another's answers.
+        MOD._METRICS_CACHE.update(at=None, payload=None)
+        MOD._OUTPUT_CACHE.clear()
+        MOD._DIFF_BUSY.clear()
         self.assets = {"index.html": "<!doctype html><title>silkgate</title>\n",
                        "app.js": "export {};\n", "store.js": "export const x = 1;\n",
-                       "style.css": "body { }\n"}
+                       "style.css": "body { }\n",
+                       "router.js": "export {};\n", "capture.js": "export {};\n",
+                       "pricing.js": "export {};\n", "render.js": "export {};\n",
+                       "views/overview.js": "export {};\n",
+                       "views/session.js": "export {};\n",
+                       "views/calls.js": "export {};\n"}
         for name, text in self.assets.items():
-            (MOD.UI_DIR / name).write_text(text)
+            p = MOD.UI_DIR / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
 
     def _restore(self):
         for k, v in self._saved.items():
@@ -149,11 +174,25 @@ class UiTest(unittest.TestCase):
         MOD._write_json(MOD.PROXY_JSON, meta)
         return meta
 
-    def write_session(self, name, port=8090):
+    def write_session(self, name, port=8090, rules="api.anthropic.com/** GET\n",
+                      **extra):
         sdir = MOD.session_dir(name)
         sdir.mkdir(parents=True)
+        (sdir / "rules.txt").write_text(rules)
         MOD._write_json(sdir / "meta.json",
-                        {"name": name, "sandbox": "sg-" + name, "port": port})
+                        {"name": name, "sandbox": "sg-" + name, "port": port, **extra})
+        return sdir
+
+    def write_archive(self, name="old1", **extra):
+        """One archived session dir under the repointed ARCHIVE_DIR -> (sid, dir)."""
+        sid = MOD._new_sid(name)
+        adir = MOD.ARCHIVE_DIR / sid
+        adir.mkdir(parents=True)
+        MOD._write_json(adir / "meta.json",
+                        {"name": name, "sandbox": "sg-" + name, "port": 8091,
+                         "sid": sid, "created": "2026-08-04T10:00:00+00:00",
+                         "ended": "2026-08-04T12:00:00+00:00", **extra})
+        return sid, adir
 
 
 # -- the tailer -------------------------------------------------------------------
@@ -465,14 +504,15 @@ class UiStreamTest(UiServerTest):
             p.start()
             self.addCleanup(p.stop)
 
-    def sse_open(self, cursor_header=None, cursor_param=None):
-        """Open /api/stream raw; return the socket once the response head + the retry
-        preamble arrived, with whatever body bytes followed them. Without a cursor the
-        stream starts at the live file's EOF, sampled at the server's own pace — so a
-        deterministic test pins its start with one, exactly as the real client does."""
+    def sse_open(self, cursor_header=None, cursor_param=None, endpoint="/api/stream"):
+        """Open an SSE endpoint raw; return the socket once the response head + the
+        retry preamble arrived, with whatever body bytes followed them. Without a
+        cursor the stream starts at the live file's EOF, sampled at the server's own
+        pace — so a deterministic test pins its start with one, exactly as the real
+        client does."""
         s = socket.create_connection(("127.0.0.1", self.port), timeout=self.DEADLINE)
         self.addCleanup(s.close)
-        path = "/api/stream" + (f"?cursor={cursor_param}" if cursor_param else "")
+        path = endpoint + (f"?cursor={cursor_param}" if cursor_param else "")
         req = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n"
         if cursor_header is not None:
             req += f"Last-Event-ID: {cursor_header}\r\n"
@@ -546,6 +586,726 @@ class UiStreamTest(UiServerTest):
         self.assertIn(f"id: events-new.jsonl:{len(line) + 1}\ndata: {line}\n\n".encode(),
                       data, "after the reset, the stream follows the adopted file")
         self.assertNotIn(b'"id": "x"', data, "the old file's history is not replayed")
+
+
+# -- the wave-2 static routes ---------------------------------------------------------
+
+class UiWave2StaticTest(UiServerTest):
+
+    def test_new_routes_serve_javascript(self):
+        for path in ("/router.js", "/capture.js", "/pricing.js", "/render.js",
+                     "/views/overview.js", "/views/session.js", "/views/calls.js"):
+            resp, body = self.request(path)
+            self.assertEqual(resp.status, 200, path)
+            self.assertEqual(body.decode(), self.assets[path.lstrip("/")], path)
+            self.assertTrue(resp.headers["Content-Type"].startswith("text/javascript"),
+                            path)
+            self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
+
+    def test_traversal_and_test_files_stay_unserved(self):
+        (MOD.UI_DIR / "store.test.js").write_text("export {};\n")
+        (MOD.UI_DIR / "fixtures.test.js").write_text("export {};\n")
+        for path in ("/views/../store.js", "/views/../../silk/proxy.json",
+                     "/store.test.js", "/fixtures.test.js", "/views/",
+                     "/views/nope.js"):
+            resp, _ = self.request(path)
+            self.assertEqual(resp.status, 404, path)
+
+
+# -- CSRF / rebinding ------------------------------------------------------------------
+
+class UiCsrfTest(UiServerTest):
+
+    def test_evil_origin_is_403_on_get_and_post(self):
+        for path, method in (("/", "GET"), ("/api/sessions", "GET"),
+                             ("/api/session/x/freeze", "POST"),
+                             ("/api/session/x/resume", "POST"),
+                             ("/api/session/x/down", "POST"),
+                             ("/api/session/x/diff", "POST"),
+                             ("/api/session/x/exec/cafe1234/kill", "POST")):
+            resp, body = self.request(path, method=method,
+                                      headers={"Origin": "https://evil.example"})
+            self.assertEqual(resp.status, 403, path)
+            self.assertIn("forbidden", json.loads(body)["error"])
+
+    def test_rebound_host_is_403(self):
+        for host in ("evil.example", "evil.example:8642", "10.1.2.3:80"):
+            resp, _ = self.request("/api/sessions", headers={"Host": host})
+            self.assertEqual(resp.status, 403, host)
+
+    def test_loopback_host_without_origin_passes(self):
+        resp, _ = self.request("/api/sessions")     # http.client sends Host itself
+        self.assertEqual(resp.status, 200)
+        for host in ("localhost:1", "127.0.0.1", "[::1]:8642"):
+            resp, _ = self.request("/api/sessions", headers={"Host": host})
+            self.assertEqual(resp.status, 200, host)
+
+    def test_loopback_origin_passes(self):
+        resp, _ = self.request("/api/sessions",
+                               headers={"Origin": f"http://127.0.0.1:{self.port}"})
+        self.assertEqual(resp.status, 200)
+
+    def test_null_origin_is_403(self):
+        resp, _ = self.request("/api/sessions", headers={"Origin": "null"})
+        self.assertEqual(resp.status, 403)
+
+    def test_put_stays_405_and_post_off_the_control_plane_too(self):
+        resp, _ = self.request("/api/session/x/freeze", method="PUT")
+        self.assertEqual(resp.status, 405)
+        resp, _ = self.request("/api/events", method="POST")
+        self.assertEqual(resp.status, 405)
+
+
+# -- /api/sessions extensions -----------------------------------------------------------
+
+class UiSessionsListTest(UiServerTest):
+
+    def test_live_rows_carry_state_and_last_rc(self):
+        self.write_session("foo", last_rc=7)
+        self.write_session("bar")
+        _, got = self.get_json("/api/sessions")
+        by_name = {s["name"]: s for s in got["sessions"]}
+        self.assertEqual(by_name["foo"]["state"], "live")
+        self.assertEqual(by_name["foo"]["last_rc"], 7)
+        self.assertNotIn("last_rc", by_name["bar"])
+
+    def test_archived_rows_are_the_newest_fifty_reduced(self):
+        old = [self.write_archive(f"s{i}")[0] for i in range(3)]
+        _, got = self.get_json("/api/sessions")
+        self.assertEqual([a["sid"] for a in got["archived"]], old[::-1],
+                         "newest first")
+        self.assertEqual(set(got["archived"][0]), {"sid", "name", "ended"},
+                         "reduced rows; /api/session/<sid> has the rest")
+        with mock.patch.object(MOD, "UI_ARCHIVED_LIMIT", 2):
+            _, got = self.get_json("/api/sessions")
+        self.assertEqual(len(got["archived"]), 2)
+        self.assertEqual(got["archived"][0]["sid"], old[-1])
+
+
+# -- /api/session/<ident> ---------------------------------------------------------------
+
+class UiSessionDetailTest(UiServerTest):
+
+    def test_live_session_detail(self):
+        sdir = self.write_session("s1", rules="pypi.org/** GET\n")
+        MOD._journal("s1", "created", meta={})
+        MOD._journal("s1", "exec_start", exec_id="cafe1234", argv=["true"])
+        cap = self.events_file("capture-01.jsonl")
+        resp, got = self.get_json("/api/session/s1")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(got["state"], "live")
+        self.assertEqual(got["session"]["name"], "s1")
+        self.assertEqual([r["event"] for r in got["journal"]],
+                         ["created", "exec_start"])
+        self.assertEqual(got["rules"], "pypi.org/** GET\n")
+        self.assertIsNone(got["brief"], "no --brief and no workspace: null")
+        self.assertEqual(got["pointers"]["captures"], [str(cap)])
+        self.assertIsNone(got["pointers"]["events"], "no proxy runs")
+
+    def test_flag_brief_wins_and_is_labeled(self):
+        sdir = self.write_session("s2", workspace=str(self.root / "ws"))
+        (self.root / "ws").mkdir()
+        (self.root / "ws" / "BRIEF.md").write_text("# from the guest\n")
+        (sdir / "brief.md").write_bytes(b"# the operator's ask\n")
+        _, got = self.get_json("/api/session/s2")
+        self.assertEqual(got["brief"]["source"], "flag")
+        self.assertEqual(got["brief"]["text"], "# the operator's ask\n")
+        self.assertEqual(got["brief"]["sha256"],
+                         hashlib.sha256(b"# the operator's ask\n").hexdigest())
+        self.assertFalse(got["brief"]["truncated"])
+
+    def test_workspace_brief_is_the_live_fallback(self):
+        self.write_session("s3", workspace=str(self.root / "ws"))
+        (self.root / "ws").mkdir()
+        (self.root / "ws" / "BRIEF.md").write_text("# guest-authored\n")
+        _, got = self.get_json("/api/session/s3")
+        self.assertEqual(got["brief"]["source"], "workspace",
+                         "guest-writable, and the label says so")
+        self.assertEqual(got["brief"]["text"], "# guest-authored\n")
+
+    def test_symlinked_workspace_brief_is_not_followed(self):
+        secret = self.root / "secret.txt"
+        secret.write_text("host secret\n")
+        self.write_session("s4", workspace=str(self.root / "ws"))
+        (self.root / "ws").mkdir()
+        (self.root / "ws" / "BRIEF.md").symlink_to(secret)
+        _, got = self.get_json("/api/session/s4")
+        self.assertIsNone(got["brief"])
+
+    def test_brief_is_capped_and_marked_truncated(self):
+        sdir = self.write_session("s5")
+        (sdir / "brief.md").write_bytes(b"x" * (MOD.UI_BRIEF_MAX_BYTES + 5))
+        _, got = self.get_json("/api/session/s5")
+        self.assertTrue(got["brief"]["truncated"])
+        self.assertEqual(len(got["brief"]["text"]), MOD.UI_BRIEF_MAX_BYTES)
+
+    def test_archived_session_detail_without_workspace_fallback(self):
+        sid, adir = self.write_archive("olda", workspace=str(self.root / "ws"))
+        (self.root / "ws").mkdir()
+        (self.root / "ws" / "BRIEF.md").write_text("# too late\n")
+        (adir / "rules.txt").write_text("RULES\n")
+        MOD._journal_into(adir, "down")
+        _, got = self.get_json(f"/api/session/{sid}")
+        self.assertEqual(got["state"], "archived")
+        self.assertEqual(got["session"]["sid"], sid)
+        self.assertEqual([r["event"] for r in got["journal"]], ["down"])
+        self.assertEqual(got["rules"], "RULES\n")
+        self.assertIsNone(got["brief"], "the fallback is for live sessions alone")
+
+    def test_archived_flag_brief_still_serves(self):
+        sid, adir = self.write_archive("oldb")
+        (adir / "brief.md").write_bytes(b"# archived ask\n")
+        _, got = self.get_json(f"/api/session/{sid}")
+        self.assertEqual(got["brief"]["source"], "flag")
+
+    def test_bad_idents_are_404_never_paths(self):
+        for ident in ("..", "no-such", "20990101T000000Z-gone-abcdef",
+                      "a" * 33, "x%2f..%2fy"):
+            resp, _ = self.get_json(f"/api/session/{ident}")
+            self.assertEqual(resp.status, 404, ident)
+
+    def test_planted_meta_is_refused_as_404(self):
+        sdir = MOD.session_dir("evil")
+        sdir.mkdir(parents=True)
+        MOD._write_json(sdir / "meta.json", {"name": "other"})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            resp, _ = self.get_json("/api/session/evil")
+        self.assertEqual(resp.status, 404)
+
+
+# -- /api/session/<ident>/output --------------------------------------------------------
+
+class UiOutputTest(UiServerTest):
+
+    def test_archived_output_reads_the_snapshot(self):
+        sid, adir = self.write_archive("olda")
+        (adir / "output.log").write_text("one\ntwo\nthree\n")
+        _, got = self.get_json(f"/api/session/{sid}/output?tail=2")
+        self.assertEqual(got, {"source": "archive", "lines": ["two", "three"],
+                               "truncated": True})
+        _, got = self.get_json(f"/api/session/{sid}/output")
+        self.assertEqual(got["lines"], ["one", "two", "three"])
+        self.assertFalse(got["truncated"])
+
+    def test_live_output_is_cached_per_ttl(self):
+        self.write_session("s1")
+        calls = []
+
+        def fake_logs(sandbox, tail_n=None, since=None):
+            calls.append((sandbox, tail_n))
+            return ["line"], None
+
+        with mock.patch.object(MOD, "_run_msb_logs", fake_logs):
+            _, got = self.get_json("/api/session/s1/output")
+            _, again = self.get_json("/api/session/s1/output")
+        self.assertEqual(got["source"], "live")
+        self.assertEqual(got["lines"], ["line"])
+        self.assertFalse(got["truncated"], "a short tail means msb had no more")
+        self.assertEqual(calls, [("sg-s1", MOD.UI_OUTPUT_TAIL)],
+                         "two requests inside the TTL cost one msb call")
+        self.assertEqual(again, got)
+
+    def test_live_failure_is_502_and_cached(self):
+        self.write_session("s2")
+        calls = []
+
+        def dead(sandbox, tail_n=None, since=None):
+            calls.append(sandbox)
+            return None, "sandbox gone"
+
+        with mock.patch.object(MOD, "_run_msb_logs", dead):
+            resp, got = self.get_json("/api/session/s2/output")
+            self.get_json("/api/session/s2/output")
+        self.assertEqual(resp.status, 502)
+        self.assertIn("sandbox gone", got["error"])
+        self.assertEqual(len(calls), 1, "a dead sandbox is not re-poked every poll")
+
+    def test_tail_is_validated_and_capped(self):
+        self.write_session("s3")
+        for query in ("tail=abc", "tail=0", "tail=-1"):
+            resp, _ = self.request(f"/api/session/s3/output?{query}")
+            self.assertEqual(resp.status, 400, query)
+        seen = []
+
+        def fake_logs(sandbox, tail_n=None, since=None):
+            seen.append(tail_n)
+            return [], None
+
+        with mock.patch.object(MOD, "_run_msb_logs", fake_logs):
+            self.get_json("/api/session/s3/output?tail=999999")
+        self.assertEqual(seen, [MOD.UI_OUTPUT_TAIL_MAX])
+
+    def test_unknown_ident_is_404(self):
+        resp, _ = self.get_json("/api/session/none/output")
+        self.assertEqual(resp.status, 404)
+
+
+# -- /api/metrics ------------------------------------------------------------------------
+
+class UiMetricsTest(UiServerTest):
+
+    def test_empty_registry_skips_the_subprocess(self):
+        calls = []
+        with mock.patch.object(MOD, "_run_msb_metrics",
+                               lambda: calls.append(1) or []):
+            resp, got = self.get_json("/api/metrics")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(got["metrics"], [])
+        self.assertEqual(got["ttl"], MOD.UI_METRICS_TTL)
+        self.assertIn("sampled", got)
+        self.assertEqual(calls, [], "no live sessions: nothing to ask msb about")
+
+    def test_two_requests_inside_the_ttl_cost_one_seam_call(self):
+        self.write_session("s1")
+        calls = []
+
+        def fake_metrics():
+            calls.append(1)
+            return [{"name": "sg-s1", "cpu_pct": 12, "mem_mib": 256}]
+
+        with mock.patch.object(MOD, "_run_msb_metrics", fake_metrics):
+            _, first = self.get_json("/api/metrics")
+            _, second = self.get_json("/api/metrics")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first["metrics"],
+                         [{"session": "s1", "cpu_pct": 12, "mem_mib": 256}],
+                         "msb's sandbox row becomes the session's, renamed")
+        self.assertEqual(second, first)
+
+    def test_failure_is_cached_too(self):
+        self.write_session("s1")
+        calls = []
+
+        def broken():
+            calls.append(1)
+            return None
+
+        with mock.patch.object(MOD, "_run_msb_metrics", broken):
+            _, got = self.get_json("/api/metrics")
+            self.get_json("/api/metrics")
+        self.assertEqual(got["metrics"], [])
+        self.assertEqual(len(calls), 1, "a hung msb is not re-poked inside the TTL")
+
+
+# -- /api/session/<ident>/diff ------------------------------------------------------------
+
+_BASE = "0" * 40
+
+
+class UiDiffTest(UiServerTest):
+
+    def post_json(self, path, headers=None):
+        resp, body = self.request(path, method="POST", headers=headers)
+        return resp, json.loads(body)
+
+    def branch_session(self, name="b1"):
+        return self.write_session(name, branch="agent/x", base=_BASE,
+                                  git_dir="/g/.git", workspace="/w",
+                                  workspace_derived=True)
+
+    def test_live_branch_diff_is_guest_mode(self):
+        self.branch_session()
+        seen = {}
+
+        def fake_diff(meta):
+            seen["meta"] = meta
+            return " M a.py\n", "diff --git a/a.py b/a.py\n", None
+
+        with mock.patch.object(MOD, "_diff_in_guest", fake_diff):
+            resp, got = self.post_json("/api/session/b1/diff")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(got, {"mode": "guest", "status": " M a.py\n",
+                               "diff": "diff --git a/a.py b/a.py\n",
+                               "truncated": False})
+        self.assertEqual(seen["meta"]["name"], "b1")
+
+    def test_live_checkout_diff_is_guest_mode_too(self):
+        self.write_session("c1", checkout="HEAD", base=_BASE, git_dir="/g/.git")
+        with mock.patch.object(MOD, "_diff_in_guest",
+                               lambda meta: ("", "the diff", None)):
+            resp, got = self.post_json("/api/session/c1/diff")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(got["mode"], "guest")
+
+    def test_live_session_without_git_is_409(self):
+        self.write_session("p1")
+        resp, got = self.post_json("/api/session/p1/diff")
+        self.assertEqual(resp.status, 409)
+        self.assertIn("no git", got["error"])
+
+    def test_guest_failure_is_409(self):
+        self.branch_session()
+        with mock.patch.object(MOD, "_diff_in_guest",
+                               lambda meta: (None, None, "guest did not answer")):
+            resp, got = self.post_json("/api/session/b1/diff")
+        self.assertEqual(resp.status, 409)
+        self.assertIn("guest did not answer", got["error"])
+
+    def test_diff_is_capped_and_marked_truncated(self):
+        self.branch_session()
+        with mock.patch.object(MOD, "_diff_in_guest",
+                               lambda meta: ("", "d" * 64, None)), \
+                mock.patch.object(MOD, "_DIFF_MAX_BYTES", 16):
+            _, got = self.post_json("/api/session/b1/diff")
+        self.assertTrue(got["truncated"])
+        self.assertEqual(got["diff"], "d" * 16)
+
+    def test_busy_session_answers_429(self):
+        self.branch_session()
+        MOD._DIFF_BUSY.add("b1")
+        try:
+            resp, got = self.post_json("/api/session/b1/diff")
+        finally:
+            MOD._DIFF_BUSY.discard("b1")
+        self.assertEqual(resp.status, 429)
+        self.assertIn("already running", got["error"])
+
+    def test_archived_ingested_branch_diffs_on_the_host(self):
+        sid, _ = self.write_archive("olda", branch="agent/x", base=_BASE,
+                                    git_dir="/g/.git", workspace="/w",
+                                    branch_ingested="1" * 40)
+        seen = {}
+
+        def fake_git(git_dir, *argv):
+            seen["git_dir"], seen["argv"] = git_dir, argv
+            return types.SimpleNamespace(returncode=0, stdout="the host diff")
+
+        with mock.patch.object(MOD, "_git", fake_git):
+            resp, got = self.post_json(f"/api/session/{sid}/diff")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(got, {"mode": "host", "status": "", "diff": "the host diff",
+                               "truncated": False})
+        self.assertEqual(seen["git_dir"], "/g/.git")
+        self.assertEqual(seen["argv"],
+                         ("diff", f"{_BASE}..refs/heads/agent/x"))
+
+    def test_archived_never_harvested_is_409(self):
+        sid, _ = self.write_archive("oldb", branch="agent/x", base=_BASE,
+                                    git_dir="/g/.git", workspace="/w")
+        resp, got = self.post_json(f"/api/session/{sid}/diff")
+        self.assertEqual(resp.status, 409)
+        self.assertIn("never harvested", got["error"])
+
+    def test_archived_without_branch_is_409(self):
+        sid, _ = self.write_archive("oldc")
+        resp, _ = self.post_json(f"/api/session/{sid}/diff")
+        self.assertEqual(resp.status, 409)
+
+    def test_host_git_failure_is_409(self):
+        sid, _ = self.write_archive("oldd", branch="agent/x", base=_BASE,
+                                    git_dir="/g/.git", workspace="/w",
+                                    branch_ingested="1" * 40)
+        with mock.patch.object(MOD, "_git", lambda *a: None):
+            resp, _ = self.post_json(f"/api/session/{sid}/diff")
+        self.assertEqual(resp.status, 409)
+
+    def test_diff_is_post_only(self):
+        self.branch_session()
+        resp, _ = self.request("/api/session/b1/diff")
+        self.assertEqual(resp.status, 404, "GET has no diff route")
+
+
+# -- /api/capture -------------------------------------------------------------------------
+
+def capture_event(**kw):
+    rec = {"ts": "2026-08-04T12:00:00+00:00", "kind": "turn_start", "id": "f1",
+           "session": "demo", "exec": "cafe1234", "model": "claude-fable-5"}
+    rec.update(kw)
+    return rec
+
+
+class UiCaptureTest(UiServerTest):
+
+    def test_history_merges_files_and_filters_by_session(self):
+        self.events_file("capture-01.jsonl", capture_event(id="a"),
+                         capture_event(id="b", session="other"))
+        self.events_file("capture-02.jsonl", capture_event(id="c"))
+        _, got = self.get_json("/api/capture")
+        self.assertEqual([r["id"] for r in got["events"]], ["a", "b", "c"])
+        _, got = self.get_json("/api/capture?session=demo")
+        self.assertEqual([r["id"] for r in got["events"]], ["a", "c"])
+        _, got = self.get_json("/api/capture?limit=1")
+        self.assertEqual([r["id"] for r in got["events"]], ["c"])
+
+    def test_capture_ignores_the_audit_trail_and_vice_versa(self):
+        self.events_file("events-01.jsonl", event(id="audit1"))
+        self.events_file("capture-01.jsonl", capture_event(id="cap1"))
+        _, got = self.get_json("/api/capture")
+        self.assertEqual([r["id"] for r in got["events"]], ["cap1"])
+        _, got = self.get_json("/api/events")
+        self.assertEqual([r["id"] for r in got["events"]], ["audit1"])
+
+    def test_cursor_names_the_live_capture_file(self):
+        live = self.events_file("capture-live.jsonl", capture_event(id="a"))
+        self.proxy_meta(events=self.events_file("events-live.jsonl"),
+                        capture=str(live))
+        _, got = self.get_json("/api/capture")
+        self.assertEqual(got["cursor"], f"capture-live.jsonl:{live.stat().st_size}")
+
+    def test_cursor_is_null_without_a_proxy(self):
+        self.events_file("capture-01.jsonl", capture_event(id="a"))
+        _, got = self.get_json("/api/capture")
+        self.assertIsNone(got["cursor"])
+
+    def test_bad_limit_is_400(self):
+        for query in ("limit=many", "limit=0"):
+            resp, _ = self.request(f"/api/capture?{query}")
+            self.assertEqual(resp.status, 400, query)
+
+
+class UiCaptureStreamTest(UiStreamTest):
+    """The capture stream is the audit stream pointed at the other trail, so one
+    resume test and one follow test pin the parameterization; the shared semantics
+    are UiStreamTest's."""
+
+    def test_capture_records_arrive_as_frames(self):
+        live = self.events_file("capture-live.jsonl")
+        self.proxy_meta(capture=str(live))
+        s, _ = self.sse_open(cursor_param="capture-live.jsonl:0",
+                             endpoint="/api/capture/stream")
+        line = json.dumps(capture_event(id="a"))
+        with open(live, "a") as fh:
+            fh.write(line + "\n")
+        frame = f"id: capture-live.jsonl:{len(line) + 1}\ndata: {line}\n\n"
+        self.read_until(s, frame.encode())
+
+    def test_capture_stream_ignores_the_audit_file(self):
+        audit = self.events_file("events-live.jsonl")
+        live = self.events_file("capture-live.jsonl")
+        self.proxy_meta(events=str(audit), capture=str(live))
+        s, _ = self.sse_open(cursor_param="capture-live.jsonl:0",
+                             endpoint="/api/capture/stream")
+        with open(audit, "a") as fh:
+            fh.write(json.dumps(event(id="noise")) + "\n")
+        line = json.dumps(capture_event(id="signal"))
+        with open(live, "a") as fh:
+            fh.write(line + "\n")
+        data = self.read_until(s, line.encode())
+        self.assertNotIn(b"noise", data)
+
+
+# -- /api/search --------------------------------------------------------------------------
+
+class UiSearchTest(UiServerTest):
+
+    def fixture(self):
+        self.events_file("events-01.jsonl",
+                         event(id="a", host="pypi.org"),
+                         event(id="b", host="evil.example", session="other"))
+        self.events_file("capture-01.jsonl",
+                         capture_event(id="c", model="claude-fable-5"))
+        sid, adir = self.write_archive("olds")
+        MOD._journal_into(adir, "exec_start", exec_id="cafe1234",
+                          argv=["claude", "-p", "fix pypi build"])
+        return sid
+
+    def test_substring_is_case_folded_across_sources(self):
+        self.fixture()
+        _, got = self.get_json("/api/search?q=PYPI")
+        self.assertEqual({r["source"] for r in got["results"]}, {"audit", "journal"})
+        self.assertFalse(got["truncated"])
+        _, got = self.get_json("/api/search?q=fable")
+        self.assertEqual([r["source"] for r in got["results"]], ["capture"])
+
+    def test_session_filter_reaches_journals_via_the_sid(self):
+        self.fixture()
+        _, got = self.get_json("/api/search?q=pypi&session=olds")
+        self.assertEqual([r["source"] for r in got["results"]], ["journal"])
+        _, got = self.get_json("/api/search?q=evil&session=other")
+        self.assertEqual([r["record"]["id"] for r in got["results"]], ["b"])
+        _, got = self.get_json("/api/search?q=evil&session=demo")
+        self.assertEqual(got["results"], [])
+
+    def test_short_queries_are_400(self):
+        for q in ("", "ab"):
+            resp, _ = self.request(f"/api/search?q={q}")
+            self.assertEqual(resp.status, 400, repr(q))
+
+    def test_result_cap_early_exits_and_marks_truncation(self):
+        self.events_file("events-01.jsonl",
+                         *(event(id=f"r{i}", host="pypi.org") for i in range(6)))
+        _, got = self.get_json("/api/search?q=pypi&limit=3")
+        self.assertEqual(len(got["results"]), 3)
+        self.assertTrue(got["truncated"])
+
+    def test_scanned_bytes_ceiling_stops_the_scan(self):
+        self.events_file("events-01.jsonl", event(id="a", host="pypi.org"))
+        self.events_file("events-02.jsonl", event(id="b", host="pypi.org"))
+        with mock.patch.object(MOD, "UI_SEARCH_MAX_BYTES", 1):
+            _, got = self.get_json("/api/search?q=pypi")
+        self.assertEqual(len(got["results"]), 1, "one file read, then the ceiling")
+        self.assertTrue(got["truncated"])
+
+    def test_newest_file_wins_the_early_exit(self):
+        older = self.events_file("events-01.jsonl", event(id="old", host="pypi.org"))
+        newer = self.events_file("events-02.jsonl", event(id="new", host="pypi.org"))
+        os.utime(older, (1, 1))
+        _, got = self.get_json("/api/search?q=pypi&limit=1")
+        self.assertEqual(got["results"][0]["record"]["id"], "new")
+
+
+# -- the control plane ----------------------------------------------------------------
+
+class UiControlTest(UiServerTest):
+
+    def post_json(self, path, headers=None):
+        resp, body = self.request(path, method="POST", headers=headers)
+        return resp, json.loads(body)
+
+    def test_freeze_swaps_the_rules_and_resume_restores_them(self):
+        sdir = self.write_session("s1", rules="pypi.org/** GET\n")
+        resp, got = self.post_json("/api/session/s1/freeze")
+        self.assertEqual((resp.status, got), (200, {"ok": True}))
+        self.assertEqual((sdir / "rules.txt").read_text(), "",
+                         "an empty ruleset: deny-by-default does the rest")
+        self.assertEqual((sdir / "rules.frozen").read_text(), "pypi.org/** GET\n")
+        resp, got = self.post_json("/api/session/s1/freeze")
+        self.assertEqual(resp.status, 409)
+        self.assertIn("already frozen", got["error"])
+        resp, got = self.post_json("/api/session/s1/resume")
+        self.assertEqual((resp.status, got), (200, {"ok": True}))
+        self.assertEqual((sdir / "rules.txt").read_text(), "pypi.org/** GET\n")
+        self.assertFalse((sdir / "rules.frozen").exists())
+        resp, got = self.post_json("/api/session/s1/resume")
+        self.assertEqual(resp.status, 409)
+        self.assertIn("not frozen", got["error"])
+        events = [r["event"] for r in
+                  MOD._read_journal(sdir / "journal.jsonl")]
+        self.assertEqual(events, ["frozen", "resumed"])
+
+    def test_down_drives_the_shared_teardown_path(self):
+        sdir = self.write_session("s2")
+        seen = {}
+
+        def fake_down(meta):
+            seen["meta"] = meta
+            return False
+
+        with mock.patch.object(MOD, "_down_session", fake_down):
+            resp, got = self.post_json("/api/session/s2/down")
+        self.assertEqual((resp.status, got), (200, {"ok": True}))
+        self.assertEqual(seen["meta"]["name"], "s2")
+
+    def test_down_failure_is_409_not_a_dead_thread(self):
+        self.write_session("s3")
+
+        def dies(meta):
+            raise SystemExit(1)
+
+        with mock.patch.object(MOD, "_down_session", dies):
+            resp, got = self.post_json("/api/session/s3/down")
+        self.assertEqual(resp.status, 409)
+        self.assertIn("kept", got["error"])
+
+    def test_kill_builds_the_group_signal_argv(self):
+        sdir = self.write_session("k1")
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            return types.SimpleNamespace(returncode=0, stdout="SILKGATE_KILLED\n",
+                                         stderr="")
+
+        with mock.patch.object(MOD, "_msb", lambda: "msb"), \
+                mock.patch.object(MOD.subprocess, "run", fake_run):
+            resp, got = self.post_json("/api/session/k1/exec/cafe1234/kill")
+        self.assertEqual((resp.status, got), (200, {"ok": True}))
+        self.assertEqual(seen["argv"][:3], ["msb", "exec", "-q"])
+        self.assertIn("sg-k1", seen["argv"])
+        script = seen["argv"][seen["argv"].index("-c") + 1] \
+            if "-c" in seen["argv"] else " ".join(seen["argv"])
+        self.assertIn(f"{MOD.GUEST_EXECS}/$1.pid", script)
+        self.assertIn('kill -TERM -- -"$pgid"', script)
+        self.assertIn('kill -KILL -- -"$pgid"', script)
+        self.assertEqual(seen["argv"][-1], "cafe1234",
+                         "the exec id rides argv, never spliced into the script")
+        events = MOD._read_journal(sdir / "journal.jsonl")
+        self.assertEqual([(r["event"], r.get("exec_id")) for r in events],
+                         [("killed", "cafe1234")])
+
+    def test_kill_validates_the_exec_id_first(self):
+        self.write_session("k2")
+        for bad in ("xyz", "..", "CAFE1234", "cafe12345", "cafe123"):
+            resp, _ = self.post_json(f"/api/session/k2/exec/{bad}/kill")
+            self.assertEqual(resp.status, 400, bad)
+
+    def test_kill_without_a_pidfile_is_409(self):
+        self.write_session("k3")
+        with mock.patch.object(MOD, "_kill_in_guest",
+                               lambda meta, eid: ("SILKGATE_NO_PIDFILE", "")):
+            resp, got = self.post_json("/api/session/k3/exec/cafe1234/kill")
+        self.assertEqual(resp.status, 409)
+        self.assertIn("already ended", got["error"])
+
+    def test_control_refuses_archived_sessions(self):
+        sid, _ = self.write_archive("olda")
+        for action in ("freeze", "resume", "down"):
+            resp, _ = self.post_json(f"/api/session/{sid}/{action}")
+            self.assertEqual(resp.status, 409, action)
+        resp, _ = self.post_json(f"/api/session/{sid}/exec/cafe1234/kill")
+        self.assertEqual(resp.status, 409)
+
+    def test_control_refuses_unknown_sessions(self):
+        for action in ("freeze", "resume", "down", "diff"):
+            resp, _ = self.post_json(f"/api/session/nosuch/{action}")
+            self.assertEqual(resp.status, 404, action)
+
+    def test_every_control_route_refuses_cross_origin(self):
+        self.write_session("s9")
+        evil = {"Origin": "https://evil.example"}
+        for path in ("/api/session/s9/freeze", "/api/session/s9/resume",
+                     "/api/session/s9/down", "/api/session/s9/diff",
+                     "/api/session/s9/exec/cafe1234/kill"):
+            resp, _ = self.post_json(path, headers=evil)
+            self.assertEqual(resp.status, 403, path)
+
+
+# -- the shipped assets ---------------------------------------------------------------
+
+_BANNED_SINKS = re.compile(
+    r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|srcdoc")
+_JS_REFS = re.compile(r"""(?:import|from)\s*\(?\s*["']([^"']+)["']""")
+_HTML_REFS = re.compile(r"""(?:src|href)\s*=\s*["']([^"']+)["']""")
+
+
+class ShippedAssetInvariantsTest(unittest.TestCase):
+    """Unlike every fixture-based class above (which repoints UI_DIR at a temp
+    directory), this one reads the SHIPPED ui/ sources in the repository: the
+    invariants are the contract of the real assets. A routed file that does not
+    exist yet is skipped — another branch lands it — so the invariants hold for
+    whatever actually ships."""
+
+    def served(self):
+        for key, (name, _) in MOD._UI_ROUTES.items():
+            path = REPO / "ui" / name
+            if path.is_file():
+                yield key, path
+
+    def test_no_markup_sinks_in_the_shipped_sources(self):
+        checked = 0
+        for path in (REPO / "ui").rglob("*"):
+            if path.suffix not in (".js", ".html") or path.name.endswith(".test.js"):
+                continue
+            checked += 1
+            hit = _BANNED_SINKS.search(path.read_text(encoding="utf-8"))
+            self.assertIsNone(hit, f"{path.name} uses {hit and hit.group(0)!r} — "
+                                   "render through textContent/DOM nodes instead")
+        self.assertGreater(checked, 0, "no shipped sources found to check")
+
+    def test_every_reference_in_served_files_resolves_to_a_route(self):
+        for key, path in self.served():
+            text = path.read_text(encoding="utf-8")
+            refs = (_JS_REFS.findall(text) if path.suffix == ".js"
+                    else _HTML_REFS.findall(text))
+            for ref in refs:
+                if "//" in ref or ref.startswith(("data:", "#")):
+                    continue                     # not this server's to serve
+                resolved = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(key), ref))
+                self.assertIn(resolved, MOD._UI_ROUTES,
+                              f"{path.name} references {ref!r} ({resolved}), "
+                              "which the server does not route")
 
 
 # -- cmd_ui ---------------------------------------------------------------------------
