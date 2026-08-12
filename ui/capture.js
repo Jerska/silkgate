@@ -152,7 +152,7 @@ export function foldCapture(cap, rec) {
         t.textChars -= old.heldChars;
         bucket.textChars -= old.heldChars;
       }
-      const b = { index: rec.index, type: rec.type ?? null,
+      const b = { index: rec.index, type: rec.type ?? null, ts: rec.ts ?? null,
                   text: typeof rec.text === "string" ? rec.text : null,
                   tool_name: rec.tool_name ?? null, tool_id: rec.tool_id ?? null,
                   tool_input: rec.tool_input ?? null,
