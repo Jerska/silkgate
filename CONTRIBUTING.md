@@ -21,12 +21,18 @@ The README's [Layout](README.md#layout) section maps the directories.
 
 ## Tests
 
-Run the suite before and after your change:
+**Run the suite before and after your change.**
 
 ```sh
-python3 -m unittest discover -s test    # full suite, ~2 minutes
+python3 fasttest.py                     # full suite, sharded, ~13 seconds
+python3 -m unittest discover -s test    # full suite, one process, ~1 minute
 python3 mitmaddon/rule_engine.py        # rule-engine self-tests
 ```
+
+The two suite commands run the same tests. The fast runner splits them into
+shards and runs one process per shard. If discovery and the shard layout
+disagree, the runner stops before any test starts. If you add a test file,
+name it in `SHARDS` at the top of `fasttest.py`.
 
 If mitmproxy is not installed, the addon tests skip and the summary says so. Containment
 is verified separately with `./cli/silkgate verify --full`. That command needs docker and
