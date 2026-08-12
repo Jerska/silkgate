@@ -3935,12 +3935,17 @@ _DIFF_MAX_BYTES = 2 << 20
 
 # One in-guest pass for /api/session/<ident>/diff: what changed since the base, both
 # staged-or-not (status) and as a patch (diff against $1). The split marker keeps the
-# two apart in one exec round-trip.
+# two apart in one exec round-trip. Both gits run --no-pager (GIT_PAGER=cat as the
+# second lock on any config-forced pager): a pager here blocks the exec against
+# _DIFF_TIMEOUT and draws its chrome — `--More--`, `(END)` — on the guest console,
+# which `msb logs` and the session's output snapshot read. This endpoint's output
+# must reach the host on the exec channel alone, never the console.
 _DIFF_SH = """\
 set -eu
-{cd}git status --porcelain
+GIT_PAGER=cat; export GIT_PAGER
+{cd}git --no-pager status --porcelain
 echo SILKGATE_DIFF_SPLIT
-git diff "$1"
+git --no-pager diff "$1"
 """
 
 

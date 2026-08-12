@@ -1005,6 +1005,33 @@ class UiDiffTest(UiServerTest):
         resp, _ = self.request("/api/session/b1/diff")
         self.assertEqual(resp.status, 404, "GET has no diff route")
 
+    def test_diff_seam_builds_a_no_pager_git_argv(self):
+        """The in-guest gits must never page: a pager blocks the exec against its
+        timeout and draws its chrome on the guest console, which the session's
+        output snapshot reads. Output must ride the captured exec channel alone."""
+        for meta in ({"sandbox": "sg-b1", "branch": "agent/x", "base": _BASE},
+                     {"sandbox": "sg-c1", "checkout": "HEAD", "base": _BASE}):
+            seen = {}
+
+            def fake_run(argv, **kwargs):
+                seen["argv"], seen["kwargs"] = argv, kwargs
+                return types.SimpleNamespace(
+                    returncode=0, stdout="SILKGATE_DIFF_SPLIT\n", stderr="")
+
+            with mock.patch.object(MOD, "_msb", lambda: "msb"), \
+                    mock.patch.object(MOD.subprocess, "run", fake_run):
+                MOD._diff_in_guest(meta)
+            script = seen["argv"][seen["argv"].index("-c") + 1]
+            self.assertIn("git --no-pager status --porcelain", script)
+            self.assertIn('git --no-pager diff "$1"', script)
+            self.assertIn("GIT_PAGER=cat", script)
+            self.assertNotRegex(script, r"(?<!--no-pager )git (status|diff)",
+                                "every git in the seam must carry --no-pager")
+            self.assertEqual(seen["argv"][-1], meta["base"],
+                             "the base rides argv, never spliced into the script")
+            self.assertTrue(seen["kwargs"].get("capture_output"),
+                            "diff output is captured host-side, off the console")
+
 
 # -- /api/capture -------------------------------------------------------------------------
 
