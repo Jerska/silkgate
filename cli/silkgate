@@ -2375,7 +2375,8 @@ def _mount_args(specs, *, allow_git_dir=False):
 
 
 def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
-                       context=None, context_paths=(), memory=None, cpus=None, brief=None):
+                       context=None, context_paths=(), settings=None, settings_paths=(),
+                       memory=None, cpus=None, brief=None):
     """Stage the session dir then rename it into the registry, so its appearance is atomic:
     the addon rescans on the sessions-dir mtime and must never see (and cache) a half-written
     session. Boot the guest after. On failure, undo only what is ours: the staging dir, the
@@ -2395,6 +2396,8 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
         (tmp / "rules.txt").write_text(rules_text)
         if context:
             (tmp / "context.md").write_text(context)
+        if settings:
+            (tmp / "settings.json").write_text(settings)
         if brief is not None:
             (tmp / "brief.md").write_bytes(brief)
         meta = {"name": name, "sandbox": sandbox_name(name), "sid": _new_sid(name),
@@ -2411,9 +2414,12 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
             die(f"session already exists: {sdir}")
         _push_secrets(ruleset, name)
         # The context goes into the rootfs, never the workspace: it must not appear in the
-        # user's project, and a guest rewriting it changes nothing that matters. The brief
-        # rides the same way, to the one path the guest is told to read.
+        # user's project, and a guest rewriting it changes nothing that matters. The
+        # projected settings ride the same mechanism to each profile's settings_path,
+        # and the brief too, to the one path the guest is told to read.
         copies = [(sdir / "context.md", dst) for dst in context_paths] if context else []
+        if settings:
+            copies += [(sdir / "settings.json", dst) for dst in settings_paths]
         if brief is not None:
             copies.append((sdir / "brief.md", GUEST_BRIEF))
         created = True
@@ -3101,13 +3107,16 @@ def cmd_run(args):
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, vmounts, persistent=False)
+        settings, settings_paths = _settings_for(args, profiles,
+                                                 _settings_workspace(spec, vmounts))
         meta_extra = {**_session_meta(profiles, cmd),
                       **_observability_meta(args, rules_text, None), "tty": tty,
                       **(spec or {})}
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           meta_extra, ctx, ctx_paths, memory=args.memory, cpus=args.cpus)
+                           meta_extra, ctx, ctx_paths, settings, settings_paths,
+                           memory=args.memory, cpus=args.cpus)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -3282,6 +3291,97 @@ def _context_for(args, profiles, ruleset, mounts, *, persistent):
                            brief=bool(getattr(args, "brief", None))), paths
 
 
+# --- the settings projection: the host's model configuration, forwarded ---------
+# Claude Code reads settings files at three ranks, lowest first: ~/.claude/settings.json
+# (user), <project>/.claude/settings.json (project), <project>/.claude/settings.local.json
+# (local) — and an env var (an "env" block entry in any of them) outranks every direct key
+# in every file. The projection resolves the host's answer once, host-side, and hands the
+# guest that answer alone, so an agent inside defaults to the same model and reasoning
+# effort as the host.
+
+# The host's user-rank settings file. The project and local files come from the host
+# directory that becomes /workspace.
+CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
+
+# The only keys that ever leave the host, each with the env var Claude Code maps to it.
+# Everything else in a settings file — permissions, hooks, apiKeyHelper, every other env
+# entry — stays behind: env entries can carry secrets, and the guest needs none of it.
+_SETTINGS_KEYS = (("model", "ANTHROPIC_MODEL"),
+                  ("effortLevel", "CLAUDE_CODE_EFFORT_LEVEL"))
+
+
+def _read_settings(path):
+    """One settings file as a dict. Absent is {}; a file that exists but does not hold a
+    JSON object warns and counts as absent too — the same contract as a malformed secret:
+    the launch continues, and the warning says why the projection lacks the file."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+    try:
+        data = json.loads(text)
+    except ValueError:
+        say(f"warning: {path} is not valid JSON — the settings projection ignores it")
+        return {}
+    if not isinstance(data, dict):
+        say(f"warning: {path} is not a JSON object — the settings projection ignores it")
+        return {}
+    return data
+
+
+def _resolve_settings(workspace, user_settings):
+    """At most {model, effortLevel}: the answer the host's own Claude Code would reach.
+
+    Both inputs are paths the caller hands in — `workspace` is the host directory that
+    becomes /workspace (None when no host directory does), `user_settings` the host's
+    user-rank file — so tests never read the real home directory. Per key the first
+    match wins, ranks read highest first: env-block values (local, project, user), then
+    direct keys in the same order.
+    """
+    files = []                                   # highest rank first
+    if workspace:
+        dot = Path(workspace) / ".claude"
+        files += [_read_settings(dot / "settings.local.json"),
+                  _read_settings(dot / "settings.json")]
+    files.append(_read_settings(Path(user_settings)))
+    env_blocks = [f["env"] for f in files if isinstance(f.get("env"), dict)]
+    resolved = {}
+    for key, env_name in _SETTINGS_KEYS:
+        candidates = [b.get(env_name) for b in env_blocks] + [f.get(key) for f in files]
+        value = next((v for v in candidates if isinstance(v, str) and v), None)
+        if value is not None:
+            resolved[key] = value
+    return resolved
+
+
+def _settings_workspace(spec, mounts):
+    """The host directory whose project and local settings files apply: the one that
+    becomes /workspace. The repository root for --checkout and --branch, else the SRC of
+    the mount whose DST is /workspace, else None — the user file alone then decides."""
+    if spec:
+        return spec["repo_root"]
+    return next((host for host, guest, _ in mounts if guest == "/workspace"), None)
+
+
+def _settings_for(args, profiles, workspace):
+    """(settings JSON text, where to put it in the guest) — or (None, ()) with
+    --no-settings, with no profile naming a settings_path, or with neither key resolved.
+
+    Fail closed: nothing is staged and nothing is copied unless a profile consumes it
+    (`settings_path` in profile.conf, the settings twin of context_path) AND at least
+    one of the two keys resolves on the host.
+    """
+    if args.no_settings:
+        return None, ()
+    paths = [p.conf["settings_path"] for p in profiles if p.conf.get("settings_path")]
+    if not paths:
+        return None, ()
+    resolved = _resolve_settings(workspace, CLAUDE_SETTINGS)
+    if not resolved:
+        return None, ()
+    return json.dumps(resolved) + "\n", paths
+
+
 def cmd_up(args):
     check_env(args.env)
     _check_mount_flags(args)
@@ -3317,14 +3417,16 @@ def cmd_up(args):
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, vmounts, persistent=True)
+        settings, settings_paths = _settings_for(args, profiles,
+                                                 _settings_workspace(spec, vmounts))
         meta_extra = {**_session_meta(profiles, profile_command(profiles)),
                       **_observability_meta(args, rules_text, brief),
                       **(spec or {})}
         if vmounts:
             meta_extra["mounts"] = [f"{h}:{g}:{m}" for h, g, m in vmounts]
         _provision_session(name, image, port, rules_text, ruleset, mounts, ws, create_env,
-                           meta_extra, ctx, ctx_paths, memory=args.memory, cpus=args.cpus,
-                           brief=brief)
+                           meta_extra, ctx, ctx_paths, settings, settings_paths,
+                           memory=args.memory, cpus=args.cpus, brief=brief)
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
@@ -5928,6 +6030,9 @@ def main():
         p.add_argument("--no-context", action="store_true",
                        help=f"don't describe the sandbox to the guest ({GUEST_CONTEXT} and "
                             "$SILKGATE_CONTEXT)")
+        p.add_argument("--no-settings", action="store_true",
+                       help="don't forward the host's Claude Code model settings (model, "
+                            "effortLevel) to each profile's settings_path")
 
     # Session guests default to 1G and half the host's CPUs — msb's own 512M / 1 vCPU
     # OOM-kills a guest that runs an agent beside a test suite. Both are limits the

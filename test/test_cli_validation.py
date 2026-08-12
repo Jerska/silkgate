@@ -46,6 +46,7 @@ sg.CA_DIR = sg.SILK_DIR / "ca"
 sg.DOCKER_CFG_DIR = sg.SILK_DIR / "docker"
 sg.PROXY_JSON = sg.SILK_DIR / "proxy.json"
 sg.PROXY_SOCK = sg.SILK_DIR / "proxy.sock"
+sg.CLAUDE_SETTINGS = _SCRATCH / "claude" / "settings.json"
 
 
 def tearDownModule():
@@ -108,9 +109,11 @@ class CliCase(unittest.TestCase):
         seen = {}
 
         def spy(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
-                context=None, context_paths=(), memory=None, cpus=None, brief=None):
+                context=None, context_paths=(), settings=None, settings_paths=(),
+                memory=None, cpus=None, brief=None):
             seen.update(name=name, mounts=mounts, ws=ws, env=env, meta=meta_extra,
-                        context=context, brief=brief, rules_text=rules_text)
+                        context=context, brief=brief, rules_text=rules_text,
+                        settings=settings, settings_paths=settings_paths)
             raise SystemExit(42)
 
         with self.no_preflight(), \
