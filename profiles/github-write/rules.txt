@@ -4,12 +4,21 @@
 # constraints key by param name, so a second q:service= token would silently win
 # rather than widen. git-receive-pack carries no git-protocol pin — a push negotiates
 # protocol v0. The LFS grant widens from the batch endpoint to info/lfs/** (locks and
-# verify ride the same prefix). The api.github.com grant is two lines because
-# repos/{arg}/** compiles to a pattern whose literal slash must be present — the bare
-# repos/{arg} line is what admits the repo-root call itself. GitHub REST refuses a
-# request that carries no User-Agent (403, Request forbidden by administrative rules)
-# and reads accept to select the API media type; neither header is baseline, so the
-# api lines forward both with h:~.+ pins. The S3 upload authorizes itself with AWS
+# verify ride the same prefix). The locks API authenticates with the PAT, so injection
+# stays on that prefix — and if GitHub ever points upload-verify at it, the
+# lfs.github.com split below applies here too. lfs.github.com is two lines, batch
+# first — first match wins, so the order is load-bearing. The batch line keeps
+# inject_auth because git-lfs sometimes derives lfs.github.com as its batch endpoint
+# (the derivation is unstable). Every other path on that host is an action href from
+# a batch response, whose short-lived Authorization must pass verbatim — the PAT
+# injected over it makes GitHub answer 403 on upload-verify — so the catch-all pins
+# h:authorization and carries no inject_auth. The api.github.com grant is two lines
+# because repos/{arg}/** compiles to a pattern whose literal slash must be present —
+# the bare repos/{arg} line is what admits the repo-root call itself. GitHub REST
+# refuses a request that carries no User-Agent (403, Request forbidden by
+# administrative rules) and reads accept to select the API media type; neither header
+# is baseline, so the api lines forward both with h:~.+ pins. The S3 upload
+# authorizes itself with AWS
 # SigV4 carried in request headers (authorization, x-amz-date, x-amz-content-sha256),
 # and the signature must pass or S3 answers 403 — h:* on that line is deliberate on
 # this self-authorizing endpoint. Its rule must still carry no inject_auth — a second
@@ -24,7 +33,8 @@ github.com/{arg}/git-receive-pack     POST  max_body=64m  h:content-type=applica
 github.com/{arg}.git/git-receive-pack POST  max_body=64m  h:content-type=application/x-git-receive-pack-request  h:accept=application/x-git-receive-pack-result  inject_auth=github
 github.com/{arg}/info/lfs/**          GET POST  max_body=1m  h:content-type~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:accept~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  inject_auth=github
 github.com/{arg}.git/info/lfs/**      GET POST  max_body=1m  h:content-type~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:accept~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  inject_auth=github
-lfs.github.com/{arg}/**               GET POST  max_body=1m  inject_auth=github
+lfs.github.com/{arg}/objects/batch    POST      max_body=1m  h:content-type~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:accept~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  inject_auth=github
+lfs.github.com/{arg}/**               GET POST  max_body=1m  h:content-type~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:accept~application/vnd\.git-lfs\+json(;\s*charset=utf-8)?  h:authorization~.+
 api.github.com/repos/{arg}            GET POST PUT PATCH DELETE  q:*  max_body=1m  h:user-agent~.+  h:accept~.+  inject_auth=github
 api.github.com/repos/{arg}/**         GET POST PUT PATCH DELETE  q:*  max_body=1m  h:user-agent~.+  h:accept~.+  inject_auth=github
 raw.githubusercontent.com/{arg}/**    GET

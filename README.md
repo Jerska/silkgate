@@ -323,14 +323,19 @@ what each grant allows for its repository:
 | fetch negotiation (`git-upload-pack`) | POST, 1 MiB cap | POST, 1 MiB cap |
 | push (`git-receive-pack`) | — | POST, 64 MiB cap |
 | LFS batch API on `github.com` | `info/lfs/objects/batch` POST, 1 MiB cap | `info/lfs/**` GET and POST, 1 MiB cap |
-| LFS batch API on `lfs.github.com` | GET and POST, 1 MiB cap | GET and POST, 1 MiB cap |
+| LFS batch API on `lfs.github.com` (`objects/batch`) | POST, 1 MiB cap | POST, 1 MiB cap |
+| LFS action hrefs on `lfs.github.com` (every other path) | GET and POST, 1 MiB cap, no injection | GET and POST, 1 MiB cap, no injection |
 | REST API (`api.github.com/repos/OWNER/REPO`) | GET | GET, POST, PUT, PATCH, DELETE, 1 MiB cap |
 | `raw.githubusercontent.com`, `codeload.github.com` | GET, anonymous | GET, anonymous |
 | LFS object download (`github-cloud.githubusercontent.com`, presigned query) | GET, no injection | GET, no injection |
 | LFS object upload (`github-cloud.s3.amazonaws.com`, SigV4 header) | — | PUT, 1 GiB cap, no injection |
 
-Every `github.com`, `lfs.github.com`, and `api.github.com` row carries
-`inject_auth=github`. The secret is `SILKGATE_EGRESS_SECRET_GITHUB`, one full header
+Every `github.com` and `api.github.com` row carries `inject_auth=github`, and so does
+the `lfs.github.com` batch row. The action hrefs authorize themselves: each carries a
+short-lived `Authorization` token that the batch response issued, and the proxy
+forwards it verbatim. The PAT injected over that token makes GitHub answer 403 on
+upload-verify, so the action-href row carries no injection. The secret is
+`SILKGATE_EGRESS_SECRET_GITHUB`, one full header
 line: `Authorization: Basic base64(x-access-token:<PAT>)`. As with every secret, a
 missing value warns at launch, and the guest sees the credential status in its context
 file. The storage hosts authorize themselves (presigned URL or SigV4), so those rules

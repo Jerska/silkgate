@@ -1888,6 +1888,12 @@ class TestGithubProfiles(CliCase):
                         f"{method} git-receive-pack must match no rule")
             self.assertFalse(any("s3.amazonaws.com" in r.raw for r in rs.rules),
                              "read grant must hold no S3 upload rule")
+            # The lfs.github.com action-href line carries no inject_auth, so it
+            # grants nothing credentialed: the batch/action split does not widen read.
+            lfs = rs.match("lfs.github.com", "/some/repo/objects/someoid/verify",
+                           "POST")
+            self.assertIsNone(lfs.inject_auth,
+                              "the lfs action-href line must stay uncredentialed")
             api = rs.match("api.github.com", "/repos/some/repo/contents/x", "GET")
             self.assertEqual(api.methods, {"GET"})
             for method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -2024,6 +2030,27 @@ class TestGithubProfiles(CliCase):
                 "github-cloud.githubusercontent.com", "/x/y", "GET")
             self.assertFalse(cdn.allow_all_headers, spec)
             self.assertFalse(cdn.header_ok("authorization", "AWS4-HMAC-SHA256 x"), spec)
+
+    def test_lfs_host_injects_the_batch_and_passes_action_tokens(self):
+        # git-lfs sometimes derives lfs.github.com as its batch endpoint, so the
+        # batch line keeps the PAT. Every other path there is an action href whose
+        # batch-issued Authorization must pass verbatim — injecting the PAT over it
+        # makes GitHub answer 403 on upload-verify. First match wins, so the batch
+        # line must sit above the no-inject catch-all.
+        for spec in ("github-read:some/repo", "github-write:some/repo"):
+            rs = self.compose(spec)
+            batch = rs.match("lfs.github.com", "/some/repo/objects/batch", "POST")
+            self.assertEqual(batch.inject_auth, "github", spec)
+            verify = rs.match("lfs.github.com", "/some/repo/objects/someoid/verify",
+                              "POST")
+            self.assertIsNone(verify.inject_auth,
+                              f"{spec}: an action token must pass untouched")
+            self.assertTrue(verify.header_ok("authorization", "Basic action-token"),
+                            spec)
+            self.assertTrue(verify.header_ok("accept", "application/vnd.git-lfs+json"),
+                            spec)
+            self.assertFalse(verify.header_ok("x-exfil", "data"),
+                             f"{spec}: the pins must not widen to h:*")
 
     # --- composition: the grant governs in every --with order ---
 
