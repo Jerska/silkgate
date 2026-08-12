@@ -49,6 +49,19 @@ test("a missing or junk number is a null gap, never a zero", () => {
   assert.deepEqual(h.bySession.get("a").mem, [100, 200]);
 });
 
+test("each sample keeps its host-side stamp for the hover readout", () => {
+  const h = newHistory();
+  pushSamples(h, payload("t1", [{ session: "a", cpu_percent: 1 }]));
+  pushSamples(h, payload(null, [{ session: "a", cpu_percent: 2 }]));
+  assert.deepEqual(h.bySession.get("a").ts, ["t1", null],
+                   "ts parallels the value rings, junk stamps land as null");
+  for (let i = 0; i < SPARK_SAMPLES + 5; i++) {
+    pushSamples(h, payload("u" + i, [{ session: "a", cpu_percent: i }]));
+  }
+  assert.equal(h.bySession.get("a").ts.length, SPARK_SAMPLES,
+               "the stamp ring sheds with the values");
+});
+
 test("cpu rounds to one decimal; junk answers null, never a zero", () => {
   assert.equal(fmtCpuPct(0.004325448535382748), "0.0%");
   assert.equal(fmtCpuPct(12.34), "12.3%");

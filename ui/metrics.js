@@ -82,13 +82,17 @@ export function pushSamples(hist, payload, cap = SPARK_SAMPLES) {
     if (!m || m.session == null) continue;
     let h = hist.bySession.get(m.session);
     if (!h) {
-      h = { cpu: [], mem: [] };
+      // ts parallels the value rings: the hover readout names the sample's
+      // moment, so each index keeps its host-side stamp (or null).
+      h = { cpu: [], mem: [], ts: [] };
       hist.bySession.set(m.session, h);
     }
     h.cpu.push(asSample(m.cpu_percent));
     h.mem.push(asSample(m.memory_bytes));
+    h.ts.push(typeof payload.sampled === "string" ? payload.sampled : null);
     while (h.cpu.length > cap) h.cpu.shift();
     while (h.mem.length > cap) h.mem.shift();
+    while (h.ts.length > cap) h.ts.shift();
     touched.push(m.session);
   }
   return touched;

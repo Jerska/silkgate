@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { diffLineClass, diffLines, DIFF_LINE_CAP, sparkPoints,
-         fmtTokens, fmtCost } from "./render.js";
+         sparkSamples, sparkIndexAt, fmtTokens, fmtCost } from "./render.js";
 
 test("fmtTokens: readable magnitudes, and null is not a zero", () => {
   assert.equal(fmtTokens(0), "0");
@@ -56,6 +56,27 @@ test("diffLines caps at 20k lines and counts what it dropped", () => {
   assert.equal(big.lines.length, 5);
   assert.equal(big.dropped, 2);
   assert.equal(diffLines(null).lines.length, 1, "null reads as one empty line");
+});
+
+test("sparkSamples pairs plotted values with their stamps, holes dropped", () => {
+  const s = sparkSamples([1, null, "junk", 4], ["t0", "t1", "t2", "t3"]);
+  assert.deepEqual(s, [{ v: 1, ts: "t0" }, { v: 4, ts: "t3" }],
+                   "the same filter as sparkPoints, stamps riding along");
+  assert.deepEqual(sparkSamples([1, 2]), [{ v: 1, ts: null }, { v: 2, ts: null }],
+                   "no stamps means null stamps, not an off-by-one");
+  assert.deepEqual(sparkSamples(null, null), []);
+});
+
+test("sparkIndexAt inverts the x scale onto the nearest plotted sample", () => {
+  // three points over width 100, pad 2: x = 2, 50, 98
+  assert.equal(sparkIndexAt(3, 100, 2), 0);
+  assert.equal(sparkIndexAt(3, 100, 49), 1);
+  assert.equal(sparkIndexAt(3, 100, 97), 2);
+  assert.equal(sparkIndexAt(3, 100, -50), 0, "clamped, never out of range");
+  assert.equal(sparkIndexAt(3, 100, 500), 2);
+  assert.equal(sparkIndexAt(1, 100, 50), null, "one point draws nothing");
+  assert.equal(sparkIndexAt(0, 100, 50), null);
+  assert.equal(sparkIndexAt(3, 100, NaN), null);
 });
 
 test("sparkPoints: only finite numbers reach the SVG, min-max scaled", () => {

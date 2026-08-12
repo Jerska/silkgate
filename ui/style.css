@@ -173,6 +173,25 @@ button:hover { border-color: var(--muted); }
 .spark { width: 120px; height: 24px; flex: none; }
 .spark polyline { fill: none; stroke: var(--accent); stroke-width: 1; }
 
+/* Hoverable sparks: the unit tags the axis, the tip answers for the point
+   under the cursor (value @ time) without reflowing the row around it. */
+.spark-wrap { position: relative; display: inline-flex; align-items: center;
+              gap: var(--sp-1); }
+.spark-unit { color: var(--muted); font-size: 0.85em; flex: none; }
+.spark-tip {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 var(--sp-1);
+  white-space: nowrap;
+  font-size: 0.85em;
+  z-index: 2;
+}
+.spark-tip:empty { display: none; }
+
 /* The overview's card grid: collapses to one column on its own at ~700px. */
 .grid {
   display: grid;

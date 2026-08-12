@@ -5,6 +5,8 @@
 // DOM access — the formatters and classifiers at the bottom are pure, so node
 // can import this file for tests without a document.
 
+import { fmtTime } from "./store.js";
+
 // el("div", { class: "card", title: t }, "text", childNode, …) — attributes by
 // assignment for the safe common ones, setAttribute for the rest; string
 // children become text nodes. There is no path from a value to parsed markup.
@@ -103,11 +105,39 @@ export function sparkPoints(values, width, height, pad = 2) {
     .join(" ");
 }
 
+// The plotted samples behind a sparkline: (finite value, stamp) pairs in plot
+// order. sparkPoints drops non-finite values on the way to geometry, and the
+// hover readout must name exactly the plotted point under the cursor, so both
+// derive from the same filter.
+export function sparkSamples(values, times) {
+  const out = [];
+  (values ?? []).forEach((v, i) => {
+    if (typeof v === "number" && Number.isFinite(v)) {
+      out.push({ v, ts: times?.[i] ?? null });
+    }
+  });
+  return out;
+}
+
+// Pointer x (viewBox units) → index of the nearest plotted sample, inverting
+// sparkPoints' x scale; null when fewer than two points draw anything.
+export function sparkIndexAt(count, width, x, pad = 2) {
+  if (!(count >= 2) || !Number.isFinite(x)) return null;
+  const step = (width - 2 * pad) / (count - 1);
+  return Math.max(0, Math.min(count - 1, Math.round((x - pad) / step)));
+}
+
 // The inline sparkline itself. SVG nodes need their own namespace — el() only
 // speaks HTML — and everything set on them here is a computed number.
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-export function sparkline(values, { width = 120, height = 24 } = {}) {
+// With `unit` (and optionally `times`, an array parallel to `values`, plus
+// `fmt`, a value formatter) the spark gains an axis tag and a hover readout —
+// "12.3% @ 14:02:11.500" for the point under the cursor. Values are finite
+// numbers by the filter above and stamps go through fmtTime; both reach the
+// DOM as textContent, and nothing record-derived enters the SVG.
+export function sparkline(values, { width = 120, height = 24, unit = null,
+                                    times = null, fmt = null } = {}) {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("class", "spark");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -115,7 +145,28 @@ export function sparkline(values, { width = 120, height = 24 } = {}) {
   const line = document.createElementNS(SVG_NS, "polyline");
   line.setAttribute("points", sparkPoints(values, width, height));
   svg.append(line);
-  return svg;
+  if (unit === null && times === null) {
+    return svg;                    // the bare shape, as before
+  }
+  const samples = sparkSamples(values, times);
+  const tip = el("span", { class: "spark-tip num" });
+  const wrap = el("span", { class: "spark-wrap" }, svg,
+                  unit !== null ? el("span", { class: "spark-unit" }, unit) : null,
+                  tip);
+  svg.addEventListener("mousemove", (e) => {
+    const rect = svg.getBoundingClientRect();
+    const x = rect.width ? (e.clientX - rect.left) * (width / rect.width) : NaN;
+    const i = sparkIndexAt(samples.length, width, x);
+    if (i === null) {
+      tip.textContent = "";
+      return;
+    }
+    const s = samples[i];
+    const value = (fmt ? fmt(s.v) : null) ?? String(s.v);
+    tip.textContent = s.ts != null ? `${value} @ ${fmtTime(s.ts)}` : value;
+  });
+  svg.addEventListener("mouseleave", () => { tip.textContent = ""; });
+  return wrap;
 }
 
 // Token counts read at a glance: 999 → "999", 12345 → "12.3k", 2.5e6 → "2.50M".
