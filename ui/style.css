@@ -249,6 +249,7 @@ button:hover { border-color: var(--muted); }
 }
 
 .card-status { color: var(--muted); margin-top: var(--sp-1); }
+.card-label { color: var(--muted); }
 
 .card-counters {
   display: flex;
@@ -285,6 +286,7 @@ button:hover { border-color: var(--muted); }
 }
 .session-name { font-weight: 600; }
 .session-branch, .session-metrics { color: var(--muted); }
+.back { color: var(--muted); }
 .session-head .num { color: var(--muted); }
 
 .tabs {
@@ -425,6 +427,8 @@ button:hover { border-color: var(--muted); }
 .feed-strip .sighting { color: var(--deny); }
 .feed-strip .capture-err { color: var(--idle); }
 
+.feed { margin-top: var(--sp-2); }
+
 .turn {
   padding: var(--sp-2) 0;
   border-bottom: 1px solid var(--line);
@@ -437,6 +441,7 @@ button:hover { border-color: var(--muted); }
   color: var(--muted);
 }
 .turn-model { color: var(--fg); }
+.turn-timing { color: var(--muted); }
 
 .block-text {
   white-space: pre-wrap;
