@@ -17,7 +17,7 @@ sandbox had no route to the canonical docs.** The canonical Claude Code docs liv
 `code.claude.com` for every Claude Code page. Each claim was therefore read from
 [ericbuess/claude-code-docs](https://github.com/ericbuess/claude-code-docs), last synced the
 day of this investigation (2026-08-05), and cross-checked where possible against manifests
-Anthropic itself ships. The labels, in the spirit of FEEDBACK.md:
+Anthropic itself ships. The labels:
 
 - **doc** — stated on an official docs page (cited by its canonical URL, read via the
   mirror).
@@ -234,7 +234,7 @@ how sessions start.
   (**doc**) — strictly stronger than what `git clone` habits give most users. The docs' own
   caveat applies and belongs in anything told to users: Anthropic does not vet third-party
   plugins, and trust is between the user and this repo.
-- *Weight:* the whole repo — `test/`, `doc/`, FEEDBACK — rides into the cache. It is
+- *Weight:* the whole repo — `test/` and `doc/` included — rides into the cache. It is
   540 KB. Context cost is only the skill's frontmatter description (`claude plugin details`
   shows the always-on figure, **doc**). Docs beside the tool are a feature for a security
   tool, not bloat.

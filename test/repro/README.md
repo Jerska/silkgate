@@ -1,14 +1,13 @@
-# Reproductions for FEEDBACK.md
+# Reproductions from the retired review
 
-Each script here demonstrates one finding from [`../../FEEDBACK.md`](../../FEEDBACK.md) and prints
-what it observed next to what it expected, so it can be turned into an assertion. They exist
-because the enforcement code has no tests: `rule_engine.py` self-tests the matcher, and
-`verify_guest.sh` tests Tier 1, but nothing exercises `proxy_addon.py`, which is where every
-allow/deny decision is actually made.
+Each script here demonstrates one finding from the review that seeded the test suite
+(`FEEDBACK.md`, kept in git history) and prints what it observed next to what it expected, so
+it can be turned into an assertion. They were written when the enforcement code had no tests;
+the suite in `test/` covers it now, and TODO.md carries the review's still-open items.
 
-**These are reproductions, not a test suite.** They print; they do not assert. The point of
-`addon_host_spoof.py` in particular is that it should become `test/test_addon.py` — a handful of
-`tflow`-based cases run in CI — at which point the finding it demonstrates can never regress.
+**These are reproductions, not a test suite.** They print; they do not assert.
+`addon_host_spoof.py` did become `test/test_addon.py` — `tflow`-based cases run in CI — so the
+finding it demonstrates can never regress.
 
 | script | finding | needs |
 |---|---|---|

@@ -55,6 +55,7 @@ silkgate can express — and the guest can reach nothing at all.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to set up, test, commit, and write documentation
   here.
 - [AGENTS.md](AGENTS.md) — the additional instructions for agent contributors.
+- [TODO.md](TODO.md) — the deferred work, each entry with what parks it.
 
 ## Profiles
 
