@@ -1221,6 +1221,14 @@ def proxy_alive(pid):
     if not pid:
         return False
     try:
+        # An exited child of this process that nobody reaped is a zombie, and a zombie
+        # still answers kill -0 — stop_proxy would wait its whole grace on the corpse.
+        # Reap it if it is ours; ECHILD means it is not, and kill -0 decides below.
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return False
+    except OSError:
+        pass
+    try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
