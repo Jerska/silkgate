@@ -269,9 +269,20 @@ class FailOpen(TapCase):
 
     def test_a_non_2xx_response_attaches_no_decoder(self):
         f = self.run_request()
-        self.respond(f, [b'{"type": "error"}'], content_type="application/json",
-                     status=429)
-        self.assertEqual(self.capture_records(), [])
+        f.response = tutils.tresp(status_code=429)
+        f.response.headers["content-type"] = "application/json"
+        proxy_addon.responseheaders(f)
+        self.assertNotIn("capture", f.metadata,
+                         "only a 200 carries the grammar the decoders parse")
+        chunk = b'{"type": "error"}'
+        self.assertEqual(f.response.stream(chunk), chunk,
+                         "chunks pass through the tap unchanged")
+        f.response.stream(b"")
+        proxy_addon.response(f)
+        records = self.capture_records()
+        self.assertEqual([r["kind"] for r in records], ["capture_error"],
+                         "the rate-limited turn leaves one record, not silence")
+        self.assertIn("429", records[0]["reason"])
         self.assertEqual(self.audit_response()["status"], 429)
 
     def test_an_unexpected_content_type_is_one_capture_error(self):
