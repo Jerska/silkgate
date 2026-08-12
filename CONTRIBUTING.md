@@ -24,7 +24,7 @@ The README's [Layout](README.md#layout) section maps the directories.
 **Run the suite before and after your change.**
 
 ```sh
-python3 fasttest.py                     # full suite, sharded, ~13 seconds
+python3 fasttest.py                     # full suite, sharded, ~11 seconds
 python3 -m unittest discover -s test    # full suite, one process, ~1 minute
 python3 mitmaddon/rule_engine.py        # rule-engine self-tests
 ```
