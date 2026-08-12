@@ -48,6 +48,7 @@ policy, so audit-log denies are the staleness signal.
 | GitHub smart-HTTP facts: the `?service=` requirement, protocol v2 with a v0 fallback, `max_body=1m` for negotiation | [`profiles/github/rules.txt`](../profiles/github/rules.txt) | Clone and fetch a public repository through the profile, and assert zero denies and no 413. |
 | The GitHub content hosts `raw.githubusercontent.com` and `codeload.github.com` | `profiles/github/rules.txt` | Fetch a raw file and a tarball through the profile. |
 | GitHub LFS infrastructure by name (`lfs.github.com`, `github-cloud.*`), the no-redirect path forms, and the S3 501 on a doubled Authorization header | `profiles/github-read/rules.txt` and `profiles/github-write/rules.txt` | Run a live LFS clone and push against a scratch repository, and assert zero denies. |
+| The SAML SSO shape: an unauthorized PAT answers GitHub's own 403 or 404 with an `X-GitHub-SSO` response header | `README.md` (GitHub egress) | Run one grant with a deliberately unauthorized PAT against an SSO organization, and check the header beside the audit allow line. |
 | npm needs only `registry.npmjs.org/**` GET | `profiles/node/rules.txt` | Install a package in a guest and grep the audit log for denies. |
 | pip needs only `pypi.org/simple/**` and `files.pythonhosted.org/**` GET | `profiles/python/rules.txt` | Install a package in a guest and grep the audit log for denies. |
 

@@ -350,9 +350,21 @@ short-lived `Authorization` token that the batch response issued, and the proxy
 forwards it verbatim. The PAT injected over that token makes GitHub answer 403 on
 upload-verify, so the action-href row carries no injection. The secret is
 `SILKGATE_EGRESS_SECRET_GITHUB`, one full header
-line: `Authorization: Basic base64(x-access-token:<PAT>)`. As with every secret, a
-missing value warns at launch, and the guest sees the credential status in its context
-file. The storage hosts authorize themselves (presigned URL or SigV4), so those rules
+line: `Authorization: Basic base64(x-access-token:<PAT>)`. Build the line with
+`base64 | tr -d '\n'`: `base64` wraps output past 76 characters, and a value that
+spans lines is malformed. As with every secret, a missing or malformed value warns at
+launch, and the guest sees the credential status in its context file.
+
+A PAT for a repository in an organization that enforces SAML SSO needs one extra step:
+authorize the token for that organization before the launch. A classic PAT is
+authorized after creation, in the token's own settings. A fine-grained PAT is
+authorized at creation, and the organization can require an approval. The
+authorization is a browser flow, so complete it on the host. Inside a guest, an
+unauthorized PAT answers GitHub's own 403 or 404 with an `X-GitHub-SSO` response
+header. The audit log shows that request allowed: GitHub refused it, not the proxy. A
+personal account's repository never needs this step.
+
+The storage hosts authorize themselves (presigned URL or SigV4), so those rules
 carry no `inject_auth` — a second `Authorization` header there makes S3 answer 501. The
 upload's SigV4 signature rides in request headers, so the S3 rule forwards all headers
 (`h:*`), while the presigned download host stays query-only. Each
