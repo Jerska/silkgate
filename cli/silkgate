@@ -46,7 +46,7 @@ import sys
 import tempfile
 import termios
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -1236,6 +1236,17 @@ def _validate_name(name):
         die(f"invalid session name {name!r} (letters, digits, '-', '_'; ≤32 chars)")
 
 
+# A session id outlives the session: it names the archive dir and threads through the
+# journal, so it packs chronology (a UTC stamp first, making plain name order time
+# order), identity (the session name) and uniqueness (6 random hex) into one string
+# that is safe as a path component. Session names can repeat across time; sids cannot.
+_SID_RE = re.compile(r"\d{8}T\d{6}Z-[A-Za-z0-9][A-Za-z0-9_-]{0,31}-[0-9a-f]{6}")
+
+
+def _new_sid(name):
+    return f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{name}-{uuid4().hex[:6]}"
+
+
 def read_meta(name):
     """One session's meta.json, or None when there is no such session.
 
@@ -2134,9 +2145,10 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
         (tmp / "rules.txt").write_text(rules_text)
         if context:
             (tmp / "context.md").write_text(context)
-        _write_json(tmp / "meta.json", {"name": name, "sandbox": sandbox_name(name),
-                                        "port": port, "image": image, "workspace": ws,
-                                        "created": now_iso(), **meta_extra})
+        meta = {"name": name, "sandbox": sandbox_name(name), "sid": _new_sid(name),
+                "port": port, "image": image, "workspace": ws,
+                "created": now_iso(), **meta_extra}
+        _write_json(tmp / "meta.json", meta)
         try:
             tmp.rename(sdir)                             # atomic claim; fails if name raced us
             owned = True
