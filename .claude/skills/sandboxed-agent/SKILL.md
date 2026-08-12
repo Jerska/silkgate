@@ -65,6 +65,10 @@ key.**
   `.env` never enter it. Nothing a `--checkout` guest writes returns, commits included.
   `--checkout` works from the silkgate repo itself: only the repository's `.git` is
   mounted, read-only, the same shape `--branch` always used.
+- Each guest boots with 1G of memory and half of the host's CPUs by default. `--memory SIZE` and
+  `--cpus COUNT` on `run` and `up` change that. Both are limits the host scheduler
+  shares, not reservations. If Claude Code runs a test suite or a build inside the
+  guest, give it 2G.
 - The base image has no language runtimes: no node, no python, no git. A guest has
   exactly what its profiles installed, so `--with claude` alone cannot run `node --test`.
 - `inject_auth=<name>` in a rules file maps to `SILKGATE_EGRESS_SECRET_<NAME>` in the
