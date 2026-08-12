@@ -158,6 +158,20 @@ This is a courtesy, not a control. An adversarial guest ignores every word of it
 is allowed to rely on it. What it buys is fewer wasted turns, and denials reported as
 requests ("I need `pypi.org` for X") instead of retried in a loop.
 
+## The settings projection
+
+**Each launch forwards the host's Claude Code model configuration, so a guest agent
+defaults to the same model and reasoning effort as the host.** Silkgate resolves exactly
+two keys, `model` and `effortLevel`, from the host's settings files. Per key, an env-block
+value (`ANTHROPIC_MODEL`, `CLAUDE_CODE_EFFORT_LEVEL`) outranks every direct key, and local
+outranks project outranks user. The project and local files come from the host directory
+that becomes `/workspace`. The result lands at each profile's `settings_path` —
+`/root/.claude/settings.json` for the claude profile. Nothing else in a settings file ever
+leaves the host. Permissions, hooks, and env entries can carry secrets, so the projection
+is an allowlist, not a copy. If neither key resolves, nothing is staged. A settings file
+that is not valid JSON warns on stderr and counts as absent. `--no-settings` skips the
+projection. `test/test_cli_settings.py` pins the resolution order and the allowlist.
+
 ## Persistent sessions
 
 **`run` is one-shot, and a session instead keeps the VM warm on a dedicated proxy port.**

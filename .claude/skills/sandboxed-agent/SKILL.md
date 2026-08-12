@@ -99,6 +99,7 @@ key.**
 | Guest context, as a file | `/silkgate/CONTEXT.md` |
 | Guest context, as text in the environment | `$SILKGATE_CONTEXT` |
 | Context copy that a plain `claude -p` reads | `/root/.claude/CLAUDE.md` |
+| Projected host model settings (`model`, `effortLevel`) | `/root/.claude/settings.json` |
 | Audit log files | `~/.silkgate/logs/proxy-*.log` |
 | Host-side secret variables | `SILKGATE_EGRESS_SECRET_<NAME>` |
 | Proxy listen port | 8090, or `--port N` on `run` and `up` when 8090 is taken |
@@ -293,6 +294,12 @@ Now: <task>"'
 
 `--no-context` skips all of it. Rely on the context for nothing. What it buys is fewer
 wasted turns, and blocked requests reported as requests instead of retried in a loop.
+
+A launch also forwards the host's Claude Code model configuration. The two keys `model`
+and `effortLevel` resolve from the host's settings files and land at each profile's
+`settings_path` — `/root/.claude/settings.json` for the claude profile. The guest agent
+then defaults to the same model and reasoning effort as the host. Only those two keys
+leave the host. `--no-settings` skips the projection.
 
 ## Gotchas
 

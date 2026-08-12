@@ -172,6 +172,7 @@ the prune skips them, and a file under write keeps its mtime fresh anyway. Set
 | `sessions/<name>/meta.json` | Session metadata: sandbox name, port, image, profiles, command, mounts |
 | `sessions/<name>/rules.txt` | The composed ruleset snapshot the proxy reads for that session |
 | `sessions/<name>/context.md` | The guest context, copied into the guest at `/silkgate/CONTEXT.md` |
+| `sessions/<name>/settings.json` | The projected host model settings, copied into the guest at each profile's `settings_path` |
 | `ca/egress-ca.pem` | The MITM certificate, baked into guest images and trusted by guests — never the private key |
 | `logs/proxy-*.log` | The audit log, one file per proxy start |
 | `logs/events-*.jsonl` | The events files: the same request records, machine-only |
