@@ -1047,6 +1047,11 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         ]
     lines += [
         "",
+        "## Split independent work across subagents",
+        "",
+        "**Do not hesitate to launch multiple subagents to process independent work in",
+        "parallel.**",
+        "",
         "## What is here",
         "",
         "**Use only the tools listed below — nothing more can be installed.**",
