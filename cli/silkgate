@@ -4600,8 +4600,10 @@ def _ui_server(port):
             # Archived rows carry the keys a listing needs; /api/session/<sid> has
             # the rest. last_rc rides along only where an exec_end recorded one.
             archived = [{"sid": m["sid"], "name": m.get("name"),
+                         "created": m.get("created"),
                          "ended": m.get("ended"),
-                         **({"last_rc": m["last_rc"]} if "last_rc" in m else {})}
+                         **({"last_rc": m["last_rc"]} if "last_rc" in m else {}),
+                         **({"branch": m["branch"]} if m.get("branch") else {})}
                         for m in reversed(list_archived_metas()[-UI_ARCHIVED_LIMIT:])]
             self._json({"sessions": [{**m, "state": _session_state(m["name"])}
                                      for m in list_metas()],

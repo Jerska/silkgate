@@ -689,12 +689,22 @@ class UiSessionsListTest(UiServerTest):
         _, got = self.get_json("/api/sessions")
         self.assertEqual([a["sid"] for a in got["archived"]], old[::-1],
                          "newest first")
-        self.assertEqual(set(got["archived"][0]), {"sid", "name", "ended"},
+        self.assertEqual(set(got["archived"][0]), {"sid", "name", "created", "ended"},
                          "reduced rows; /api/session/<sid> has the rest")
         with mock.patch.object(MOD, "UI_ARCHIVED_LIMIT", 2):
             _, got = self.get_json("/api/sessions")
         self.assertEqual(len(got["archived"]), 2)
         self.assertEqual(got["archived"][0]["sid"], old[-1])
+
+    def test_archived_row_carries_branch_only_when_the_meta_names_one(self):
+        # A branch meta must also name a valid base, or read_archived_meta
+        # refuses the whole meta (_check_meta_fields).
+        withb, _ = self.write_archive("withb", branch="agent/x", base=_BASE)
+        plain, _ = self.write_archive("plain")
+        _, got = self.get_json("/api/sessions")
+        by_sid = {a["sid"]: a for a in got["archived"]}
+        self.assertEqual(by_sid[withb]["branch"], "agent/x")
+        self.assertNotIn("branch", by_sid[plain])
 
 
 # -- /api/session/<ident> ---------------------------------------------------------------
