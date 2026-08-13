@@ -3,6 +3,16 @@
 Read this to pick up work the project deferred on purpose. Each entry names the work
 and what parks it. Done work leaves the file — history lives in git.
 
+## Test run
+
+**Three ad-hoc tasks exercise the orchestrator/implementer flow end to end.**
+
+- Hide the freeze and down actions for archived sessions in the UI. The buttons
+  render for sessions that no longer accept either action.
+- Make AGENTS.md import CONTRIBUTING.md instead of an instruction to read it first.
+- Make `silkgate profiles` readable. The full table needs more columns than one
+  screen fits.
+
 ## Containment proofs
 
 **A check that has never failed proves nothing — six of the 15 have, nine have not.**
