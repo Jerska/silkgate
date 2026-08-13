@@ -24,19 +24,23 @@ The README's [Layout](README.md#layout) section maps the directories.
 **Run the suite before and after your change.**
 
 ```sh
-python3 tests.py                        # full suite, sharded, ~11 seconds
-python3 -m unittest discover -s test    # full suite, one process, ~1 minute
+python3 tests.py                        # every suite, sharded, ~11 seconds
+python3 -m unittest discover -s test    # python tests only, one process, ~1 minute
 python3 mitmaddon/rule_engine.py        # rule-engine self-tests
 ```
 
-The two suite commands run the same tests. The fast runner splits them into
-shards and runs one process per shard. If discovery and the shard layout
-disagree, the runner stops before any test starts. If you add a test file,
-name it in `SHARDS` at the top of `tests.py`.
+`python3 tests.py` runs every suite, the node ui tests included. It splits the python
+tests into shards, one process per shard, and runs the node ui tests (`ui/*.test.js`)
+as one more parallel job. `python3 -m unittest discover -s test` runs the python tests
+only. If discovery and the shard layout disagree, the runner stops before any test
+starts. If you add a python test file, name it in `SHARDS` at the top of `tests.py`.
+The runner collects the ui test files with a glob, so a new ui test file needs no
+entry.
 
-If mitmproxy is not installed, the addon tests skip and the summary says so. Containment
-is verified separately with `./cli/silkgate verify --full`. That command needs docker and
-msb, and CI runs it on every push.
+If mitmproxy is not installed, the addon tests skip and the summary says so. If node is
+not on PATH, the ui suite records as one skip. Containment is verified separately with
+`./cli/silkgate verify --full`. That command needs docker and msb, and CI runs it on
+every push.
 
 ## Commits
 
