@@ -1082,13 +1082,17 @@ class VerifyPortSelection(unittest.TestCase):
         return [base, sg._oracle_port(base, 1), sg._oracle_port(base, 2)]
 
     def test_the_default_scans_past_an_occupied_floor_to_a_base_with_every_port_free(self):
-        # The squat is what a shared proxy on the default floor looks like.
-        base, _ = _bind_or_skip(lambda port: _squat(self, port), span=sg.POOL_SIZE + 1)
-        with mock.patch.object(sg, "DEFAULT_BASE_PORT", base):
-            chosen = sg._verify_port(None)
-        self.assertEqual(chosen, base + 1, "the scan did not land one past the blocker")
-        for port in self.needed(chosen):
-            self.assertTrue(sg._port_free(port), f"verify binds {port} and it is taken")
+        # The squat is what a shared proxy on the default floor looks like. A neighbor
+        # landing inside the scanned window shifts the landing further — not this test's
+        # claim, and a neighbor breaks at most one arrangement: re-arrange and retry.
+        for _ in range(5):
+            base, _ = _bind_or_skip(lambda port: _squat(self, port), span=sg.POOL_SIZE + 1)
+            with mock.patch.object(sg, "DEFAULT_BASE_PORT", base):
+                chosen = sg._verify_port(None)
+            if chosen == base + 1 and all(sg._port_free(p) for p in self.needed(chosen)):
+                return
+        self.fail(f"the scan landed at {chosen}, not one past the blocker at {base}, "
+                  "on 5 arrangements")
 
     def test_an_explicit_port_is_honored_verbatim_even_when_taken(self):
         port, _ = _bind_or_skip(lambda p: _squat(self, p))
@@ -1444,22 +1448,32 @@ class VerifyWiring(unittest.TestCase):
 
     def test_no_port_scans_past_a_held_floor_and_the_run_completes(self):
         # The whole point of the default: a shared proxy holds the floor, verify with no
-        # --port lands one past it and runs to its verdict — no die, no contention.
-        floor, _ = _bind_or_skip(lambda port: _squat(self, port), span=sg.POOL_SIZE + 1)
-        self.aim_probes_at(self.dead_port(*range(floor, floor + sg.POOL_SIZE + 1)))
-        with mock.patch.object(sg, "DEFAULT_BASE_PORT", floor):
-            said, refused = self.verify(port=None)
-        self.assertFalse(refused, said)
+        # --port lands one past it and runs to its verdict — no die, no contention. A
+        # neighbor landing inside the scanned window shifts the landing further — not
+        # this test's claim, and a neighbor breaks at most one arrangement: re-arrange.
+        for _ in range(5):
+            floor, _ = _bind_or_skip(lambda port: _squat(self, port), span=sg.POOL_SIZE + 1)
+            self.aim_probes_at(self.dead_port(*range(floor, floor + sg.POOL_SIZE + 1)))
+            with mock.patch.object(sg, "DEFAULT_BASE_PORT", floor):
+                said, refused = self.verify(port=None)
+            self.assertFalse(refused, said)
+            if f"proxy :{floor + 1} ·" in said:
+                break
         self.assertIn(f"proxy :{floor + 1} ·", said, "verify did not land one past the holder")
         self.assertIn("containment holds", said)
 
     def test_an_explicit_port_that_is_taken_dies_instead_of_moving(self):
         # span=3 keeps the oracle ports beside the squat free, so the die start_proxy
         # pins is the one the proxy port's holder causes. Passing the port pins it:
-        # verify() must not retry a collision that is the behavior under test.
-        self.port, _ = _bind_or_skip(lambda port: _squat(self, port), span=3)
-        said, refused = self.verify(port=self.port)
-        self.assertTrue(refused)
+        # verify() must not retry a collision that is the behavior under test. A
+        # neighbor taking an oracle port kills the run before that die — a lost
+        # arrangement, not the pinned behavior: re-arrange and retry.
+        for _ in range(5):
+            self.port, _ = _bind_or_skip(lambda port: _squat(self, port), span=3)
+            said, refused = self.verify(port=self.port)
+            self.assertTrue(refused)
+            if _CANNOT_BIND not in said:
+                break
         self.assertIn(f"port {self.port} is already in use", said)
         self.assertNotIn("containment holds", said)
 
