@@ -190,13 +190,15 @@ cannot name the follow-up, use `run`. When you can:
     -v ~/projects/foo:/workspace:rw
 
 ./cli/silkgate exec foo \
+    --brief task.md \
     -- silkgate-claude \
-        -p "first turn" \
+        -p "Read /silkgate/BRIEF.md and do the task." \
         --output-format json                 # prints a session_id
 
 ./cli/silkgate exec foo \
+    --brief followup.md \
     -- silkgate-claude \
-        -p --resume <id> "second turn"       # same VM, so this resumes
+        -p --resume <id> "Read /silkgate/BRIEF.md and do the task."   # same VM, so this resumes
 
 ./cli/silkgate logs foo --audit -f           # watch what it tries to reach
 ./cli/silkgate attach foo                    # interactive, runs the profile's command
@@ -205,6 +207,24 @@ cannot name the follow-up, use `run`. When you can:
 
 One shared proxy serves every session on its own port. Each guest's network policy admits
 only its own port, so a guest cannot reach another session's listener.
+
+## `--brief`: hand the task over as a file
+
+**A written, multi-line brief rides `--brief FILE`, and the prompt shrinks to a pointer
+such as "Read /silkgate/BRIEF.md and do the task."** A one-line ask stays inline in the
+prompt. `run`, `up`, and `exec` all take `--brief FILE`. FILE lands at
+`/silkgate/BRIEF.md` in the guest before the command runs. The limit is 1 MiB. An
+unreadable or oversized file dies host-side, before any guest work. After a brief lands,
+the generated guest context tells the agent to read `/silkgate/BRIEF.md` first.
+
+`up --brief` sets a session default, applied to every exec that passes no `--brief` of
+its own, re-landed on each exec. An exec's own `--brief` wins. Each exec's resolved
+brief is stored at `briefs/<exec_id>.md` in the session directory and journaled with
+its sha256.
+
+The limitation: the guest path is a single slot per session. Each exec's landed brief
+atomically replaces the previous one. Sequential follow-ups work. Only concurrent
+agents inside one session share the slot and can read each other's brief.
 
 ## Parallel agents against one repository
 
@@ -242,6 +262,13 @@ installs that exact release. Anything the profile's installer can fetch upstream
 so `node@20.18.1` succeeds as well as the default. The version must be exact: `node@22`
 is not a prefix match and fails the build. `./cli/silkgate profiles` lists the names and
 their pinned defaults.
+
+The committed copy of that listing is [PROFILES.txt](PROFILES.txt) in this skill's
+folder: every profile with its purpose, injected credential, and rules path. No launch
+plan needs to shell out to the CLI. Regenerate the copy with
+`COLUMNS=80 ./cli/silkgate profiles > .claude/skills/sandboxed-agent/PROFILES.txt`.
+The drift test in `test/test_scripts.py` fails when the snapshot and `profiles/`
+disagree.
 
 A profile whose ARG column there shows a pattern requires `:ARG`, and the argument
 must fully match the pattern. The argument expands into the profile's rules
