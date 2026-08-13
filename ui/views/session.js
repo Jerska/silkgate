@@ -48,7 +48,11 @@ export function extraText(value) {
 }
 
 // The meta behind a session view, looked up fresh each call: live metas answer
-// by name, archived metas by the sid the overview links with. Archived-ness is
+// by name, archived metas by the sid the overview links with, then by name.
+// The name fallback covers a session downed while its detail view is open
+// under its name: the live list drops the name, and no archived sid equals
+// it, but the newest archived row with that name is the session on screen —
+// the list arrives newest-first, so the first match is it. Archived-ness is
 // placement (the archived list) or an explicit state — the same derivation the
 // overview grid uses, so the detail header can never disagree with the card.
 // Pure so the lookup and the archived verdict pin down in node.
@@ -60,6 +64,11 @@ export function findMeta(sessions, ident, session) {
   }
   for (const m of sessions?.archived ?? []) {
     if (String(m?.sid ?? m?.name) === ident) {
+      return { meta: m, archived: true };
+    }
+  }
+  for (const m of sessions?.archived ?? []) {
+    if (m?.name === session) {
       return { meta: m, archived: true };
     }
   }
