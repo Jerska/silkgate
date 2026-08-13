@@ -10,8 +10,8 @@
 // which is what keeps an open <details> open while other items stream past.
 // LLM output, guest stdout and diffs are attacker-influenced text and reach
 // the DOM only as text nodes; a tool call renders as a line naming the call
-// and its salient argument, with the bash command or an over-8-line input
-// JSON in a <pre>.
+// and its salient argument, expandable to the verbatim payload and the full
+// input JSON in <pre> blocks.
 
 import { el, statusDot, renderDiff, sparkline, fmtTokens } from "../render.js";
 import { fmtBytes, fmtDur, fmtTime } from "../store.js";
@@ -49,31 +49,38 @@ export function extraText(value) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
-// The input key that names each Claude Code call, keyed on the lowercased
-// tool name (the FILE_KEYS convention in timeline.js). doc/REFRESH.md
-// registers this table: the names and schemas move with the Claude Code pin,
-// and an unmapped tool degrades to compact JSON.
+// The input key that names each Claude Code call, and beside it the key
+// whose value is the call's bulk and renders verbatim. Both are keyed on the
+// lowercased tool name (the FILE_KEYS convention in timeline.js).
+// doc/REFRESH.md registers these tables: the names and schemas move with the
+// Claude Code pin, and an unmapped tool degrades to compact JSON.
 const SALIENT = new Map([
   ["bash", "command"], ["read", "file_path"], ["edit", "file_path"],
   ["write", "file_path"], ["multiedit", "file_path"],
   ["notebookedit", "notebook_path"], ["grep", "pattern"], ["glob", "pattern"],
   ["webfetch", "url"], ["websearch", "query"], ["task", "description"],
   ["skill", "skill"]]);
+const PAYLOAD = new Map([
+  ["bash", "command"], ["write", "content"], ["task", "prompt"],
+  ["notebookedit", "new_source"]]);
 
-// One tool_use block → its activity line, optional <pre> body, and whether
-// the details renders expanded. Most calls read as `Name(salient)` on one
-// line. Bash is code and often multi-line, so its command rides the <pre>,
-// visible without a click up to 8 lines; any other input keeps a collapsed
-// expander only when its pretty JSON runs past 8 lines. read and edit never
-// carry a body — the path is the whole story. Pure for the tests.
+// One tool_use block → its activity line, the verbatim payload for tools
+// whose bulk lives in one string field, the full input JSON, and whether the
+// details renders expanded. Every call with any input expands to the full
+// JSON. A payload tool shows its payload <pre> first, visible without a
+// click up to 8 payload lines, with the JSON one click deeper. Pure for the
+// tests.
 export function toolCallView(block) {
   const name = block.tool_name ?? "?";
   const tool = String(block.tool_name ?? "").toLowerCase();
   const input = block.tool_input;
-  const key = SALIENT.get(tool);
-  const salient = key !== undefined && input != null
+  const str = (key) => key !== undefined && input != null
     && typeof input === "object" && typeof input[key] === "string"
     && input[key] !== "" ? input[key] : null;
+  const salient = str(SALIENT.get(tool));
+  const payload = str(PAYLOAD.get(tool));
+  const json = input == null ? null : JSON.stringify(input, null, 2);
+  const open = payload !== null && payload.split("\n").length <= 8;
   // First line of a value, capped at 120 chars; … marks a cut that dropped
   // anything — a later line or a character past the cap.
   const clip = (s) => {
@@ -83,17 +90,11 @@ export function toolCallView(block) {
   };
   const mark = block.truncated ? " (truncated)" : "";
   if (tool === "bash" && salient !== null) {
-    const open = salient.split("\n").length <= 8;
     return { line: (open ? name : `${name} ${clip(salient)}`) + mark,
-             body: salient, open };
+             payload, json, open };
   }
   const shown = input == null ? "" : clip(salient ?? JSON.stringify(input));
-  let body = null;
-  if (input != null && tool !== "read" && tool !== "edit") {
-    const pretty = JSON.stringify(input, null, 2);
-    if (pretty.split("\n").length > 8) body = pretty;
-  }
-  return { line: `${name}(${shown})${mark}`, body, open: false };
+  return { line: `${name}(${shown})${mark}`, payload, json, open };
 }
 
 // The meta behind a session view, looked up fresh each call: live metas answer
@@ -264,11 +265,16 @@ export function newSessionView() {
                        + " the memory cap)"));
       } else if (b.type === "tool_use") {
         const v = toolCallView(b);
-        node.append(v.body == null
+        node.append(v.payload == null && v.json == null
           ? el("div", { class: "block-call" }, v.line)
           : el("details", { class: "block-tool", open: v.open ? "" : null },
               el("summary", null, v.line),
-              el("pre", null, v.body)));
+              v.payload == null ? null : el("pre", null, v.payload),
+              v.json == null ? null
+                : v.payload == null ? el("pre", null, v.json)
+                : el("details", { class: "block-tool" },
+                    el("summary", null, "input JSON"),
+                    el("pre", null, v.json))));
       } else {
         node.append(el("div", { class: "block-text" }, b.text ?? "",
                        b.truncated ? el("span", { class: "block-note" },

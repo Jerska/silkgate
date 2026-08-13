@@ -130,11 +130,14 @@ test("the archived verdict drives triage to archived, matching the card", () => 
                "never \"waiting 4m\" for a session in the archive");
 });
 
-test("a short bash call opens with its command and drops the description", () => {
+test("a short bash call opens with its command; the JSON keeps the rest", () => {
   const v = toolCallView({ tool_name: "Bash",
     tool_input: { command: "ls -la", description: "x" } });
-  assert.deepEqual(v, { line: "Bash", body: "ls -la", open: true });
-  assert.ok(!v.body.includes("x"), "the description never renders");
+  assert.equal(v.line, "Bash");
+  assert.equal(v.payload, "ls -la");
+  assert.equal(v.open, true);
+  assert.ok(v.json.includes('"description": "x"'),
+            "the full input stays one click deeper");
 });
 
 test("the bash boundary: 8 lines stay open, 9 collapse behind the first", () => {
@@ -147,42 +150,81 @@ test("the bash boundary: 8 lines stay open, 9 collapse behind the first", () => 
   const v = toolCallView({ tool_name: "Bash", tool_input: { command: nine } });
   assert.equal(v.open, false);
   assert.equal(v.line, "Bash l0…");
-  assert.equal(v.body, nine, "the whole command still sits in the <pre>");
+  assert.equal(v.payload, nine, "the whole command still sits in the <pre>");
 });
 
 test("a bash call without a usable command takes the generic path", () => {
   for (const tool_input of [{}, { command: "" }, { command: 42 }]) {
     const v = toolCallView({ tool_name: "Bash", tool_input });
     assert.equal(v.line, `Bash(${JSON.stringify(tool_input)})`);
-    assert.equal(v.body, null);
+    assert.equal(v.payload, null);
+    assert.equal(v.json, JSON.stringify(tool_input, null, 2));
     assert.equal(v.open, false);
   }
 });
 
-test("read and edit stay bodyless, whatever the input holds", () => {
+test("read and edit expand to their full JSON — no bodyless rule", () => {
   const old_string = Array.from({ length: 50 }, () => "line").join("\n");
   for (const tool_name of ["Read", "Edit"]) {
-    const v = toolCallView({ tool_name,
-      tool_input: { file_path: "/w/a.js", old_string } });
+    const input = { file_path: "/w/a.js", old_string };
+    const v = toolCallView({ tool_name, tool_input: input });
     assert.equal(v.line, `${tool_name}(/w/a.js)`);
-    assert.equal(v.body, null, "the path replaces the JSON body entirely");
+    assert.equal(v.payload, null);
+    assert.equal(v.json, JSON.stringify(input, null, 2));
+    assert.equal(v.open, false);
   }
 });
 
-test("write keeps its path line; a long pretty JSON earns a collapsed body", () => {
-  const content = Array.from({ length: 20 }, (_, i) => `l${i}`).join("\n");
+test("multiedit and webfetch carry the same shape as read and edit", () => {
+  const m = toolCallView({ tool_name: "MultiEdit",
+    tool_input: { file_path: "/w/b.js", edits: [] } });
+  assert.equal(m.line, "MultiEdit(/w/b.js)");
+  assert.equal(m.payload, null);
+  assert.notEqual(m.json, null);
+  assert.equal(m.open, false);
+  const f = toolCallView({ tool_name: "WebFetch",
+    tool_input: { url: "https://example.com" } });
+  assert.equal(f.line, "WebFetch(https://example.com)");
+  assert.equal(f.payload, null);
+  assert.notEqual(f.json, null);
+  assert.equal(f.open, false);
+});
+
+test("write renders its content verbatim, and the content drives open", () => {
+  const eight = Array.from({ length: 8 }, (_, i) => `l${i}`).join("\n");
   const v = toolCallView({ tool_name: "Write",
-    tool_input: { file_path: "/workspace/x", content } });
+    tool_input: { file_path: "/workspace/x", content: eight } });
   assert.equal(v.line, "Write(/workspace/x)");
-  // JSON.stringify escapes the content's newlines, so 20 lines of content
-  // pretty-print as one JSON line — under the 8-line rule, no expander.
-  assert.equal(v.body, null);
-  const wide = toolCallView({ tool_name: "Write",
-    tool_input: { file_path: "/workspace/x", content, mode: "w", a: 1, b: 2,
-                  c: 3, d: 4 } });
-  assert.equal(wide.line, "Write(/workspace/x)");
-  assert.notEqual(wide.body, null);
-  assert.equal(wide.open, false);
+  assert.equal(v.payload, eight);
+  assert.equal(v.open, true);
+  const nine = eight + "\nl8";
+  const w = toolCallView({ tool_name: "Write",
+    tool_input: { file_path: "/workspace/x", content: nine } });
+  assert.equal(w.line, "Write(/workspace/x)",
+               "only bash moves its payload's first line onto the line");
+  assert.equal(w.payload, nine);
+  assert.equal(w.open, false);
+});
+
+test("task and notebookedit carry their payloads", () => {
+  const t = toolCallView({ tool_name: "Task",
+    tool_input: { description: "explore", prompt: "Read the tree." } });
+  assert.equal(t.line, "Task(explore)");
+  assert.equal(t.payload, "Read the tree.");
+  const n = toolCallView({ tool_name: "NotebookEdit",
+    tool_input: { notebook_path: "/w/n.ipynb", new_source: "print(1)" } });
+  assert.equal(n.line, "NotebookEdit(/w/n.ipynb)");
+  assert.equal(n.payload, "print(1)");
+});
+
+test("a payload tool without its payload key still expands to JSON", () => {
+  for (const tool_input of [{ file_path: "/w/x" },
+                            { file_path: "/w/x", content: "" }]) {
+    const v = toolCallView({ tool_name: "Write", tool_input });
+    assert.equal(v.payload, null);
+    assert.equal(v.json, JSON.stringify(tool_input, null, 2));
+    assert.equal(v.open, false);
+  }
 });
 
 test("a salient value past 120 characters is capped and marked", () => {
@@ -198,7 +240,8 @@ test("an unmapped tool falls back to compact JSON in the parens", () => {
   const v = toolCallView({ tool_name: "TodoWrite",
     tool_input: { todos: [1, 2] } });
   assert.equal(v.line, 'TodoWrite({"todos":[1,2]})');
-  assert.equal(v.body, null);
+  assert.equal(v.payload, null);
+  assert.equal(v.json, JSON.stringify({ todos: [1, 2] }, null, 2));
 });
 
 test("a mapped tool whose salient key is missing falls back to JSON", () => {
@@ -211,11 +254,11 @@ test("a null tool_name renders as ?", () => {
   assert.equal(v.line, '?({"pattern":"x"})');
 });
 
-test("a null tool_input renders empty parens and no body", () => {
+test("a null tool_input renders empty parens with nothing to expand", () => {
   assert.deepEqual(toolCallView({ tool_name: "Read", tool_input: null }),
-                   { line: "Read()", body: null, open: false });
+                   { line: "Read()", payload: null, json: null, open: false });
   assert.deepEqual(toolCallView({ tool_name: "Bash" }),
-                   { line: "Bash()", body: null, open: false });
+                   { line: "Bash()", payload: null, json: null, open: false });
 });
 
 test("truncated appends its mark on every path", () => {
@@ -225,18 +268,19 @@ test("truncated appends its mark on every path", () => {
     tool_input: { file_path: "/w/a" } }).line, "Read(/w/a) (truncated)");
 });
 
-test("the map is case-insensitive but the name shows as it arrived", () => {
+test("the maps are case-insensitive but the name shows as it arrived", () => {
   const v = toolCallView({ tool_name: "BASH", tool_input: { command: "ls" } });
-  assert.deepEqual(v, { line: "BASH", body: "ls", open: true });
+  assert.equal(v.line, "BASH");
+  assert.equal(v.payload, "ls");
+  assert.equal(v.open, true);
 });
 
-test("the generic boundary: exactly 8 pretty lines means no expander", () => {
-  const eight = { pattern: "x", a: 1, b: 2, c: 3, d: 4, e: 5 };
-  assert.equal(JSON.stringify(eight, null, 2).split("\n").length, 8);
-  assert.equal(toolCallView({ tool_name: "Grep", tool_input: eight }).body,
-               null);
-  const nine = { ...eight, f: 6 };
-  const v = toolCallView({ tool_name: "Grep", tool_input: nine });
-  assert.equal(v.body, JSON.stringify(nine, null, 2));
+test("open is false whenever the payload is null, whatever the JSON size", () => {
+  const big = Object.fromEntries(
+    Array.from({ length: 40 }, (_, i) => [`k${i}`, i]));
+  const v = toolCallView({ tool_name: "Grep",
+    tool_input: { pattern: "x", ...big } });
+  assert.equal(v.payload, null);
   assert.equal(v.open, false);
+  assert.ok(v.json.split("\n").length > 8, "size never drives open");
 });

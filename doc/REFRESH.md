@@ -87,7 +87,7 @@ formats — and each drifts silently unless its check runs.**
 | The SSE grammar: keepalives as `:` comments, unknown delta types ignored, `ping` and newer event types pass silently | `mitmaddon/proxy_addon.py` (`_AnthropicCapture`) | Replay a fresh live transcript through `_AnthropicCapture` and diff the record kinds against the response content. A new content kind is lost without a sign. |
 | The identity-encoding assumption: Anthropic answers uncompressed, so metadata-only is the fallback | `mitmaddon/proxy_addon.py` | Count `capture_error: content-encoding` records in live capture files and alert above zero. |
 | The stream-vs-buffer rationale cites the client's rough 60-second timeout | `mitmaddon/proxy_addon.py` | Read the current SDK stream timeout on a Claude Code pin bump. |
-| The salient-argument map in `toolCallView`: the Claude Code tool names and the input key that names each call (`command` for `bash`, `file_path` for the file tools) | [`ui/views/session.js`](../ui/views/session.js) | The tool names and input schemas move with the Claude Code pin. On a bump, grep fresh capture files for tool names outside the map. An unmapped tool degrades to compact JSON: the line survives but stops naming the argument. |
+| The salient and payload maps in `toolCallView`: the Claude Code tool names, the input key that names each call, and the key whose value renders verbatim (`command` for `bash`, `content` for `write`) | [`ui/views/session.js`](../ui/views/session.js) | The tool names and input schemas move with the Claude Code pin. On a bump, grep fresh capture files for tool names outside the maps. An unmapped tool degrades to compact JSON: the line survives but stops naming the argument. |
 
 ## Observed microsandbox behavior
 
