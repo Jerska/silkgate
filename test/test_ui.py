@@ -672,6 +672,18 @@ class UiSessionsListTest(UiServerTest):
         self.assertEqual(by_name["foo"]["last_rc"], 7)
         self.assertNotIn("last_rc", by_name["bar"])
 
+    def test_frozen_rows_say_so_and_resume_restores_live(self):
+        self.write_session("foo")
+        resp, _ = self.request("/api/session/foo/freeze", method="POST")
+        self.assertEqual(resp.status, 200)
+        _, got = self.get_json("/api/sessions")
+        self.assertEqual(got["sessions"][0]["state"], "frozen",
+                         "the row reports the real state, not a stamp")
+        resp, _ = self.request("/api/session/foo/resume", method="POST")
+        self.assertEqual(resp.status, 200)
+        _, got = self.get_json("/api/sessions")
+        self.assertEqual(got["sessions"][0]["state"], "live")
+
     def test_archived_rows_are_the_newest_fifty_reduced(self):
         old = [self.write_archive(f"s{i}")[0] for i in range(3)]
         _, got = self.get_json("/api/sessions")
@@ -705,6 +717,17 @@ class UiSessionDetailTest(UiServerTest):
         self.assertNotIn("brief", got, "the singular field is gone — briefs is the map")
         self.assertEqual(got["pointers"]["captures"], [str(cap)])
         self.assertIsNone(got["pointers"]["events"], "no proxy runs")
+
+    def test_frozen_live_session_reports_frozen_and_archived_stays_archived(self):
+        self.write_session("s7")
+        resp, _ = self.request("/api/session/s7/freeze", method="POST")
+        self.assertEqual(resp.status, 200)
+        _, got = self.get_json("/api/session/s7")
+        self.assertEqual(got["state"], "frozen")
+        sid, _ = self.write_archive("oldf")
+        _, got = self.get_json(f"/api/session/{sid}")
+        self.assertEqual(got["state"], "archived",
+                         "frozen is a live-session state; archive is placement")
 
     def test_default_brief_is_keyed_and_labeled_and_beats_the_fallback(self):
         sdir = self.write_session("s2", workspace=str(self.root / "ws"))

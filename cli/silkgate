@@ -4366,6 +4366,13 @@ def _search_trail(query, session, limit):
     return results, False
 
 
+def _session_state(name):
+    """One live session's state as the UI reports it: "frozen" while rules.frozen
+    holds the preserved ruleset, else "live". The VM runs either way — frozen is
+    about egress, not placement, so archive stays out of this answer."""
+    return "frozen" if (session_dir(name) / "rules.frozen").exists() else "live"
+
+
 def _freeze_session(name):
     """Freeze one live session's egress: rules.txt moves to rules.frozen and an empty
     ruleset takes its place — deny-by-default does the rest, since the addon re-reads
@@ -4588,7 +4595,8 @@ def _ui_server(port):
                          "ended": m.get("ended"),
                          **({"last_rc": m["last_rc"]} if "last_rc" in m else {})}
                         for m in reversed(list_archived_metas()[-UI_ARCHIVED_LIMIT:])]
-            self._json({"sessions": [{**m, "state": "live"} for m in list_metas()],
+            self._json({"sessions": [{**m, "state": _session_state(m["name"])}
+                                     for m in list_metas()],
                         "archived": archived,
                         "proxy": {"running": running,
                                   "pid": (ident or meta.get("pid")) if running else None,
@@ -4677,7 +4685,11 @@ def _ui_server(port):
             except OSError:
                 rules = ""
             proxy = read_proxy() or {}
-            self._json({"session": meta, "state": state,
+            # A live session can be frozen. Only the reported state says so:
+            # `state` is placement (live vs archived) and keeps driving the
+            # briefs map — a frozen VM still runs, so it reads as live there.
+            reported = _session_state(meta["name"]) if state == "live" else state
+            self._json({"session": meta, "state": reported,
                         "journal": _read_journal(sdir / "journal.jsonl"),
                         "briefs": _session_briefs(meta, state, sdir),
                         "rules": rules,
