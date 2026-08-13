@@ -37,6 +37,7 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -289,6 +290,26 @@ def _free_pool_base(size):
             for s in socks:
                 s.close()
     raise RuntimeError("no free port pool found")
+
+
+# How many times a test may probe a fresh base and try again after losing a
+# probed-free port to a concurrent binder: the spawn, plus two respawns.
+_THEFT_ATTEMPTS = 3
+
+
+def _port_theft(text):
+    """Whether a failure's words carry the port-theft signature — and nothing else.
+
+    _free_pool_base probes bind-then-release, so anything else on this host can bind
+    a probed-free port before the fake mitmdump does. The fake then crashes with
+    EADDRINUSE and the CLI dies, by design, quoting the log tail — or the CLI's own
+    pre-spawn probe meets the thief first and refuses the port outright. Both texts
+    mean host load, not the code under test, and a caller that planted no squatter of
+    its own retries them on a fresh base. Everything else is a real failure: a test
+    that squats a port itself asserts the refusal in place and never comes here."""
+    if "proxy exited at startup" in text and "address already in use" in text.lower():
+        return True
+    return re.search(r"port \d+ is already in use", text) is not None
 
 
 def _ping(sock_path):
@@ -1243,8 +1264,9 @@ class InterruptTest(unittest.TestCase):
     zombie would answer. The wait for the phase the signal is aimed at watches the CLI
     as well as the marker (spawn_reaching): a CLI that dies first fails the test at
     once, its stdout and stderr quoted, instead of surfacing as a bare 20-second
-    timeout. SILKGATE_CLI points these tests at an older CLI the same way it does the
-    in-process ones."""
+    timeout — unless the death is a concurrent binder stealing the probed-free base
+    (see _port_theft), which gets a fresh base and a respawn. SILKGATE_CLI points
+    these tests at an older CLI the same way it does the in-process ones."""
 
     maxDiff = None
 
@@ -1311,13 +1333,23 @@ class InterruptTest(unittest.TestCase):
     def spawn_reaching(self, argv_fn, predicate, what, preexec_fn=None):
         """Spawn the CLI and wait for the phase marker the signal is aimed at —
         watching the CLI itself as well: a wait that polls only the marker reads a
-        CLI that died at startup as a 20-second timeout with no evidence. argv_fn
-        builds the argv at spawn time (run_argv and up_argv read self.base)."""
-        proc = self.spawn(*argv_fn(), preexec_fn=preexec_fn)
-        kind, evidence = self._reach(proc, predicate, what)
-        if kind is not None:
+        CLI that died at startup as a 20-second timeout with no evidence. A death
+        that carries the port-theft signature (see _port_theft; these tests plant
+        no squatters) gets a fresh base and a respawn — argv_fn builds the argv at
+        spawn time, so run_argv and up_argv read the re-probed self.base. Any
+        other death, and a real timeout, fails at once with the evidence."""
+        for attempt in range(_THEFT_ATTEMPTS):
+            proc = self.spawn(*argv_fn(), preexec_fn=preexec_fn)
+            kind, evidence = self._reach(proc, predicate, what)
+            if kind is None:
+                return proc
+            if kind == "died" and _port_theft(evidence):
+                if attempt + 1 < _THEFT_ATTEMPTS:
+                    self.base = _free_pool_base(MOD.POOL_SIZE)
+                    continue
+                self.fail(f"a concurrent binder stole the probed port on all "
+                          f"{_THEFT_ATTEMPTS} attempts; the last death:\n{evidence}")
             self.fail(evidence)
-        return proc
 
     def _reach(self, proc, predicate, what, timeout=20):
         """Poll for `predicate` while the CLI must stay alive. (None, None) once it
