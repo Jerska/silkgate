@@ -3013,8 +3013,8 @@ def cmd_profiles(args):
 
 def _profile_block(prof, width):
     """One `profiles` record: a header naming the profile, its description, then the
-    label-aligned installs and reaches lines. The description and the reaches list
-    wrap to `width`, continuations aligned under the first list item."""
+    label-aligned installs, reaches, injects, and rules lines. The description and the
+    reaches list wrap to `width`, continuations aligned under the first list item."""
     header = [prof.name]
     if prof.version:
         header.append(prof.version)
@@ -3038,6 +3038,14 @@ def _profile_block(prof, width):
                                initial_indent="  reaches   ",
                                subsequent_indent=" " * len("  installs  "),
                                break_long_words=False, break_on_hyphens=False)
+    secrets = sorted({"SILKGATE_EGRESS_SECRET_" + tok.split("=", 1)[1].upper()
+                      for ln in prof.rules.splitlines()
+                      if ln.strip() and not ln.startswith("#")
+                      for tok in ln.split() if tok.startswith("inject_auth=")})
+    if secrets:
+        lines.append("  injects   " + " ".join(secrets))
+    if prof.rules:
+        lines.append("  rules     " + f"profiles/{prof.name}/rules.txt")
     return "\n".join(lines)
 
 
