@@ -27,6 +27,13 @@
 
 * { box-sizing: border-box; }
 
+/* The [hidden] attribute must win everywhere. The UA sheet's [hidden]
+   { display: none } loses to any author display rule (.ctl, .badge,
+   .exec-pick, the card sections), so scripts that set el.hidden = true
+   would leave those elements visible. The !important keeps this reset
+   above every author display rule, current and future. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
