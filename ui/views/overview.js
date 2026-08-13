@@ -63,10 +63,44 @@ export function triage({ archived = false, lastRc = null, lastActivity = null,
   return { state: "waiting", rank: idle < WAITING_MS ? 2 : 3, label, pulse: false };
 }
 
+// When an archive's clock stopped: `ended`, else `created`, else the UTC stamp
+// every sid opens with (YYYYMMDDTHHMMSSZ-...). Null when nothing parses.
+function archiveStamp(row) {
+  for (const ts of [row.ended, row.created]) {
+    const t = Date.parse(ts || "");
+    if (!Number.isNaN(t)) return t;
+  }
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(row.sid || "");
+  return m ? Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`) : null;
+}
+
+// Row models for the archives section, newest end first. Archived sessions are
+// display-only (no controls, no triage), so the model is pure data and pins
+// down without a DOM. `branches` is always an array: the API field is a string
+// today, but a row renders zero, one, or many chips unchanged if it becomes a
+// list.
+export function archiveRows(archived) {
+  const rows = [];
+  for (const r of archived ?? []) {
+    const sid = r?.sid ?? r?.name;
+    if (sid == null) continue;
+    rows.push({
+      sid: String(sid),
+      name: r.name ?? String(sid),
+      branches: [].concat(r.branch ?? []),
+      created: r.created ?? null,
+      ended: r.ended ?? null,
+      lastRc: r.last_rc ?? null,
+    });
+  }
+  rows.sort((a, b) => (archiveStamp(b) ?? 0) - (archiveStamp(a) ?? 0));
+  return rows;
+}
+
 export function newOverviewView() {
   let ctx = null;
   let root = null;
-  let grid, msg;
+  let grid, msg, archSec, archList;
   let ticker = null;
   let setKey = null;               // which session set the grid was built for
   const cards = new Map();         // ident → card
@@ -133,23 +167,15 @@ export function newOverviewView() {
 
   // --- what a card knows --------------------------------------------------------
 
-  // Live metas first, then the archived list; an ident appearing in both keeps
-  // its live entry. `session` is the name data is keyed under; `ident` is the
-  // link target (the sid, for archived sessions).
+  // The grid holds live metas only; the archived list feeds the archives
+  // section below it. `session` is the name data is keyed under; `ident` is
+  // the link target.
   function entries() {
     const out = new Map();
     for (const meta of ctx.sessions?.sessions ?? []) {
       if (meta && meta.name) {
         out.set(meta.name, { ident: meta.name, session: meta.name, meta,
                              archived: meta.state === "archived" });
-      }
-    }
-    for (const meta of ctx.sessions?.archived ?? []) {
-      const ident = meta?.sid ?? meta?.name;
-      if (ident != null && !out.has(String(ident))) {
-        out.set(String(ident), { ident: String(ident),
-                                 session: meta.name ?? String(ident), meta,
-                                 archived: true });
       }
     }
     return [...out.values()];
@@ -331,6 +357,34 @@ export function newOverviewView() {
     }
   }
 
+  // One compact display-only row: the archive keeps no controls and no triage,
+  // so a rebuilt anchor per sync is the whole cost.
+  function archiveRow(row, now) {
+    const stamp = archiveStamp(row);
+    return el("a", { class: "arch-row",
+                     href: "#/session/" + encodeURIComponent(row.sid) },
+      el("span", { class: "arch-name" }, row.name),
+      ...row.branches.map((b) => el("span", { class: "card-branch" }, String(b))),
+      row.lastRc != null
+        ? el("span", { class: "num" }, `exit ${row.lastRc}`) : null,
+      el("span", { class: "num" },
+         `ended ${fmtAge(stamp == null ? null : now - stamp)}`));
+  }
+
+  // Archive rows rebuild on syncCards only — never on the 1 s tick, never in
+  // reorder(). An archived ident already present in the live set gets no row:
+  // the live card wins, as it does for /api/session/<ident> lookups.
+  function syncArchives(now) {
+    const rows = archiveRows(ctx.sessions?.archived ?? [])
+      .filter((row) => !cards.has(row.sid));
+    archList.textContent = "";
+    for (const row of rows) {
+      archList.appendChild(archiveRow(row, now));
+    }
+    archSec.hidden = rows.length === 0;
+    return rows.length;
+  }
+
   // Reconcile cards with /api/sessions. Only a changed session SET rebuilds the
   // grid; otherwise every card gets a text refresh (metas may have moved).
   function syncCards() {
@@ -357,7 +411,8 @@ export function newOverviewView() {
       updateCard(card, now);
     }
     reorder();
-    msg.hidden = cards.size > 0;
+    const archCount = syncArchives(now);
+    msg.hidden = cards.size > 0 || archCount > 0;
     grid.hidden = cards.size === 0;
   }
 
@@ -366,9 +421,13 @@ export function newOverviewView() {
   function mount(host, appCtx) {
     ctx = appCtx;
     grid = el("div", { class: "grid" });
+    archList = el("div", { class: "arch-list" });
+    archSec = el("section", { class: "arch-sec" },
+                 el("h2", { class: "arch-head" }, "archives"), archList);
+    archSec.hidden = true;
     msg = el("p", { class: "state-msg" },
              "no sessions — `silkgate up <name>` starts one");
-    root = el("section", { class: "overview" }, grid, msg);
+    root = el("section", { class: "overview" }, grid, archSec, msg);
     seedDenies();
     syncCards();
     host.appendChild(root);

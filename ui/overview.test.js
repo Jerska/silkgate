@@ -4,7 +4,7 @@
 // files.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { triage, fmtAge } from "./views/overview.js";
+import { triage, fmtAge, archiveRows } from "./views/overview.js";
 
 const NOW = Date.parse("2026-08-12T12:00:00+00:00");
 
@@ -77,6 +77,47 @@ test("ranks sort working > deny-storm > waiting > stuck > done > archived", () =
   for (let i = 1; i < ranks.length; i++) {
     assert.ok(ranks[i] > ranks[i - 1], `rank ${i}: ${ranks[i]} > ${ranks[i - 1]}`);
   }
+});
+
+test("archive rows sort by end date, newest first, oldest last", () => {
+  const rows = archiveRows([
+    { sid: "a", name: "a", ended: "2026-08-10T12:00:00+00:00" },
+    { sid: "c", name: "c", ended: "2026-08-12T12:00:00+00:00" },
+    { sid: "b", name: "b", ended: "2026-08-11T12:00:00+00:00" },
+  ]);
+  assert.deepEqual(rows.map((r) => r.sid), ["c", "b", "a"]);
+});
+
+test("the sort stamp falls back: ended, then created, then the sid stamp", () => {
+  const rows = archiveRows([
+    { sid: "20260812T090000Z-old-abc123", name: "old" },
+    { sid: "x", name: "x", created: "2026-08-12T11:00:00+00:00" },
+    { sid: "y", name: "y", created: "2026-08-01T00:00:00+00:00",
+      ended: "2026-08-12T10:00:00+00:00" },
+  ]);
+  assert.deepEqual(rows.map((r) => r.name), ["x", "y", "old"],
+                   "x by created, y by ended over created, old by its sid");
+});
+
+test("branches is always an array: absent, one string, or a list", () => {
+  const [none, one, many] = archiveRows([
+    { sid: "20260812T120000Z-n-000000", name: "n" },
+    { sid: "20260811T120000Z-o-000000", name: "o", branch: "agent/x" },
+    { sid: "20260810T120000Z-m-000000", name: "m",
+      branch: ["agent/x", "agent/y"] },
+  ]);
+  assert.deepEqual(none.branches, []);
+  assert.deepEqual(one.branches, ["agent/x"]);
+  assert.deepEqual(many.branches, ["agent/x", "agent/y"]);
+});
+
+test("last_rc passes through as lastRc; absent reads as null", () => {
+  const [rc, no] = archiveRows([
+    { sid: "20260812T120000Z-r-000000", name: "r", last_rc: 7 },
+    { sid: "20260811T120000Z-s-000000", name: "s" },
+  ]);
+  assert.equal(rc.lastRc, 7);
+  assert.equal(no.lastRc, null);
 });
 
 test("fmtAge picks the readable unit", () => {

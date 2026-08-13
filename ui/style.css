@@ -273,6 +273,28 @@ button:hover { border-color: var(--muted); }
   color: var(--muted);
 }
 
+/* --- the overview archives ------------------------------------------------------ */
+
+/* Archived sessions are display-only: one compact link row each, muted like the
+   .num counters, below the live grid. */
+.arch-sec { margin-top: var(--sp-5); }
+.arch-head {
+  margin: 0 0 var(--sp-2);
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--muted);
+}
+.arch-list { display: grid; }
+.arch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) 0;
+  color: var(--fg);
+}
+.arch-row .num { color: var(--muted); }
+.arch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
 /* --- the session detail -------------------------------------------------------- */
 
 .session {
