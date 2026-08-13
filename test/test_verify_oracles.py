@@ -99,6 +99,47 @@ def _squat(case, port):
     case.addCleanup(holder.close)
 
 
+# The CLI's port-collision refusals, by fragment — the predicate that tells a neighbor
+# taking a port between a probe and a bind from a real verdict. Each copies message text
+# from cli/silkgate: _IN_USE from _port_in_use_error (the proxy's own port), _CANNOT_BIND
+# from _oracle_bind and the recorder's bind (the oracle ports). They drift if those
+# messages change, until the queued verify-port-probe task moves them into cli/silkgate
+# as named constants.
+_IN_USE = "is already in use"
+_CANNOT_BIND = "cannot bind the"
+
+
+def _collided(text):
+    return _IN_USE in text or _CANNOT_BIND in text
+
+
+def _bind_or_skip(action, span=1, attempts=5, pick=None):
+    """Pick a free port with `pick` and run `action(port)`; return (port, result).
+
+    Every pick is probe-then-bind, so a concurrent process on this host can take the port
+    in between: the action then raises OSError (a raw bind) or SystemExit (the CLI's die
+    naming the holder). Either way the port is lost, not the test — retry on a fresh one,
+    and after `attempts` collisions skip naming the last error rather than fail on a host
+    this contended.
+    """
+    pick = pick or _free_port
+    last = None
+    for _ in range(attempts):
+        port = pick(span)
+        said = []
+        try:
+            with mock.patch.object(sg, "say", said.append):
+                result = action(port)
+        except SystemExit:
+            last = "\n".join(str(m) for m in said)
+            continue
+        except OSError as e:
+            last = str(e)
+            continue
+        return port, result
+    raise unittest.SkipTest(f"ports collided {attempts} times; last error: {last}")
+
+
 def _die_message(fn, *args, **kwargs):
     """Run `fn` expecting die(); return everything it said."""
     said = []
@@ -110,13 +151,25 @@ def _die_message(fn, *args, **kwargs):
     raise AssertionError(f"{getattr(fn, '__name__', fn)} did not die")
 
 
+class PortProbe(unittest.TestCase):
+    """The probe every pick above trusts, against the binds the oracles actually make."""
+
+    def test_a_udp_holder_on_v6_loopback_is_seen(self):
+        # sg._ArrivalObserver binds udp on ::1 too: a probe that skips that family passes
+        # a port the observer then dies on — the flake this module used to have.
+        holder = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        self.addCleanup(holder.close)
+        holder.bind(("::1", 0))
+        self.assertFalse(_port_free(holder.getsockname()[1]))
+
+
 # --- the recording endpoint ---------------------------------------------------------------
 
 class RecorderEndpoint(unittest.TestCase):
     """The Tier-2 fixture against a real HTTP client: it records, and it reflects nothing."""
 
     def setUp(self):
-        self.recorder = sg._HeaderRecorder(_free_port())
+        _, self.recorder = _bind_or_skip(sg._HeaderRecorder)
         self.addCleanup(self.recorder.close)
 
     def post(self, target, headers, body=b"", method="POST", host="127.0.0.1"):
@@ -320,7 +373,7 @@ class ArrivalObserverTest(unittest.TestCase):
     the guest can report, since a denied sendto succeeds and no ICMP comes back."""
 
     def setUp(self):
-        self.observer = sg._ArrivalObserver(_free_port())
+        _, self.observer = _bind_or_skip(sg._ArrivalObserver)
         self.addCleanup(self.observer.close)
 
     def verdict(self):
@@ -416,20 +469,28 @@ class ArrivalObserverTest(unittest.TestCase):
         self.assertIn("::1", problems[0][1])
 
     def test_a_held_port_is_refused_naming_the_port(self):
-        held = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.addCleanup(held.close)
         # Not a kernel-assigned number: the observer must get through its tcp
         # bind before it can fail on udp, and the ephemeral range is exactly
         # where every concurrent tests.py worker's live sockets sit — a pick
         # there loses the tcp side often enough to flake. Below the ephemeral
         # floors (32768 Linux, 49152 macOS) and tests.py's port floors (23000
         # and up), nothing else in the suite ever lands.
-        for port in range(21000, 23000):
-            if _port_free(port):
-                break
-        else:
+        def low_pick(span):
+            for port in range(21000, 23000):
+                if _port_free(port):
+                    return port
             raise unittest.SkipTest("no free port below the ephemeral range")
-        held.bind(("127.0.0.1", port))
+
+        def hold(port):
+            held = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                held.bind(("127.0.0.1", port))
+            except OSError:
+                held.close()
+                raise
+            self.addCleanup(held.close)
+
+        port, _ = _bind_or_skip(hold, pick=low_pick)
         message = _die_message(sg._ArrivalObserver, port)
         self.assertIn("arrival observer (udp)", message)
 
@@ -494,7 +555,7 @@ class GuestProbeScript(unittest.TestCase):
     def setUp(self):
         if not sg.shutil.which("bash"):
             self.skipTest("no bash here; the guest half needs its /dev/tcp built-in")
-        self.observer = sg._ArrivalObserver(_free_port())
+        _, self.observer = _bind_or_skip(sg._ArrivalObserver)
         self.addCleanup(self.observer.close)
         self.proxy = _StubProxy(0, self.ANSWERS)
         self.addCleanup(self.proxy.close)
@@ -962,14 +1023,14 @@ class OracleFraming(unittest.TestCase):
 class OracleWiring(unittest.TestCase):
     """The bundle: which ports it takes, what it adds to the ruleset, what it tears down."""
 
-    def oracles(self, proxy_port):
-        oracles = sg._VerifyOracles(proxy_port)
+    def oracles(self):
+        """A bundle on a freshly proven proxy port; return (base, oracles)."""
+        base, oracles = _bind_or_skip(sg._VerifyOracles, span=3)
         self.addCleanup(oracles.close)
-        return oracles
+        return base, oracles
 
     def test_the_ports_sit_beside_the_proxys(self):
-        base = _free_port(span=3)
-        oracles = self.oracles(base)
+        base, oracles = self.oracles()
         self.assertEqual((oracles.observer.port, oracles.recorder.port), (base + 1, base + 2))
 
     def test_the_offset_folds_below_the_proxy_port_at_the_top_of_the_range(self):
@@ -977,16 +1038,14 @@ class OracleWiring(unittest.TestCase):
         self.assertEqual(sg._oracle_port(65535, 2), 65533)
 
     def test_the_recorder_rule_is_added_to_the_ruleset_and_the_secret_to_the_environment(self):
-        base = _free_port(span=3)
-        oracles = self.oracles(base)
+        base, oracles = self.oracles()
         self.assertIn(f"localhost:{base + 2}/verify/record/** POST", oracles.rules())
         self.assertEqual(os.environ[f"SILKGATE_EGRESS_SECRET_{sg._VERIFY_SECRET_NAME.upper()}"],
                          f"x-api-key: {sg._VERIFY_SENTINEL}")
         self.assertIn(sg._VERIFY_SENTINEL, "SENTINEL-NOT-A-REAL-KEY")   # never a real key
 
     def test_close_frees_every_port_it_took(self):
-        base = _free_port(span=3)
-        oracles = sg._VerifyOracles(base)
+        base, oracles = _bind_or_skip(sg._VerifyOracles, span=3)
         oracles.close()
         oracles.close()                                # idempotent: the finally calls it again
         for port in (base + 1, base + 2):
@@ -1014,8 +1073,8 @@ class VerifyPortSelection(unittest.TestCase):
         return [base, sg._oracle_port(base, 1), sg._oracle_port(base, 2)]
 
     def test_the_default_scans_past_an_occupied_floor_to_a_base_with_every_port_free(self):
-        base = _free_port(span=sg.POOL_SIZE + 1)
-        _squat(self, base)                 # what a shared proxy on the default floor looks like
+        # The squat is what a shared proxy on the default floor looks like.
+        base, _ = _bind_or_skip(lambda port: _squat(self, port), span=sg.POOL_SIZE + 1)
         with mock.patch.object(sg, "DEFAULT_BASE_PORT", base):
             chosen = sg._verify_port(None)
         self.assertEqual(chosen, base + 1, "the scan did not land one past the blocker")
@@ -1023,8 +1082,7 @@ class VerifyPortSelection(unittest.TestCase):
             self.assertTrue(sg._port_free(port), f"verify binds {port} and it is taken")
 
     def test_an_explicit_port_is_honored_verbatim_even_when_taken(self):
-        port = _free_port()
-        _squat(self, port)
+        port, _ = _bind_or_skip(lambda p: _squat(self, p))
         self.assertEqual(sg._verify_port(port), port,
                          "an explicit --port moved instead of being handed to start_proxy's "
                          "die-if-taken guard")
@@ -1232,14 +1290,29 @@ class VerifyWiring(unittest.TestCase):
             self.addCleanup(patch.stop)
 
     def verify(self, **kwargs):
-        """Run cmd_verify; return (everything silkgate said, whether it refused the run)."""
-        said = []
-        with mock.patch.object(sg, "say", said.append):
-            try:
-                sg.cmd_verify(_Args(**{"port": self.port, **kwargs}))
-            except SystemExit:
-                return "\n".join(str(m) for m in said), True
-        return "\n".join(str(m) for m in said), False
+        """Run cmd_verify; return (everything silkgate said, whether it refused the run).
+
+        A refusal whose text names a port collision is a concurrent process having taken
+        one of this run's three ports between setUp's probe and cmd_verify's bind — the
+        window spans a subprocess spawn — so it is a lost port, not a verdict: re-run on
+        a fresh port. Never when the caller pinned the port: a pinned port's collision
+        is the behavior under test.
+        """
+        pinned = "port" in kwargs
+        text = None
+        for _ in range(5):
+            said = []
+            with mock.patch.object(sg, "say", said.append):
+                try:
+                    sg.cmd_verify(_Args(**{"port": self.port, **kwargs}))
+                except SystemExit:
+                    text = "\n".join(str(m) for m in said)
+                    if pinned or not _collided(text):
+                        return text, True
+                    self.port = _free_port(span=3)
+                    continue
+            return "\n".join(str(m) for m in said), False
+        raise unittest.SkipTest(f"verify's ports collided 5 times; last error: {text}")
 
     def aim_probes_at(self, port):
         """Point the guest's observer probes at `port` instead of the observer's own.
@@ -1362,8 +1435,7 @@ class VerifyWiring(unittest.TestCase):
     def test_no_port_scans_past_a_held_floor_and_the_run_completes(self):
         # The whole point of the default: a shared proxy holds the floor, verify with no
         # --port lands one past it and runs to its verdict — no die, no contention.
-        floor = _free_port(span=sg.POOL_SIZE + 1)
-        _squat(self, floor)
+        floor, _ = _bind_or_skip(lambda port: _squat(self, port), span=sg.POOL_SIZE + 1)
         self.aim_probes_at(self.dead_port(*range(floor, floor + sg.POOL_SIZE + 1)))
         with mock.patch.object(sg, "DEFAULT_BASE_PORT", floor):
             said, refused = self.verify(port=None)
@@ -1372,8 +1444,11 @@ class VerifyWiring(unittest.TestCase):
         self.assertIn("containment holds", said)
 
     def test_an_explicit_port_that_is_taken_dies_instead_of_moving(self):
-        _squat(self, self.port)
-        said, refused = self.verify()            # port=self.port, explicitly
+        # span=3 keeps the oracle ports beside the squat free, so the die start_proxy
+        # pins is the one the proxy port's holder causes. Passing the port pins it:
+        # verify() must not retry a collision that is the behavior under test.
+        self.port, _ = _bind_or_skip(lambda port: _squat(self, port), span=3)
+        said, refused = self.verify(port=self.port)
         self.assertTrue(refused)
         self.assertIn(f"port {self.port} is already in use", said)
         self.assertNotIn("containment holds", said)
@@ -1389,9 +1464,12 @@ class VerifyWiring(unittest.TestCase):
 
 
 def _port_free(port):
+    # Every bind the oracles make must be probed, or a pick passes here and dies there:
+    # sg._ArrivalObserver binds tcp and udp on both loopback addresses.
     for family, addr, kind in ((socket.AF_INET, "127.0.0.1", socket.SOCK_STREAM),
                                (socket.AF_INET6, "::1", socket.SOCK_STREAM),
-                               (socket.AF_INET, "127.0.0.1", socket.SOCK_DGRAM)):
+                               (socket.AF_INET, "127.0.0.1", socket.SOCK_DGRAM),
+                               (socket.AF_INET6, "::1", socket.SOCK_DGRAM)):
         with socket.socket(family, kind) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
