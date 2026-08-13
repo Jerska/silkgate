@@ -10,6 +10,5 @@ Read this to contribute to silkgate as a coding agent.
   sandbox cannot run it, say so in your report instead of a claim of success.
 - Do not use the assistant's persistent memory for this project unless the user
   explicitly requires it. Create no memories, and rely on none. The committed tree is
-  the source of truth: README.md, doc/, CONTRIBUTING.md, TODO.md, and git history.
-  Memory rots as parallel sessions advance the repository, and stale memories have
-  cost real work here more times than anyone counted.
+  the source of truth: README.md, doc/, CONTRIBUTING.md, and git history.
+  Memory rots as parallel sessions advance the repository.
