@@ -130,7 +130,7 @@ arguments. Explicit therefore beats a grant, and a grant beats the profile floor
 Audit a composed policy before a launch:
 
 ```sh
-./cli/silkgate profiles                              # the ARG column lists each pattern
+./cli/silkgate profiles                              # each header lists its arg pattern
 ./cli/silkgate profiles --render some-profile:myarg  # the exact rules a session enforces
 ```
 

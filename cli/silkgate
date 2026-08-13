@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import textwrap
 import threading
 import time
 from datetime import datetime, timezone
@@ -3004,19 +3005,40 @@ def cmd_profiles(args):
         load_ruleset(text)
         sys.stdout.write(text)
         return
-    rows = [("PROFILE", "VERSION", "ARG", "INSTALLS", "REACHES", "DESCRIPTION")]
-    for d in sorted(p for p in PROFILE_DIR.iterdir() if p.is_dir()):
-        prof = Profile(d.name)
-        hosts = sorted({ln.split()[0].split("/")[0]
-                        for ln in prof.rules.splitlines()
-                        if ln.strip() and not ln.startswith("#")})
-        installs = list(prof.packages) + (["setup.sh"] if prof.setup.strip() else [])
-        desc = prof.conf.get("description", "")
-        if prof.name in _VERIFY_ONLY:               # listed like the rest, usable unlike them
-            desc = f"(silkgate verify only — refused with run/up/build/proxy) {desc}"
-        rows.append((prof.name, prof.version or "-", prof.arg_pattern or "-",
-                     " ".join(installs) or "-", ", ".join(hosts) or "-", desc))
-    _print_table(rows)
+    width = shutil.get_terminal_size((80, 24)).columns
+    blocks = [_profile_block(Profile(d.name), width)
+              for d in sorted(p for p in PROFILE_DIR.iterdir() if p.is_dir())]
+    print("\n\n".join(blocks))
+
+
+def _profile_block(prof, width):
+    """One `profiles` record: a header naming the profile, its description, then the
+    label-aligned installs and reaches lines. The description and the reaches list
+    wrap to `width`, continuations aligned under the first list item."""
+    header = [prof.name]
+    if prof.version:
+        header.append(prof.version)
+    if prof.arg_pattern:
+        header.append(f"arg: {prof.arg_pattern}")
+    if prof.name in _VERIFY_ONLY:               # listed like the rest, usable unlike them
+        header.append("(silkgate verify only — refused with run/up/build/proxy)")
+    lines = [" ".join(header)]
+    desc = prof.conf.get("description", "")
+    if desc:
+        lines += textwrap.wrap(desc, width, initial_indent="  ", subsequent_indent="  ",
+                               break_long_words=False, break_on_hyphens=False)
+    installs = list(prof.packages) + (["setup.sh"] if prof.setup.strip() else [])
+    if installs:
+        lines.append("  installs  " + " ".join(installs))
+    hosts = sorted({ln.split()[0].split("/")[0]
+                    for ln in prof.rules.splitlines()
+                    if ln.strip() and not ln.startswith("#")})
+    if hosts:
+        lines += textwrap.wrap(", ".join(hosts), width,
+                               initial_indent="  reaches   ",
+                               subsequent_indent=" " * len("  installs  "),
+                               break_long_words=False, break_on_hyphens=False)
+    return "\n".join(lines)
 
 
 def cmd_doctor(args):

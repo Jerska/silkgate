@@ -490,9 +490,9 @@ class TestProbeQuarantine(CliCase):
             sg.cmd_profiles(None)
         lines = out.getvalue().splitlines()
         probe = next(ln for ln in lines if ln.startswith("probe "))
-        self.assertIn("silkgate verify only", probe)
+        self.assertIn("(silkgate verify only — refused with run/up/build/proxy)", probe)
         for ln in lines:
-            if not ln.startswith(("probe ", "PROFILE")):
+            if ln is not probe:
                 self.assertNotIn("verify only", ln)
 
 
@@ -814,10 +814,9 @@ class TestProfilesListingAndRender(ArgProfileCase):
 
     def test_listing_shows_the_arg_pattern(self):
         out = self.profiles_cmd()
-        self.assertIn("ARG", out.splitlines()[0])
-        tmpl = next(ln for ln in out.splitlines() if ln.startswith("tmpl "))
-        self.assertIn("[a-z]+/[a-z]+", tmpl)
-        plain = next(ln for ln in out.splitlines() if ln.startswith("plain "))
+        tmpl = next(ln for ln in out.splitlines() if ln.startswith("tmpl"))
+        self.assertIn("arg: [a-z]+/[a-z]+", tmpl)
+        plain = next(ln for ln in out.splitlines() if ln.startswith("plain"))
         self.assertNotIn("[a-z]", plain)
 
     def test_render_prints_the_expanded_rules(self):
@@ -1175,7 +1174,7 @@ class TestPreflight(CliCase):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 sg.cmd_profiles(None)
-            self.assertIn("PROFILE", out.getvalue())
+            self.assertIn("claude", out.getvalue())
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 sg.cmd_ls(None)
