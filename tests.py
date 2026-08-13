@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run the unit suite sharded across parallel processes, in seconds not minutes.
+"""Run every suite sharded across parallel processes, in seconds not minutes.
 
-The suite spends its wall time waiting on sockets and subprocesses, not
-computing, so shards overlap well even on one CPU. Two levers carry the
+The python suite spends its wall time waiting on sockets and subprocesses,
+not computing, so shards overlap well even on one CPU. Two levers carry the
 speedup:
 
 - A poll shim: servers the tests start take up to serve_forever's default
@@ -11,20 +11,27 @@ speedup:
 - Shards: SHARDS below splits the suite into groups balanced by measured
   wall time, one worker process per group.
 
+The node ui suite (`ui/*.test.js`, the `node:test` runner) runs as one more
+job beside the shard processes, in the same worker pool. Its row in the
+summary is `ui-node`. When node is not on PATH the row records one skip,
+the way test_addon skips without mitmproxy.
+
 Usage:
 
     python3 tests.py               # all shards at once
-    python3 tests.py --workers 2   # at most 2 shard processes at a time
+    python3 tests.py --workers 2   # at most 2 jobs at a time
 
 The runner refuses to start when SHARDS and discovery disagree, so a new test
-file must be named in SHARDS before the runner accepts it. A plain
-`python3 -m unittest discover -s test` still runs the identical tests,
-unsharded.
+file must be named in SHARDS before the runner accepts it. SHARDS is
+python-only. A plain `python3 -m unittest discover -s test` still runs the
+identical python tests, unsharded, without the ui suite.
 """
 
 import argparse
+import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -68,6 +75,7 @@ SHARDS = {
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SUMMARY_MARK = "TESTS-SUMMARY "
+NODE_SUITE = "ui-node"
 
 
 def shrink_poll_interval():
@@ -191,15 +199,58 @@ def run_shard_process(name):
     )
 
 
+def node_test_files():
+    """The ui suite's files, or abort when the glob matches nothing.
+
+    node treats a directory argument as one failing test, so the runner names
+    each file. An empty glob means the ui suite silently vanished, which
+    kills the run before any test starts, like the SHARDS gate.
+    """
+    files = sorted(glob.glob(os.path.join(ROOT, "ui", "*.test.js")))
+    if not files:
+        print("tests.py: ui/*.test.js matches no files", file=sys.stderr)
+        sys.exit(2)
+    return files
+
+
+def run_node_process(files):
+    """Run the node ui suite as one job. Returns (proc, wall seconds).
+
+    The reporter is pinned to tap because the default reporter depends on a
+    TTY. parse_tap_counts reads the summary out of the tap trailer.
+    """
+    start = time.monotonic()
+    proc = subprocess.run(
+        ["node", "--test", "--test-reporter=tap", *files],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    return proc, round(time.monotonic() - start, 1)
+
+
+def parse_tap_counts(stdout):
+    """The trailing `# <name> <number>` count lines of a tap run, as a dict."""
+    counts = {}
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "#":
+            try:
+                counts[parts[1]] = int(float(parts[2]))
+            except ValueError:
+                pass
+    return counts
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the unit suite sharded across parallel processes."
+        description="Run every suite sharded across parallel processes."
     )
     parser.add_argument(
         "--workers",
         type=int,
-        default=len(SHARDS),
-        help="max shard processes at once (default: %(default)s, all of them)",
+        default=len(SHARDS) + 1,
+        help="max jobs at once (default: %(default)s, all of them)",
     )
     parser.add_argument("--shard", help=argparse.SUPPRESS)  # worker mode
     args = parser.parse_args()
@@ -210,16 +261,20 @@ def main():
 
     shrink_poll_interval()
     assignment = assign(discover())
+    node_files = node_test_files()
+    node = shutil.which("node")
     expected = {name: 0 for name in SHARDS}
     for shard in assignment.values():
         expected[shard] += 1
+    jobs = len(SHARDS) + (1 if node else 0)
     print(
-        f"tests.py: {len(assignment)} tests in {len(SHARDS)} shards, "
-        f"workers={min(args.workers, len(SHARDS))}"
+        f"tests.py: {len(assignment)} tests in {len(SHARDS)} shards "
+        f"plus the node ui suite, workers={min(args.workers, jobs)}"
     )
 
     start = time.monotonic()
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        node_future = pool.submit(run_node_process, node_files) if node else None
         procs = dict(zip(SHARDS, pool.map(run_shard_process, SHARDS)))
     wall = time.monotonic() - start
 
@@ -262,6 +317,42 @@ def main():
         totals["tests"] += summary["tests"]
         totals["bad"] += len(bad)
         totals["skipped"] += summary["skipped"]
+
+    if node_future is None:
+        # Mirror the missing-mitmproxy path: one skip, a note, an honest OK.
+        print("tests.py: node is not on PATH, the ui suite records as one skip")
+        rows.append((NODE_SUITE, 1, 0, 0, 1, 0.0))
+        totals["tests"] += 1
+        totals["skipped"] += 1
+    else:
+        proc, seconds = node_future.result()
+        counts = parse_tap_counts(proc.stdout)
+        if not {"tests", "fail", "cancelled"} <= counts.keys():
+            failed = True
+            print("tests.py: the node suite died without tap counts:", file=sys.stderr)
+            sys.stderr.write(proc.stdout)
+            sys.stderr.write(proc.stderr)
+            rows.append((NODE_SUITE, "?", "?", "?", "?", "?"))
+        else:
+            bad = counts["fail"] + counts["cancelled"]
+            skipped = counts.get("skipped", 0) + counts.get("todo", 0)
+            if proc.returncode != 0 or bad:
+                failed = True
+                sys.stderr.write(proc.stdout)
+                sys.stderr.write(proc.stderr)
+            rows.append(
+                (
+                    NODE_SUITE,
+                    counts["tests"],
+                    counts["fail"],
+                    counts["cancelled"],
+                    skipped,
+                    seconds,
+                )
+            )
+            totals["tests"] += counts["tests"]
+            totals["bad"] += bad
+            totals["skipped"] += skipped
 
     print()
     print(f"{'shard':<14}{'tests':>6}{'fail':>6}{'error':>7}{'skip':>6}{'seconds':>9}")
