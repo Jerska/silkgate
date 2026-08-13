@@ -1297,12 +1297,12 @@ class VerifyWiring(unittest.TestCase):
         """Run cmd_verify; return (everything silkgate said, whether it refused the run).
 
         A refusal whose text names a port collision is a concurrent process having taken
-        one of this run's three ports between setUp's probe and cmd_verify's bind — the
-        window spans a subprocess spawn — so it is a lost port, not a verdict: re-run on
-        a fresh port. Never when the caller pinned the port: a pinned port's collision
-        is the behavior under test.
+        one of this run's three ports between the free-port probe and cmd_verify's bind —
+        the window spans a subprocess spawn — so it is a lost port, not a verdict: re-run
+        on a fresh port (port=None re-scans by itself). Never when the caller pinned an
+        explicit port: a pinned port's collision is the behavior under test.
         """
-        pinned = "port" in kwargs
+        pinned = kwargs.get("port") is not None
         text = None
         for _ in range(5):
             said = []
@@ -1313,7 +1313,8 @@ class VerifyWiring(unittest.TestCase):
                     text = "\n".join(str(m) for m in said)
                     if pinned or not _collided(text):
                         return text, True
-                    self.port = _free_port(span=3)
+                    if "port" not in kwargs:
+                        self.port = _free_port(span=3)
                     continue
             return "\n".join(str(m) for m in said), False
         raise unittest.SkipTest(f"verify's ports collided 5 times; last error: {text}")
