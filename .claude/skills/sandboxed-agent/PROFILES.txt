@@ -1,0 +1,53 @@
+claude 2.1.226
+  Claude Code, as a standalone native binary (no Node needed)
+  installs  curl libgcc-s1 libstdc++6 ripgrep setup.sh
+  reaches   api.anthropic.com, platform.claude.com
+  injects   SILKGATE_EGRESS_SECRET_ANTHROPIC
+  rules     profiles/claude/rules.txt
+
+git
+  git and git-lfs, offline by default (GitHub egress comes from the github
+  profiles)
+  installs  git git-lfs
+  rules     profiles/git/rules.txt
+
+github
+  anonymous public GitHub read, no credential
+  reaches   codeload.github.com, github.com, raw.githubusercontent.com
+  rules     profiles/github/rules.txt
+
+github-read arg: [A-Za-z0-9._-]+/[A-Za-z0-9._-]+
+  credentialed GitHub read for one OWNER/REPO: clone, fetch, LFS download, REST
+  GET
+  installs  setup.sh
+  reaches   api.github.com, codeload.github.com,
+            github-cloud.githubusercontent.com, github.com, lfs.github.com,
+            raw.githubusercontent.com
+  injects   SILKGATE_EGRESS_SECRET_GITHUB
+  rules     profiles/github-read/rules.txt
+
+github-write arg: [A-Za-z0-9._-]+/[A-Za-z0-9._-]+
+  credentialed GitHub write for one OWNER/REPO: push, LFS upload, REST mutations
+  installs  setup.sh
+  reaches   api.github.com, codeload.github.com,
+            github-cloud.githubusercontent.com, github-cloud.s3.amazonaws.com,
+            github.com, lfs.github.com, raw.githubusercontent.com
+  injects   SILKGATE_EGRESS_SECRET_GITHUB
+  rules     profiles/github-write/rules.txt
+
+node 22.11.0
+  Node.js, from the official pinned tarball
+  installs  curl xz-utils setup.sh
+  reaches   registry.npmjs.org
+  rules     profiles/node/rules.txt
+
+probe (silkgate verify only — refused with run/up/build/proxy)
+  Egress targets the containment check probes (rules only, no setup)
+  reaches   deb.debian.org, registry.npmjs.org, security.debian.org
+  rules     profiles/probe/rules.txt
+
+python 3.12.7
+  CPython at a pinned version, installed by uv (not the distro's python)
+  installs  curl setup.sh
+  reaches   files.pythonhosted.org, pypi.org
+  rules     profiles/python/rules.txt

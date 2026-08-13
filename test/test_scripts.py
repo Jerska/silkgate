@@ -21,6 +21,7 @@ other test files.
 
     python3 test/test_scripts.py [-v]
 """
+import os
 import shutil
 import subprocess
 import sys
@@ -30,9 +31,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 
-def run(*argv):
+def run(*argv, env=None):
     return subprocess.run([str(a) for a in argv], capture_output=True, text=True,
-                          timeout=120, cwd=REPO)
+                          timeout=120, cwd=REPO, env=env)
 
 
 class ScriptCase(unittest.TestCase):
@@ -65,6 +66,24 @@ class ReproVerdicts(ScriptCase):
         smart-HTTP fetch phases and deny push. The live half needs msb and the network."""
         self.assertExitsZero(run("sh", REPO / "test" / "repro" / "git_profile_clone.sh",
                                  "--static"))
+
+
+class ProfilesSnapshot(ScriptCase):
+    """The sandboxed-agent skill ships PROFILES.txt, a committed copy of the `profiles`
+    listing, so a planner reads it instead of shelling out to the CLI. This pins the
+    copy: any byte of drift between the listing and the snapshot fails here."""
+
+    SNAPSHOT = REPO / ".claude" / "skills" / "sandboxed-agent" / "PROFILES.txt"
+    REGEN = "COLUMNS=80 ./cli/silkgate profiles > .claude/skills/sandboxed-agent/PROFILES.txt"
+
+    def test_snapshot_matches_cli_listing(self):
+        # COLUMNS pins the wrap width; without it the listing follows the terminal.
+        done = run(sys.executable, REPO / "cli" / "silkgate", "profiles",
+                   env={**os.environ, "COLUMNS": "80"})
+        self.assertExitsZero(done)
+        self.assertMultiLineEqual(
+            done.stdout, self.SNAPSHOT.read_text(),
+            f"PROFILES.txt drifted from the live listing — regenerate it:\n  {self.REGEN}")
 
 
 class SyntaxGates(ScriptCase):
