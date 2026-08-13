@@ -1240,8 +1240,11 @@ class InterruptTest(unittest.TestCase):
     are on what survives: session dirs, port claims, proxy listeners, the exit status,
     and a stderr free of tracebacks. Proxy death is asserted on its listeners and
     control socket, never kill -0: the mitmdump child is not ours to reap, and its
-    zombie would answer. SILKGATE_CLI points these tests at an older CLI the same way
-    it does the in-process ones."""
+    zombie would answer. The wait for the phase the signal is aimed at watches the CLI
+    as well as the marker (spawn_reaching): a CLI that dies first fails the test at
+    once, its stdout and stderr quoted, instead of surfacing as a bare 20-second
+    timeout. SILKGATE_CLI points these tests at an older CLI the same way it does the
+    in-process ones."""
 
     maxDiff = None
 
@@ -1291,13 +1294,58 @@ class InterruptTest(unittest.TestCase):
     def run_argv(self):
         return ("run", "--image", "img", "--port", str(self.base), "--", "guestcmd")
 
+    def up_argv(self):
+        return ("up", "--name", "s1", "--image", "img", "--port", str(self.base))
+
     def wait_for(self, predicate, what, timeout=20):
+        """A blind wait, only for phases after the signal went in: there the CLI's
+        exit is the expected outcome, so its death is nothing to watch for. The
+        wait before the signal is spawn_reaching's."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if predicate():
                 return
             time.sleep(0.02)
         self.fail(f"timed out waiting for {what}")
+
+    def spawn_reaching(self, argv_fn, predicate, what, preexec_fn=None):
+        """Spawn the CLI and wait for the phase marker the signal is aimed at —
+        watching the CLI itself as well: a wait that polls only the marker reads a
+        CLI that died at startup as a 20-second timeout with no evidence. argv_fn
+        builds the argv at spawn time (run_argv and up_argv read self.base)."""
+        proc = self.spawn(*argv_fn(), preexec_fn=preexec_fn)
+        kind, evidence = self._reach(proc, predicate, what)
+        if kind is not None:
+            self.fail(evidence)
+        return proc
+
+    def _reach(self, proc, predicate, what, timeout=20):
+        """Poll for `predicate` while the CLI must stay alive. (None, None) once it
+        holds; ("died", evidence) when the CLI exits first; ("timeout", evidence)
+        when the window closes. Either failure kills the group and quotes the
+        CLI's exit status, stdout and stderr — the evidence the bare timeout
+        message never carried."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return None, None
+            if proc.poll() is not None:
+                return "died", self._post_mortem(proc, f"the CLI exited before {what}")
+            time.sleep(0.02)
+        if predicate():                        # the marker landed on the deadline
+            return None, None
+        return "timeout", self._post_mortem(proc, f"timed out waiting for {what}")
+
+    def _post_mortem(self, proc, headline):
+        """Kill the group (a fake holding its phase open would stall communicate),
+        then quote everything the CLI left behind."""
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        out, err = proc.communicate()
+        return (f"{headline} (exit {proc.returncode})\n"
+                f"--- stdout ---\n{out}\n--- stderr ---\n{err}")
 
     def marker(self, name):
         return (self.msb_dir / name).exists
@@ -1384,8 +1432,8 @@ class InterruptTest(unittest.TestCase):
         """Ctrl-C mid-command: the guest dies, the session is torn down whole, and the
         user sees no traceback — just status 130, the shell's own convention."""
         self.cfg({"exec_sleep": 120})
-        proc = self.spawn(*self.run_argv())
-        self.wait_for(self.marker("exec-live"), "the guest command to start")
+        proc = self.spawn_reaching(self.run_argv, self.marker("exec-live"),
+                                   "the guest command to start")
         self.interrupt(proc)
         out, err = self.finish(proc)
         self.assert_quiet(err)
@@ -1397,8 +1445,8 @@ class InterruptTest(unittest.TestCase):
         """Ctrl-C while msb create is in flight: the half-made session is unwound —
         staging dir, port claim, half-registered sandbox, proxy — with status 130."""
         self.cfg({"create_sleep": 120})
-        proc = self.spawn(*self.run_argv())
-        self.wait_for(self.marker("create-live"), "msb create to start")
+        proc = self.spawn_reaching(self.run_argv, self.marker("create-live"),
+                                   "msb create to start")
         self.interrupt(proc)
         out, err = self.finish(proc)
         self.assert_quiet(err)
@@ -1412,8 +1460,8 @@ class InterruptTest(unittest.TestCase):
         """The impatient second Ctrl-C, landing mid-unwind: it is deferred (and said
         to be), the removal completes, and nothing is left half-removed."""
         self.cfg({"exec_sleep": 120, "rm_sleep": 1.5})
-        proc = self.spawn(*self.run_argv())
-        self.wait_for(self.marker("exec-live"), "the guest command to start")
+        proc = self.spawn_reaching(self.run_argv, self.marker("exec-live"),
+                                   "the guest command to start")
         self.interrupt(proc)
         self.wait_for(self.marker("rm-live"), "the teardown's msb rm to start")
         time.sleep(0.1)
@@ -1431,8 +1479,8 @@ class InterruptTest(unittest.TestCase):
         session still come down, and the exit is a pipe death (141), not a traceback —
         the failure that left a microVM running this evening."""
         self.cfg({"exec_spew": True})
-        proc = self.spawn(*self.run_argv())
-        self.wait_for(self.marker("exec-live"), "the guest command to start")
+        proc = self.spawn_reaching(self.run_argv, self.marker("exec-live"),
+                                   "the guest command to start")
         proc.stdout.readline()                       # the stream is flowing; now hang up
         proc.stdout.close()
         err = proc.stderr.read()
@@ -1450,8 +1498,8 @@ class InterruptTest(unittest.TestCase):
         """The terminal closing over a live run: SIGHUP must reach the finally blocks
         — status 129, session and proxy gone — not kill silkgate outright."""
         self.cfg({"exec_sleep": 120})
-        proc = self.spawn(*self.run_argv())
-        self.wait_for(self.marker("exec-live"), "the guest command to start")
+        proc = self.spawn_reaching(self.run_argv, self.marker("exec-live"),
+                                   "the guest command to start")
         self.interrupt(proc, signal.SIGHUP)
         out, err = self.finish(proc)
         self.assertEqual(proc.returncode, 129,
@@ -1462,8 +1510,8 @@ class InterruptTest(unittest.TestCase):
         """The behavior the brief calls already safe — `timeout N silkgate run` — held
         as a regression: SIGTERM exits 143 through the same unwind."""
         self.cfg({"exec_sleep": 120})
-        proc = self.spawn(*self.run_argv())
-        self.wait_for(self.marker("exec-live"), "the guest command to start")
+        proc = self.spawn_reaching(self.run_argv, self.marker("exec-live"),
+                                   "the guest command to start")
         self.interrupt(proc, signal.SIGTERM)
         out, err = self.finish(proc)
         self.assert_quiet(err)
@@ -1477,8 +1525,8 @@ class InterruptTest(unittest.TestCase):
         deaf = self.fakebin / "mitmdump"
         deaf.write_text(f"#!{sys.executable}\n{FAKE_MITMDUMP_DEAF_SRC}")
         live = Path(str(self.mitm_argv) + ".live")
-        proc = self.spawn(*self.run_argv())
-        self.wait_for(live.exists, "the fake mitmdump to start")
+        proc = self.spawn_reaching(self.run_argv, live.exists,
+                                   "the fake mitmdump to start")
         self.interrupt(proc)
         out, err = self.finish(proc)
         self.assert_quiet(err)
@@ -1495,9 +1543,8 @@ class InterruptTest(unittest.TestCase):
         in the guest until exec/attach run, after `up` returns, and a session left
         up would hide that the command failed.)"""
         self.cfg({"create_sleep": 120})
-        proc = self.spawn("up", "--name", "s1", "--image", "img",
-                          "--port", str(self.base))
-        self.wait_for(self.marker("create-live"), "msb create to start")
+        proc = self.spawn_reaching(self.up_argv, self.marker("create-live"),
+                                   "msb create to start")
         self.interrupt(proc)
         out, err = self.finish(proc)
         self.assert_quiet(err)
@@ -1509,9 +1556,8 @@ class InterruptTest(unittest.TestCase):
         interrupt here must not leave an unproven session up behind a failed
         command — the leak `up` had, since nothing here was under a finally."""
         self.cfg({"tier1_sleep": 120})
-        proc = self.spawn("up", "--name", "s1", "--image", "img",
-                          "--port", str(self.base))
-        self.wait_for(self.marker("tier1-live"), "the Tier-1 probe to start")
+        proc = self.spawn_reaching(self.up_argv, self.marker("tier1-live"),
+                                   "the Tier-1 probe to start")
         self.interrupt(proc)
         out, err = self.finish(proc)
         self.assert_quiet(err)
@@ -1523,11 +1569,10 @@ class InterruptTest(unittest.TestCase):
         """nohup's SIG_IGN is the caller declaring hangups expected; installing the
         129 handler over it would turn every hangup into a torn-down `up`."""
         self.cfg({"create_sleep": 120})
-        proc = self.spawn("up", "--name", "s1", "--image", "img",
-                          "--port", str(self.base),
-                          preexec_fn=lambda: signal.signal(signal.SIGHUP,
-                                                           signal.SIG_IGN))
-        self.wait_for(self.marker("create-live"), "msb create to start")
+        proc = self.spawn_reaching(self.up_argv, self.marker("create-live"),
+                                   "msb create to start",
+                                   preexec_fn=lambda: signal.signal(signal.SIGHUP,
+                                                                    signal.SIG_IGN))
         self.interrupt(proc, signal.SIGHUP)
         time.sleep(0.5)
         self.assertIsNone(proc.poll(), "SIGHUP killed a nohup'd silkgate")
@@ -1540,8 +1585,9 @@ class InterruptTest(unittest.TestCase):
     def test_exec_sigint_leaves_the_session_alone(self):
         sdir = self.write_session("s1", self.base)
         self.cfg({"exec_sleep": 120})
-        proc = self.spawn("exec", "s1", "--", "guestcmd")
-        self.wait_for(self.marker("exec-live"), "the exec'd command to start")
+        proc = self.spawn_reaching(lambda: ("exec", "s1", "--", "guestcmd"),
+                                   self.marker("exec-live"),
+                                   "the exec'd command to start")
         self.interrupt(proc)
         out, err = self.finish(proc)
         self.assert_quiet(err)
@@ -1553,8 +1599,9 @@ class InterruptTest(unittest.TestCase):
     def test_attach_sigint_leaves_the_session_alone(self):
         sdir = self.write_session("s1", self.base, command=["guestcmd"])
         self.cfg({"exec_sleep": 120})
-        proc = self.spawn("attach", "s1")
-        self.wait_for(self.marker("exec-live"), "the attached command to start")
+        proc = self.spawn_reaching(lambda: ("attach", "s1"),
+                                   self.marker("exec-live"),
+                                   "the attached command to start")
         self.interrupt(proc)
         out, err = self.finish(proc)
         self.assert_quiet(err)
@@ -1569,8 +1616,9 @@ class InterruptTest(unittest.TestCase):
         the command finishes what it started — exit 0, session gone."""
         sdir = self.write_session("s1", self.base)
         self.cfg({"rm_sleep": 1.5})
-        proc = self.spawn("down", "s1")
-        self.wait_for(self.marker("rm-live"), "the msb rm to start")
+        proc = self.spawn_reaching(lambda: ("down", "s1"),
+                                   self.marker("rm-live"),
+                                   "the msb rm to start")
         time.sleep(0.1)
         self.interrupt(proc)
         out, err = self.finish(proc)
