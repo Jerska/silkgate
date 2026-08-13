@@ -490,6 +490,13 @@ button:hover { border-color: var(--muted); }
 }
 
 .block-note { color: var(--muted); font-style: italic; }
+
+.block-call {
+  margin-top: var(--sp-2);
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
 .turn-error { color: var(--deny); margin-top: var(--sp-1); }
 
 .caret { color: var(--live); }

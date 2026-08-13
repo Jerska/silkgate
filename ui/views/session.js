@@ -9,7 +9,9 @@
 // no token-by-token churn — and re-renders only items whose fold `rev` moved,
 // which is what keeps an open <details> open while other items stream past.
 // LLM output, guest stdout and diffs are attacker-influenced text and reach
-// the DOM only as text nodes; tool input renders as JSON.stringify in a <pre>.
+// the DOM only as text nodes; a tool call renders as a line naming the call
+// and its salient argument, with the bash command or an over-8-line input
+// JSON in a <pre>.
 
 import { el, statusDot, renderDiff, sparkline, fmtTokens } from "../render.js";
 import { fmtBytes, fmtDur, fmtTime } from "../store.js";
@@ -45,6 +47,53 @@ export function selectBrief(briefs, selectedExec) {
 // the value reaches the DOM as a <pre> text node either way.
 export function extraText(value) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+// The input key that names each Claude Code call, keyed on the lowercased
+// tool name (the FILE_KEYS convention in timeline.js). doc/REFRESH.md
+// registers this table: the names and schemas move with the Claude Code pin,
+// and an unmapped tool degrades to compact JSON.
+const SALIENT = new Map([
+  ["bash", "command"], ["read", "file_path"], ["edit", "file_path"],
+  ["write", "file_path"], ["multiedit", "file_path"],
+  ["notebookedit", "notebook_path"], ["grep", "pattern"], ["glob", "pattern"],
+  ["webfetch", "url"], ["websearch", "query"], ["task", "description"],
+  ["skill", "skill"]]);
+
+// One tool_use block → its activity line, optional <pre> body, and whether
+// the details renders expanded. Most calls read as `Name(salient)` on one
+// line. Bash is code and often multi-line, so its command rides the <pre>,
+// visible without a click up to 8 lines; any other input keeps a collapsed
+// expander only when its pretty JSON runs past 8 lines. read and edit never
+// carry a body — the path is the whole story. Pure for the tests.
+export function toolCallView(block) {
+  const name = block.tool_name ?? "?";
+  const tool = String(block.tool_name ?? "").toLowerCase();
+  const input = block.tool_input;
+  const key = SALIENT.get(tool);
+  const salient = key !== undefined && input != null
+    && typeof input === "object" && typeof input[key] === "string"
+    && input[key] !== "" ? input[key] : null;
+  // First line of a value, capped at 120 chars; … marks a cut that dropped
+  // anything — a later line or a character past the cap.
+  const clip = (s) => {
+    const nl = s.indexOf("\n");
+    const cut = s.slice(0, nl === -1 ? 120 : Math.min(nl, 120));
+    return cut + (cut.length < s.length ? "…" : "");
+  };
+  const mark = block.truncated ? " (truncated)" : "";
+  if (tool === "bash" && salient !== null) {
+    const open = salient.split("\n").length <= 8;
+    return { line: (open ? name : `${name} ${clip(salient)}`) + mark,
+             body: salient, open };
+  }
+  const shown = input == null ? "" : clip(salient ?? JSON.stringify(input));
+  let body = null;
+  if (input != null && tool !== "read" && tool !== "edit") {
+    const pretty = JSON.stringify(input, null, 2);
+    if (pretty.split("\n").length > 8) body = pretty;
+  }
+  return { line: `${name}(${shown})${mark}`, body, open: false };
 }
 
 // The meta behind a session view, looked up fresh each call: live metas answer
@@ -214,10 +263,12 @@ export function newSessionView() {
                        `(${b.type ?? "block"} ${idx}: text evicted to stay under`
                        + " the memory cap)"));
       } else if (b.type === "tool_use") {
-        node.append(el("details", { class: "block-tool" },
-          el("summary", null, `running ${b.tool_name ?? "?"}…`
-             + (b.truncated ? " (truncated)" : "")),
-          el("pre", null, JSON.stringify(b.tool_input, null, 2) ?? "")));
+        const v = toolCallView(b);
+        node.append(v.body == null
+          ? el("div", { class: "block-call" }, v.line)
+          : el("details", { class: "block-tool", open: v.open ? "" : null },
+              el("summary", null, v.line),
+              el("pre", null, v.body)));
       } else {
         node.append(el("div", { class: "block-text" }, b.text ?? "",
                        b.truncated ? el("span", { class: "block-note" },
