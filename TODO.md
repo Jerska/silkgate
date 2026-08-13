@@ -10,8 +10,8 @@ and what parks it. Done work leaves the file — history lives in git.
 - Hide the freeze and down actions for archived sessions in the UI. The buttons
   render for sessions that no longer accept either action.
 - Make AGENTS.md import CONTRIBUTING.md instead of an instruction to read it first.
-- Make `silkgate profiles` readable. The full table needs more columns than one
-  screen fits.
+- Rewrite AGENTS.md to read standalone, with no historical context. A new reader
+  gets the current rules, not the history behind them.
 
 ## Containment proofs
 
