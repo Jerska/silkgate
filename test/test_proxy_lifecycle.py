@@ -538,6 +538,22 @@ class _FakeToolsCase(unittest.TestCase):
             raise _PortTheft(text)
         self.fail(f"{getattr(fn, '__name__', fn)} died: {text}")
 
+    def start_shared_or_theft(self, base, first):
+        """start_shared_proxy via run_or_theft, plus the theft that crashes nothing:
+        a thief binding inside the probed range between the test's probe and the
+        CLI's _find_free_pool walk just shifts the pool past the blocker, and the
+        assertions aimed at `first` fail as plain mismatches. A pool that starts
+        anywhere else is therefore interference: the started proxy is stopped and
+        _PortTheft hands the attempt back to retry_port_theft."""
+        meta = self.run_or_theft(MOD.start_shared_proxy, base)
+        _autoreap(meta["pid"])
+        self.addCleanup(self._kill_pid, meta["pid"])
+        if meta["base_port"] != first:
+            self._kill_pid(meta["pid"])
+            raise _PortTheft(f"the pool landed at {meta['base_port']}, not {first}: "
+                             f"a concurrent binder disturbed the probed range at {base}")
+        return meta
+
     def retry_port_theft(self, body):
         """Run `body` — a callable that probes its own base — up to _THEFT_ATTEMPTS
         times, retrying only the _PortTheft a concurrent binder causes (see
@@ -960,9 +976,9 @@ class LifecycleTest(_FakeToolsCase):
         def body():
             base = _free_pool_base(2 * MOD.POOL_SIZE)
             self.squat(base + 3)
-            meta = self.run_or_theft(MOD.start_shared_proxy, base)
-            _autoreap(meta["pid"])
-            self.addCleanup(self._kill_pid, meta["pid"])
+            # our own squatter shifts the pool to base + 4 on purpose; any other
+            # landing point is a concurrent binder's
+            meta = self.start_shared_or_theft(base, base + 4)
             self.assertEqual(meta["ports"],
                              list(range(base + 4, base + 4 + MOD.POOL_SIZE)),
                              "pool is not the contiguous range one past the squatter")
@@ -1011,9 +1027,25 @@ class LifecycleTest(_FakeToolsCase):
         msg = self.expect_die(MOD._find_free_pool, 65535 - MOD.POOL_SIZE + 2)
         self.assertIn("65535", msg)
         base = 65536 - MOD.POOL_SIZE          # exactly one candidate range fits
-        if not all(MOD._port_free(p) for p in range(base, 65536)):
-            self.skipTest(f"ports {base}..65535 not free here")
-        self.assertEqual(MOD._find_free_pool(base), list(range(base, 65536)))
+        # The only possible base, so a stolen port cannot be dodged with a fresh
+        # range: a walk that dies full after the pre-check saw the range free met
+        # a thief mid-walk and is retried; a die that persists is the pre-check's
+        # skip condition, seen late.
+        for _ in range(_THEFT_ATTEMPTS):
+            if not all(MOD._port_free(p) for p in range(base, 65536)):
+                self.skipTest(f"ports {base}..65535 not free here")
+            msgs = []
+            with mock.patch.object(MOD, "say", msgs.append):
+                try:
+                    pool = MOD._find_free_pool(base)
+                except SystemExit:
+                    died = "\n".join(str(m) for m in msgs)
+                    if f"no {MOD.POOL_SIZE}-port range free" in died:
+                        continue
+                    self.fail(f"_find_free_pool died: {died}")
+            self.assertEqual(pool, list(range(base, 65536)))
+            return
+        self.skipTest(f"ports {base}..65535 busy on every attempt — {died}")
 
     def test_restart_with_surviving_session_never_floats_the_pool(self):
         """A guest froze its proxy port at provision time — env URL and Tier-1
@@ -1085,9 +1117,7 @@ class LifecycleTest(_FakeToolsCase):
     def test_start_shared_proxy_binds_loopback_and_disables_rawtcp(self):
         def body():
             base = _free_pool_base(MOD.POOL_SIZE)
-            meta = self.run_or_theft(MOD.start_shared_proxy, base)
-            _autoreap(meta["pid"])
-            self.addCleanup(self._kill_pid, meta["pid"])
+            meta = self.start_shared_or_theft(base, base)
             argv = json.loads(self.mitm_argv.read_text())
             pairs = self._flag_pairs(argv)
             self.assertIn(("--set", "rawtcp=false"), pairs,
