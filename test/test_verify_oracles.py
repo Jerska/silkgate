@@ -110,7 +110,11 @@ _CANNOT_BIND = "cannot bind the"
 
 
 def _collided(text):
-    return _IN_USE in text or _CANNOT_BIND in text
+    # The third surface has a named constant already: a proxy that loses its bind after
+    # start_proxy's probe dies with the log's tail in the refusal, and sg._BIND_FAILURE
+    # is the fragment _wait_proxy_ready itself reads that tail for.
+    return (_IN_USE in text or _CANNOT_BIND in text
+            or sg._BIND_FAILURE.decode() in text.lower())
 
 
 def _bind_or_skip(action, span=1, attempts=5, pick=None):
