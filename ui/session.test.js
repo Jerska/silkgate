@@ -1,9 +1,11 @@
 // session.test.js — the pure logic behind the session detail view: the
-// meta lookup (sid→name resolution and the archived verdict). Never served,
-// never imported by served files.
+// meta lookup (sid→name resolution and the archived verdict), the brief
+// selection, and the tool-call line. Never served, never imported by
+// served files.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findMeta, extraText, selectBrief } from "./views/session.js";
+import { findMeta, extraText, selectBrief, toolCallView }
+  from "./views/session.js";
 import { triage } from "./views/overview.js";
 
 const SESSIONS = {
@@ -126,4 +128,115 @@ test("the archived verdict drives triage to archived, matching the card", () => 
     "2026-08-12T11:56:00+00:00"), now: Date.parse("2026-08-12T12:00:00+00:00") });
   assert.equal(s.state, "archived",
                "never \"waiting 4m\" for a session in the archive");
+});
+
+test("a short bash call opens with its command and drops the description", () => {
+  const v = toolCallView({ tool_name: "Bash",
+    tool_input: { command: "ls -la", description: "x" } });
+  assert.deepEqual(v, { line: "Bash", body: "ls -la", open: true });
+  assert.ok(!v.body.includes("x"), "the description never renders");
+});
+
+test("the bash boundary: 8 lines stay open, 9 collapse behind the first", () => {
+  const eight = Array.from({ length: 8 }, (_, i) => `l${i}`).join("\n");
+  const short = toolCallView({ tool_name: "Bash",
+    tool_input: { command: eight } });
+  assert.equal(short.open, true);
+  assert.equal(short.line, "Bash");
+  const nine = eight + "\nl8";
+  const v = toolCallView({ tool_name: "Bash", tool_input: { command: nine } });
+  assert.equal(v.open, false);
+  assert.equal(v.line, "Bash l0…");
+  assert.equal(v.body, nine, "the whole command still sits in the <pre>");
+});
+
+test("a bash call without a usable command takes the generic path", () => {
+  for (const tool_input of [{}, { command: "" }, { command: 42 }]) {
+    const v = toolCallView({ tool_name: "Bash", tool_input });
+    assert.equal(v.line, `Bash(${JSON.stringify(tool_input)})`);
+    assert.equal(v.body, null);
+    assert.equal(v.open, false);
+  }
+});
+
+test("read and edit stay bodyless, whatever the input holds", () => {
+  const old_string = Array.from({ length: 50 }, () => "line").join("\n");
+  for (const tool_name of ["Read", "Edit"]) {
+    const v = toolCallView({ tool_name,
+      tool_input: { file_path: "/w/a.js", old_string } });
+    assert.equal(v.line, `${tool_name}(/w/a.js)`);
+    assert.equal(v.body, null, "the path replaces the JSON body entirely");
+  }
+});
+
+test("write keeps its path line; a long pretty JSON earns a collapsed body", () => {
+  const content = Array.from({ length: 20 }, (_, i) => `l${i}`).join("\n");
+  const v = toolCallView({ tool_name: "Write",
+    tool_input: { file_path: "/workspace/x", content } });
+  assert.equal(v.line, "Write(/workspace/x)");
+  // JSON.stringify escapes the content's newlines, so 20 lines of content
+  // pretty-print as one JSON line — under the 8-line rule, no expander.
+  assert.equal(v.body, null);
+  const wide = toolCallView({ tool_name: "Write",
+    tool_input: { file_path: "/workspace/x", content, mode: "w", a: 1, b: 2,
+                  c: 3, d: 4 } });
+  assert.equal(wide.line, "Write(/workspace/x)");
+  assert.notEqual(wide.body, null);
+  assert.equal(wide.open, false);
+});
+
+test("a salient value past 120 characters is capped and marked", () => {
+  const long = "x".repeat(130);
+  const g = toolCallView({ tool_name: "Grep", tool_input: { pattern: long } });
+  assert.equal(g.line, `Grep(${"x".repeat(120)}…)`);
+  const nine = [long, ...Array.from({ length: 8 }, (_, i) => `l${i}`)].join("\n");
+  const b = toolCallView({ tool_name: "Bash", tool_input: { command: nine } });
+  assert.equal(b.line, `Bash ${"x".repeat(120)}…`);
+});
+
+test("an unmapped tool falls back to compact JSON in the parens", () => {
+  const v = toolCallView({ tool_name: "TodoWrite",
+    tool_input: { todos: [1, 2] } });
+  assert.equal(v.line, 'TodoWrite({"todos":[1,2]})');
+  assert.equal(v.body, null);
+});
+
+test("a mapped tool whose salient key is missing falls back to JSON", () => {
+  const v = toolCallView({ tool_name: "Grep", tool_input: { glob: "*.js" } });
+  assert.equal(v.line, 'Grep({"glob":"*.js"})');
+});
+
+test("a null tool_name renders as ?", () => {
+  const v = toolCallView({ tool_name: null, tool_input: { pattern: "x" } });
+  assert.equal(v.line, '?({"pattern":"x"})');
+});
+
+test("a null tool_input renders empty parens and no body", () => {
+  assert.deepEqual(toolCallView({ tool_name: "Read", tool_input: null }),
+                   { line: "Read()", body: null, open: false });
+  assert.deepEqual(toolCallView({ tool_name: "Bash" }),
+                   { line: "Bash()", body: null, open: false });
+});
+
+test("truncated appends its mark on every path", () => {
+  assert.equal(toolCallView({ tool_name: "Bash", truncated: true,
+    tool_input: { command: "ls" } }).line, "Bash (truncated)");
+  assert.equal(toolCallView({ tool_name: "Read", truncated: true,
+    tool_input: { file_path: "/w/a" } }).line, "Read(/w/a) (truncated)");
+});
+
+test("the map is case-insensitive but the name shows as it arrived", () => {
+  const v = toolCallView({ tool_name: "BASH", tool_input: { command: "ls" } });
+  assert.deepEqual(v, { line: "BASH", body: "ls", open: true });
+});
+
+test("the generic boundary: exactly 8 pretty lines means no expander", () => {
+  const eight = { pattern: "x", a: 1, b: 2, c: 3, d: 4, e: 5 };
+  assert.equal(JSON.stringify(eight, null, 2).split("\n").length, 8);
+  assert.equal(toolCallView({ tool_name: "Grep", tool_input: eight }).body,
+               null);
+  const nine = { ...eight, f: 6 };
+  const v = toolCallView({ tool_name: "Grep", tool_input: nine });
+  assert.equal(v.body, JSON.stringify(nine, null, 2));
+  assert.equal(v.open, false);
 });
