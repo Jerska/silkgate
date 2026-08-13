@@ -7,4 +7,6 @@ __pycache__/
 !.claude/
 .claude/*
 !.claude/skills/
+# Orchestrator-owned files
 BOARD.local.md
+TODO.md
