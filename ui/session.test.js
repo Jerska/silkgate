@@ -38,6 +38,38 @@ test("the sid resolves to the name the data is keyed under", () => {
   assert.equal(findMeta(SESSIONS, "a1b2c3", "a1b2c3").meta.name, "demo");
 });
 
+test("an archived meta answers by name when no sid matches", () => {
+  // A session downed while its detail view is open under its name: the live
+  // list drops the name, no archived sid equals it, and the name fallback
+  // resolves the newest archived row (the list arrives newest-first).
+  const sessions = {
+    sessions: [],
+    archived: [
+      { sid: "f7g8h9", name: "demo" },     // newer run of the same name
+      { sid: "a1b2c3", name: "demo" },
+    ],
+  };
+  const f = findMeta(sessions, "demo", "demo");
+  assert.equal(f.meta.sid, "f7g8h9", "the first match is the newest");
+  assert.equal(f.archived, true);
+});
+
+test("a live meta with the same name wins over an archived row", () => {
+  const sessions = {
+    sessions: [{ name: "demo", state: "running" }],
+    archived: [{ sid: "a1b2c3", name: "demo" }],
+  };
+  const f = findMeta(sessions, "demo", "demo");
+  assert.equal(f.meta.state, "running");
+  assert.equal(f.archived, false);
+});
+
+test("a sid match still wins over the name fallback", () => {
+  const f = findMeta(SESSIONS, "a1b2c3", "old");
+  assert.equal(f.meta.name, "demo", "the sid pass answers first");
+  assert.equal(f.archived, true);
+});
+
 test("no payload yet, or no match, answers null and not archived", () => {
   assert.deepEqual(findMeta(null, "x", "x"), { meta: null, archived: false });
   assert.deepEqual(findMeta(SESSIONS, "nope", "nope"),
