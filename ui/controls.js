@@ -65,9 +65,10 @@ export function controlVisibility(state) {
 export function newControlBar({ ident, getMeta, onChanged = () => {} }) {
   const badge = el("span", { class: "badge frozen" }, "frozen");
   const freeze = el("button", { type: "button",
-    title: "pause the VM — nothing is lost, resume continues it" }, "freeze");
+    title: "block the session's egress — the VM keeps running, resume restores it",
+  }, "freeze");
   const resume = el("button", { type: "button",
-    title: "continue the frozen VM" }, "resume");
+    title: "restore the frozen session's egress rules" }, "resume");
   const down = el("button", { type: "button",
     title: "destroy the VM — uncommitted work inside it is lost" }, "down");
   const confirmBox = el("span", { class: "ctl-confirm" });
