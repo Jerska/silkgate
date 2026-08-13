@@ -1049,11 +1049,16 @@ class OracleWiring(unittest.TestCase):
         self.assertIn(sg._VERIFY_SENTINEL, "SENTINEL-NOT-A-REAL-KEY")   # never a real key
 
     def test_close_frees_every_port_it_took(self):
-        base, oracles = _bind_or_skip(sg._VerifyOracles, span=3)
-        oracles.close()
-        oracles.close()                                # idempotent: the finally calls it again
-        for port in (base + 1, base + 2):
-            self.assertTrue(_port_free(port), f"{port} still held")
+        # A neighbor can take a just-released port before the probe reaches it — the
+        # kernel reoffers fresh releases first — so one held port proves nothing. A close
+        # that leaks holds its port on every base tried; a neighbor holds at most one.
+        for _ in range(5):
+            base, oracles = _bind_or_skip(sg._VerifyOracles, span=3)
+            oracles.close()
+            oracles.close()                            # idempotent: the finally calls it again
+            if all(_port_free(base + n) for n in (1, 2)):
+                return
+        self.fail(f"a port beside {base} still held after close, on 5 bases")
 
     def test_expectations_cover_the_recorders_own_decisions(self):
         expect = sg._audit_expectations(full=False, recorder_port=9192)
