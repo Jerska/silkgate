@@ -38,6 +38,7 @@ import json
 import multiprocessing
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -312,6 +313,10 @@ def _port_theft(text):
     return re.search(r"port \d+ is already in use", text) is not None
 
 
+class _PortTheft(Exception):
+    """A die() whose words _port_theft matched, re-raised for retry_port_theft."""
+
+
 def _ping(sock_path):
     """Whether anything answers the control protocol at sock_path."""
     try:
@@ -518,6 +523,47 @@ class _FakeToolsCase(unittest.TestCase):
             self._kill_pid(result["pid"])
         self.fail(f"{getattr(fn, '__name__', fn)} did not die")
 
+    def run_or_theft(self, fn, *args):
+        """Call fn expecting success. A die() whose words carry the port-theft
+        signature becomes _PortTheft for retry_port_theft to catch; any other die
+        fails the test outright, with everything it said as the evidence."""
+        msgs = []
+        with mock.patch.object(MOD, "say", msgs.append):
+            try:
+                return fn(*args)
+            except SystemExit:
+                pass
+        text = "\n".join(str(m) for m in msgs)
+        if _port_theft(text):
+            raise _PortTheft(text)
+        self.fail(f"{getattr(fn, '__name__', fn)} died: {text}")
+
+    def retry_port_theft(self, body):
+        """Run `body` — a callable that probes its own base — up to _THEFT_ATTEMPTS
+        times, retrying only the _PortTheft a concurrent binder causes (see
+        _port_theft). Between attempts the state the dead attempt left behind is
+        wiped, so each body starts clean and probes afresh; every assertion runs at
+        full strength on the attempt that survives."""
+        thefts = []
+        for _ in range(_THEFT_ATTEMPTS):
+            if thefts:
+                self.wipe_state()
+            try:
+                return body()
+            except _PortTheft as e:
+                thefts.append(str(e))
+        self.fail(f"a concurrent binder stole the probed port on all "
+                  f"{_THEFT_ATTEMPTS} attempts; the last death:\n{thefts[-1]}")
+
+    def wipe_state(self):
+        """Reset the temp state dir between retry_port_theft attempts: a dead
+        attempt can leave a port claim, a session dir or a proxy.json that would
+        pin a retry to the very range the thief holds."""
+        shutil.rmtree(MOD.SESSIONS_DIR, ignore_errors=True)
+        MOD.SESSIONS_DIR.mkdir()
+        MOD.PROXY_JSON.unlink(missing_ok=True)
+        MOD.PROXY_SOCK.unlink(missing_ok=True)
+
     def squat(self, port, host="127.0.0.1"):
         """A live foreign listener on `port` — what an orphaned proxy looks like."""
         s = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
@@ -602,16 +648,18 @@ class LifecycleTest(_FakeToolsCase):
     def test_pick_port_revives_proxy_stopped_under_it(self):
         """§8 lifecycle race: `down <last>` stopped the proxy after our ensure_proxy —
         picking a port must leave us with a live proxy, not a session nothing polices."""
-        base = _free_pool_base(MOD.POOL_SIZE)
-        proxy = self.proxy_meta(pid=_dead_pid(), base=base)
-        port = MOD.pick_port(proxy, "me")
-        started = MOD.read_proxy()
-        if started and started.get("pid"):
-            _autoreap(started["pid"])
-            self.addCleanup(self._kill_pid, started["pid"])
-        self.assertEqual(port, base)
-        self.assertTrue(_ping(MOD.PROXY_SOCK),
-                        "picked a port but no proxy is listening for the session")
+        def body():
+            base = _free_pool_base(MOD.POOL_SIZE)
+            proxy = self.proxy_meta(pid=_dead_pid(), base=base)
+            port = self.run_or_theft(MOD.pick_port, proxy, "me")
+            started = MOD.read_proxy()
+            if started and started.get("pid"):
+                _autoreap(started["pid"])
+                self.addCleanup(self._kill_pid, started["pid"])
+            self.assertEqual(port, base)
+            self.assertTrue(_ping(MOD.PROXY_SOCK),
+                            "picked a port but no proxy is listening for the session")
+        self.retry_port_theft(body)
 
     # -- proxy identity vs pid liveness ------------------------------------------
 
@@ -909,21 +957,23 @@ class LifecycleTest(_FakeToolsCase):
         override or manual kill is needed. The walk lands one past the blocker — the
         first fully-free POOL_SIZE range, not the next POOL_SIZE-aligned one — and
         proxy.json records the actual pool: contiguous, blocker excluded."""
-        base = _free_pool_base(2 * MOD.POOL_SIZE)
-        self.squat(base + 3)
-        meta = MOD.start_shared_proxy(base)
-        _autoreap(meta["pid"])
-        self.addCleanup(self._kill_pid, meta["pid"])
-        self.assertEqual(meta["ports"],
-                         list(range(base + 4, base + 4 + MOD.POOL_SIZE)),
-                         "pool is not the contiguous range one past the squatter")
-        self.assertNotIn(base + 3, meta["ports"],
-                         "the squatted port ended up inside the pool")
-        self.assertEqual(meta["base_port"], meta["ports"][0],
-                         "proxy.json base_port does not match the actual first port")
-        self.assertTrue(MOD.PROXY_JSON.exists())
-        MOD.stop_proxy(meta)
-        self.assertFalse(MOD.PROXY_JSON.exists())
+        def body():
+            base = _free_pool_base(2 * MOD.POOL_SIZE)
+            self.squat(base + 3)
+            meta = self.run_or_theft(MOD.start_shared_proxy, base)
+            _autoreap(meta["pid"])
+            self.addCleanup(self._kill_pid, meta["pid"])
+            self.assertEqual(meta["ports"],
+                             list(range(base + 4, base + 4 + MOD.POOL_SIZE)),
+                             "pool is not the contiguous range one past the squatter")
+            self.assertNotIn(base + 3, meta["ports"],
+                             "the squatted port ended up inside the pool")
+            self.assertEqual(meta["base_port"], meta["ports"][0],
+                             "proxy.json base_port does not match the actual first port")
+            self.assertTrue(MOD.PROXY_JSON.exists())
+            MOD.stop_proxy(meta)
+            self.assertFalse(MOD.PROXY_JSON.exists())
+        self.retry_port_theft(body)
 
     def test_port_free_sees_an_ipv6_only_squatter(self):
         """_port_free asks every bind address, so a listener holding only ::1 — half
@@ -994,24 +1044,33 @@ class LifecycleTest(_FakeToolsCase):
         """The healthy half of the pinning rule: with the recorded pool still free,
         a restart under a surviving session lands exactly where the record says —
         proxy.json after equals proxy.json before, port for port."""
-        base = _free_pool_base(2 * MOD.POOL_SIZE)
-        old = self.proxy_meta(pid=_dead_pid(), base=base)
-        self.write_session("kept", base + 2)
-        meta = MOD.ensure_proxy(base + 1)     # a drifted scan floor must not matter
-        _autoreap(meta["pid"])
-        self.addCleanup(self._kill_pid, meta["pid"])
-        self.assertEqual(meta["ports"], old["ports"],
-                         "restart did not reuse the pool the session was claimed from")
+        def body():
+            base = _free_pool_base(2 * MOD.POOL_SIZE)
+            old = self.proxy_meta(pid=_dead_pid(), base=base)
+            self.write_session("kept", base + 2)
+            # a drifted scan floor must not matter
+            meta = self.run_or_theft(MOD.ensure_proxy, base + 1)
+            _autoreap(meta["pid"])
+            self.addCleanup(self._kill_pid, meta["pid"])
+            self.assertEqual(meta["ports"], old["ports"],
+                             "restart did not reuse the pool the session was claimed from")
+        self.retry_port_theft(body)
 
     def test_bind_failure_surfaces_from_the_log(self):
         """A mitmdump that loses its bind reports it only inside the log file (stdout
         and stderr both point there). The readiness loop must read it and fail fast,
         naming the failure — not wait out the timeout, and never report ready."""
         self.install_mitmdump(FAKE_MITMDUMP_BINDLESS_SRC)
-        port = _free_pool_base(1)
-        msg = self.expect_die(MOD.start_proxy, RULE, port)
-        self.assertIn("address already in use", msg,
-                      "the bind error stayed buried in the log file")
+        def body():
+            port = _free_pool_base(1)
+            msg = self.expect_die(MOD.start_proxy, RULE, port)
+            if _port_theft(msg):
+                # the pre-spawn probe met a thief and refused, so the bindless fake
+                # never ran; the die under test is the log scan's, on a fresh port
+                raise _PortTheft(msg)
+            self.assertIn("address already in use", msg,
+                          "the bind error stayed buried in the log file")
+        self.retry_port_theft(body)
 
     def test_wait_control_sock_verifies_the_owner(self):
         """Given a pid, the control-socket wait accepts only that process answering:
@@ -1024,75 +1083,81 @@ class LifecycleTest(_FakeToolsCase):
     # -- proxy entry points: bind address and rawtcp (§2, §3) ----------------------
 
     def test_start_shared_proxy_binds_loopback_and_disables_rawtcp(self):
-        base = _free_pool_base(MOD.POOL_SIZE)
-        meta = MOD.start_shared_proxy(base)
-        _autoreap(meta["pid"])
-        self.addCleanup(self._kill_pid, meta["pid"])
-        argv = json.loads(self.mitm_argv.read_text())
-        pairs = self._flag_pairs(argv)
-        self.assertIn(("--set", "rawtcp=false"), pairs,
-                      "raw-TCP fallback left on: an unparsable CONNECT becomes a tunnel")
-        modes = [m.split("@", 1)[1] for f, m in pairs if f == "--mode"]
-        for port in range(base, base + MOD.POOL_SIZE):
+        def body():
+            base = _free_pool_base(MOD.POOL_SIZE)
+            meta = self.run_or_theft(MOD.start_shared_proxy, base)
+            _autoreap(meta["pid"])
+            self.addCleanup(self._kill_pid, meta["pid"])
+            argv = json.loads(self.mitm_argv.read_text())
+            pairs = self._flag_pairs(argv)
+            self.assertIn(("--set", "rawtcp=false"), pairs,
+                          "raw-TCP fallback left on: an unparsable CONNECT becomes a tunnel")
+            modes = [m.split("@", 1)[1] for f, m in pairs if f == "--mode"]
+            for port in range(base, base + MOD.POOL_SIZE):
+                for addr in ("127.0.0.1", "::1"):
+                    self.assertIn(f"{addr}:{port}", modes,
+                                  "every pool port needs both loopback families: a guest "
+                                  "resolves the host alias to its IPv6 address first")
+            self.assertEqual(len(modes), MOD.POOL_SIZE * 2,
+                             "a bind beyond the two loopbacks would widen the exposure")
+            # Both families must actually accept, not merely appear in the argv: a guest
+            # resolves the host alias to its IPv6 address first, so a v4-only listener is
+            # reached by nothing that trusts getaddrinfo's ordering.
             for addr in ("127.0.0.1", "::1"):
-                self.assertIn(f"{addr}:{port}", modes,
-                              "every pool port needs both loopback families: a guest "
-                              "resolves the host alias to its IPv6 address first")
-        self.assertEqual(len(modes), MOD.POOL_SIZE * 2,
-                         "a bind beyond the two loopbacks would widen the exposure")
-        # Both families must actually accept, not merely appear in the argv: a guest
-        # resolves the host alias to its IPv6 address first, so a v4-only listener is
-        # reached by nothing that trusts getaddrinfo's ordering.
-        for addr in ("127.0.0.1", "::1"):
-            with socket.create_connection((addr, base), timeout=2):
-                pass
-        lan = _lan_ip()
-        if lan:
-            with self.assertRaises(OSError, msg=f"pool port reachable via LAN addr {lan}"):
-                socket.create_connection((lan, base), timeout=2).close()
-        MOD.stop_proxy(meta)
-        self.assertFalse(MOD.PROXY_JSON.exists())
+                with socket.create_connection((addr, base), timeout=2):
+                    pass
+            lan = _lan_ip()
+            if lan:
+                with self.assertRaises(OSError, msg=f"pool port reachable via LAN addr {lan}"):
+                    socket.create_connection((lan, base), timeout=2).close()
+            MOD.stop_proxy(meta)
+            self.assertFalse(MOD.PROXY_JSON.exists())
+        self.retry_port_theft(body)
 
     def test_start_shared_proxy_events_file(self):
         """meta["events"] exists, its stamp matches the log's, and the events env var reaches the child."""
-        base = _free_pool_base(MOD.POOL_SIZE)
-        meta = MOD.start_shared_proxy(base)
-        _autoreap(meta["pid"])
-        self.addCleanup(self._kill_pid, meta["pid"])
+        def body():
+            base = _free_pool_base(MOD.POOL_SIZE)
+            meta = self.run_or_theft(MOD.start_shared_proxy, base)
+            _autoreap(meta["pid"])
+            self.addCleanup(self._kill_pid, meta["pid"])
 
-        # meta must carry the events path
-        self.assertIn("events", meta, "start_shared_proxy must add 'events' to proxy.json")
-        log_name = Path(meta["log"]).name          # proxy-STAMP.log
-        events_name = Path(meta["events"]).name    # events-STAMP.jsonl
-        log_stamp = log_name[len("proxy-"):-len(".log")]
-        events_stamp = events_name[len("events-"):-len(".jsonl")]
-        self.assertEqual(events_stamp, log_stamp, "events stamp must match the log stamp")
+            # meta must carry the events path
+            self.assertIn("events", meta, "start_shared_proxy must add 'events' to proxy.json")
+            log_name = Path(meta["log"]).name          # proxy-STAMP.log
+            events_name = Path(meta["events"]).name    # events-STAMP.jsonl
+            log_stamp = log_name[len("proxy-"):-len(".log")]
+            events_stamp = events_name[len("events-"):-len(".jsonl")]
+            self.assertEqual(events_stamp, log_stamp, "events stamp must match the log stamp")
 
-        # SILKGATE_EGRESS_EVENTS_FILE must have reached the child
-        env_file = Path(self.mitm_argv.parent, self.mitm_argv.name + ".env")
-        self.assertTrue(env_file.exists(), "the fake mitmdump did not record its environment")
-        child_env = json.loads(env_file.read_text())
-        self.assertEqual(child_env.get("SILKGATE_EGRESS_EVENTS_FILE"), meta["events"])
+            # SILKGATE_EGRESS_EVENTS_FILE must have reached the child
+            env_file = Path(self.mitm_argv.parent, self.mitm_argv.name + ".env")
+            self.assertTrue(env_file.exists(), "the fake mitmdump did not record its environment")
+            child_env = json.loads(env_file.read_text())
+            self.assertEqual(child_env.get("SILKGATE_EGRESS_EVENTS_FILE"), meta["events"])
 
-        MOD.stop_proxy(meta)
+            MOD.stop_proxy(meta)
+        self.retry_port_theft(body)
 
     def test_start_proxy_binds_loopback_and_disables_rawtcp(self):
-        port = _free_pool_base(1)
-        proc, _log = MOD.start_proxy(RULE, port)
-        self.addCleanup(self._kill, proc)
-        argv = json.loads(self.mitm_argv.read_text())
-        pairs = self._flag_pairs(argv)
-        self.assertIn(("--set", "rawtcp=false"), pairs)
-        modes = [m.split("@", 1)[1] for f, m in pairs if f == "--mode"]
-        self.assertEqual(sorted(modes), sorted([f"127.0.0.1:{port}", f"::1:{port}"]))
-        for addr in ("127.0.0.1", "::1"):
-            with socket.create_connection((addr, port), timeout=2):
-                pass
-        lan = _lan_ip()
-        if lan:
-            with self.assertRaises(OSError, msg=f"verify proxy reachable via LAN addr {lan}"):
-                socket.create_connection((lan, port), timeout=2).close()
-        MOD.stop(proc)
+        def body():
+            port = _free_pool_base(1)
+            proc, _log = self.run_or_theft(MOD.start_proxy, RULE, port)
+            self.addCleanup(self._kill, proc)
+            argv = json.loads(self.mitm_argv.read_text())
+            pairs = self._flag_pairs(argv)
+            self.assertIn(("--set", "rawtcp=false"), pairs)
+            modes = [m.split("@", 1)[1] for f, m in pairs if f == "--mode"]
+            self.assertEqual(sorted(modes), sorted([f"127.0.0.1:{port}", f"::1:{port}"]))
+            for addr in ("127.0.0.1", "::1"):
+                with socket.create_connection((addr, port), timeout=2):
+                    pass
+            lan = _lan_ip()
+            if lan:
+                with self.assertRaises(OSError, msg=f"verify proxy reachable via LAN addr {lan}"):
+                    socket.create_connection((lan, port), timeout=2).close()
+            MOD.stop(proc)
+        self.retry_port_theft(body)
 
     def test_modes_place_one_listener_per_bind_address(self):
         """A mode spec is the only way to bind more than one address, and its grammar
