@@ -8,5 +8,4 @@ __pycache__/
 .claude/*
 !.claude/skills/
 # Orchestrator-owned files
-BOARD.local.md
-TODO.local.md
+.orchestration/
