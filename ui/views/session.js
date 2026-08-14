@@ -97,6 +97,23 @@ export function toolCallView(block) {
   return { line: `${name}(${shown})${mark}`, payload, json, open };
 }
 
+// A turn's error as readable text. Capture stores the turn_end error field
+// verbatim: an object `{type, message}` with either half a string or null.
+// That known shape joins its string halves with ": "; a plain string returns
+// as it is; any other shape prints as JSON — verbatim beats a guess for a
+// shape this view does not know. Pure for the tests; the result reaches the
+// DOM only as a text node, since the message is upstream-influenced.
+export function errorText(err) {
+  if (typeof err === "string") return err;
+  if (err !== null && typeof err === "object" && !Array.isArray(err)
+      && Object.keys(err).every((k) => k === "type" || k === "message")) {
+    const parts = [err.type, err.message]
+      .filter((v) => typeof v === "string" && v !== "");
+    if (parts.length > 0) return parts.join(": ");
+  }
+  return JSON.stringify(err);
+}
+
 // The meta behind a session view, looked up fresh each call: live metas answer
 // by name, archived metas by the sid the overview links with, then by name.
 // The name fallback covers a session downed while its detail view is open
@@ -281,8 +298,12 @@ export function newSessionView() {
                                         " (truncated)") : null));
       }
     }
+    // An SSE error event before message_start ends a turn that never
+    // started, so the header's "model?" and "—" placeholders above this
+    // line are honest absent data, not a defect.
     if (t.error) {
-      node.append(el("div", { class: "turn-error" }, `error: ${t.error}`));
+      node.append(el("div", { class: "turn-error" },
+                     `error: ${errorText(t.error)}`));
     }
     if (t.incomplete) {
       node.append(el("div", { class: "turn-error" }, "incomplete turn"));

@@ -1,10 +1,10 @@
 // session.test.js — the pure logic behind the session detail view: the
 // meta lookup (sid→name resolution and the archived verdict), the brief
-// selection, and the tool-call line. Never served, never imported by
-// served files.
+// selection, the tool-call line, and the turn error text. Never served,
+// never imported by served files.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findMeta, extraText, selectBrief, toolCallView }
+import { findMeta, extraText, selectBrief, toolCallView, errorText }
   from "./views/session.js";
 import { triage } from "./views/overview.js";
 
@@ -283,4 +283,32 @@ test("open is false whenever the payload is null, whatever the JSON size", () =>
   assert.equal(v.payload, null);
   assert.equal(v.open, false);
   assert.ok(v.json.split("\n").length > 8, "size never drives open");
+});
+
+test("the turn_end error object renders as type: message", () => {
+  assert.equal(errorText({ type: "overloaded_error", message: "Overloaded" }),
+               "overloaded_error: Overloaded");
+});
+
+test("a string error returns verbatim", () => {
+  assert.equal(errorText("connection reset"), "connection reset");
+});
+
+test("a null or missing half drops out of the error text", () => {
+  assert.equal(errorText({ type: "overloaded_error", message: null }),
+               "overloaded_error");
+  assert.equal(errorText({ message: "Overloaded" }), "Overloaded");
+});
+
+test("an error object with an extra key prints verbatim as JSON", () => {
+  const err = { type: "api_error", message: "boom", code: 529 };
+  assert.equal(errorText(err), JSON.stringify(err));
+});
+
+test("an unknown error shape prints verbatim as JSON", () => {
+  assert.equal(errorText({}), "{}");
+  assert.equal(errorText({ type: null, message: null }),
+               '{"type":null,"message":null}');
+  assert.equal(errorText(["a", "b"]), '["a","b"]');
+  assert.equal(errorText(42), "42");
 });
