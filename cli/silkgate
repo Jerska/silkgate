@@ -3121,6 +3121,10 @@ def cmd_run(args):
     cmd = _strip_cmd_sep(args.cmd) or profile_command(profiles)
     if not cmd:
         die("nothing to run — pass a command after -- (or --with a profile that names one)")
+    name = args.name or uuid4().hex[:6]
+    _validate_name(name)
+    if session_dir(name).exists():
+        die(f"session {name!r} already exists")
     # The ask is well-formed; now the whole toolchain shortfall in one report, before any
     # host process. An explicit --image is run as-is, never built, so docker is not its
     # business.
@@ -3133,7 +3137,6 @@ def cmd_run(args):
         spec = _checkout_spec(args.checkout, profiles, args.env)
     else:
         spec = None
-    name = uuid4().hex[:6]
     vmounts = _mount_args(args.mount, allow_git_dir=args.allow_git_dir)
     mounts = [f"{host}:{guest}:{mode}" for host, guest, mode in vmounts]
     ws = None
@@ -6103,6 +6106,7 @@ def main():
     default_cpus = str(max(1, (os.cpu_count() or 2) // 2))
 
     p = sub.add_parser("run", help="run an egress-locked guest behind the proxy")
+    p.add_argument("--name", metavar="N", help="session name (default: random 6-char id)")
     profile_opts(p)
     p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
                    help="shared-proxy scan floor when this command starts it: the pool "
