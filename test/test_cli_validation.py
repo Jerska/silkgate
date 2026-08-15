@@ -1335,6 +1335,28 @@ class GitRepoCase(CliCase):
             os.chdir(old)
 
 
+class TestRunName(GitRepoCase):
+    """run --name mirrors up --name: the name is resolved, validated, and checked for a
+    collision before preflight, so a bad name fails before any host process starts."""
+
+    def test_name_reaches_provision(self):
+        seen = self.provision_capture(["run", "--name", "rn1", "--", "true"])
+        self.assertEqual(seen["name"], "rn1")
+
+    def test_invalid_name_dies_before_preflight(self):
+        preflight = mock.Mock()
+        with mock.patch.object(sg, "preflight", preflight), \
+                mock.patch.object(sys, "argv",
+                                  ["silkgate", "run", "--name", "a b", "--", "true"]):
+            self.refuses("invalid session name", sg.main)
+        preflight.assert_not_called()
+
+    def test_live_session_name_is_refused(self):
+        sg.session_dir("rn2").mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sg.session_dir("rn2"), True)
+        self.argv_refuses("already exists", ["run", "--name", "rn2", "--", "true"])
+
+
 class TestBranchGuards(GitRepoCase):
     """--branch: what run/up refuse before any host process, and the derived-workspace locks."""
 
