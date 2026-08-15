@@ -83,7 +83,7 @@ key.**
   report. Do not launch a task whose matching requests will all be denied.
 - The guest's own `ANTHROPIC_API_KEY` is a dummy that the claude profile bakes in. The
   proxy's CA is in the guest's trust store. That combination is what makes the
-  interception work. Check it with `run --with claude -- printenv ANTHROPIC_API_KEY`. If
+  interception work. Check it with `run --name keycheck --with claude -- printenv ANTHROPIC_API_KEY`. If
   a run dies on a TLS or auth error rather than a 403, suspect that layer.
 - The audit log records the proxy's decisions about requests. It never records request
   bodies, and never the injected credential, which is spent upstream, not written.
@@ -117,8 +117,13 @@ If the first run with a new profile set stalls, allow a minute for that build be
 suspect a hang. Later runs with the same profiles reuse the image and start in under a
 second.
 
+Give every invocation that creates a sandbox a `--name`. The audit log, the journal,
+and the archive carry the name, and an unnamed sandbox is hard to attribute. The
+requirement covers `run` and `up` both.
+
 ```sh
 ./cli/silkgate run \
+    --name fix-tests \
     --with node@22.11.0 \
     --with claude \
     -v ./test/mock:/workspace:rw \
@@ -151,14 +156,14 @@ the guest's report, not evidence.**
   yourself in a fresh sandbox and read that exit code:
 
   ```sh
-  ./cli/silkgate run --with node@22.11.0 -v ./test/mock:/workspace:rw -- node --test
+  ./cli/silkgate run --name check-tests --with node@22.11.0 -v ./test/mock:/workspace:rw -- node --test
   ```
 
   That run needs no claude profile and no secret — the smallest policy that can answer
   the question. To check a harvested branch, point a disposable checkout at it:
 
   ```sh
-  ./cli/silkgate run --with git --with node@22.11.0 --checkout agent/fix-tests -- node --test
+  ./cli/silkgate run --name check-branch --with git --with node@22.11.0 --checkout agent/fix-tests -- node --test
   ```
 - The workspace diff is the deliverable. Review it on the host before you push. Check
   that only what you expected changed, and that no test got weakened to pass. If a
