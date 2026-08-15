@@ -25,6 +25,13 @@ The runner refuses to start when SHARDS and discovery disagree, so a new test
 file must be named in SHARDS before the runner accepts it. SHARDS is
 python-only. A plain `python3 -m unittest discover -s test` still runs the
 identical python tests, unsharded, without the ui suite.
+
+Concurrent invocations on one host coexist: each run claims one of 8
+concurrency slots (a held bind on a port in 22900..22907) and shifts its
+free-port scan floors by the slot, so up to 8 runs scan pairwise-disjoint
+port ranges. The tested target is 4 concurrent invocations, all green. A
+test module that reads TESTS_PORT_FLOOR must be named in PORT_MODULES, or
+concurrent runs scan overlapping ranges again.
 """
 
 import argparse
@@ -32,6 +39,7 @@ import glob
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -43,8 +51,8 @@ from concurrent.futures import ThreadPoolExecutor
 # Rebalance by moving entries between shards. The three rest-* shards hold
 # small tests balanced by test count instead: on macOS their cost is per-test
 # process spawn overhead (~35 ms each), not the seconds measured here. The
-# test_proxy_lifecycle shards need the disjoint port floors run_shard_process
-# passes (see port_floor below).
+# shards that hold a PORT_MODULES entry need the disjoint port floors
+# run_shard_process passes (see port_floor below).
 SHARDS = {
     "guest-probe": ["test_verify_oracles.GuestProbeScript"],  # ~10 s, the
     # floor: one test waits out a 10 s silent proxy, irreducible by design
@@ -72,6 +80,12 @@ SHARDS = {
         "test_ui",
     ],
 }
+
+# The modules whose tests scan for free ports from TESTS_PORT_FLOOR. The
+# shards that hold their entries are the port shards, and each gets its own
+# floor from port_floor. A module that reads TESTS_PORT_FLOOR must be named
+# here, or concurrent runs scan overlapping ranges.
+PORT_MODULES = {"test_proxy_lifecycle"}
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SUMMARY_MARK = "TESTS-SUMMARY "
@@ -177,25 +191,88 @@ def run_shard(name):
     sys.exit(0 if result.wasSuccessful() else 1)
 
 
-def port_floor(name):
-    """A disjoint free-port scan floor for each shard worker.
+def claim_slot():
+    """Claim one of the 8 concurrency slots, or exit 2 when all are held.
+
+    Each invocation binds 127.0.0.1:22900+slot, no SO_REUSEADDR, no listen:
+    the bare bind is the lock. The caller holds the socket until the process
+    exits, so the OS frees the slot on any exit, a crash included. The slot
+    shifts every floor port_floor derives, which keeps concurrent
+    invocations on pairwise-disjoint port ranges. When all 8 slots are held
+    the run refuses loud before any test starts, like the SHARDS gate, and
+    never shares a range silently.
+    """
+    for slot in range(8):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", 22900 + slot))
+        except OSError:
+            sock.close()
+            continue
+        return slot, sock
+    print(
+        "tests.py: no free concurrency slot (ports 22900..22907 all held)",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def port_shards():
+    """The shards that hold a PORT_MODULES entry, in SHARDS order.
+
+    A module named in PORT_MODULES that no SHARDS entry matches is a stale
+    declaration, and it kills the run before any test starts, like the
+    discovery gate.
+    """
+    modules = {e.split(".")[0] for entries in SHARDS.values() for e in entries}
+    stale = sorted(PORT_MODULES - modules)
+    if stale:
+        print(
+            "tests.py: PORT_MODULES names "
+            + ", ".join(repr(m) for m in stale)
+            + " but no SHARDS entry matches",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return [
+        name
+        for name, entries in SHARDS.items()
+        if any(e.split(".")[0] in PORT_MODULES for e in entries)
+    ]
+
+
+def port_floor(name, slot):
+    """A disjoint free-port scan floor for each port shard worker.
 
     test_proxy_lifecycle probes free-port ranges bind-then-release, so two
     workers scanning from one floor can both see a range free before either
-    binds it for real. Each worker gets its own floor through
-    TESTS_PORT_FLOOR (honored by that module's _free_pool_base), which is
-    what lets InterruptTest run in a shard apart from the rest of the module.
+    binds it for real. Each port shard worker gets its own floor through
+    TESTS_PORT_FLOOR (honored by that module's _free_pool_base), and the
+    invocation's slot shifts the floors so up to 8 concurrent runs scan
+    pairwise-disjoint ranges:
+
+        23500 + 4000 * port_shard_index + 500 * slot
+
+    The 500-port lane holds five scan windows for the worst 80-port pool
+    request, and the 4000-port block holds the 8 slot lanes of one port
+    shard. The base is 23500, not the consumer default 23000, so an
+    unsharded `python3 -m unittest` run keeps its own lane below every
+    sharded one. The top floor is 31000, far below the parked verification
+    floors at 41000, 47000, and 53000 and the consumer's 60000 ceiling.
     """
-    return 23000 + 2000 * list(SHARDS).index(name)
+    return 23500 + 4000 * port_shards().index(name) + 500 * slot
 
 
-def run_shard_process(name):
+def run_shard_process(name, slot):
+    env = None  # every non-port shard inherits the parent environment as is
+    if name in port_shards():
+        env = dict(os.environ, TESTS_PORT_FLOOR=str(port_floor(name, slot)))
     return subprocess.run(
         [sys.executable, os.path.abspath(__file__), "--shard", name],
         capture_output=True,
         text=True,
         cwd=ROOT,
-        env=dict(os.environ, TESTS_PORT_FLOOR=str(port_floor(name))),
+        env=env,
     )
 
 
@@ -259,6 +336,9 @@ def main():
     if args.workers < 1:
         parser.error("--workers must be at least 1")
 
+    # slot_lock is the held bind that claims this run's concurrency slot.
+    # It stays open until the process exits, on any path.
+    slot, slot_lock = claim_slot()
     shrink_poll_interval()
     assignment = assign(discover())
     node_files = node_test_files()
@@ -269,13 +349,16 @@ def main():
     jobs = len(SHARDS) + (1 if node else 0)
     print(
         f"tests.py: {len(assignment)} tests in {len(SHARDS)} shards "
-        f"plus the node ui suite, workers={min(args.workers, jobs)}"
+        f"plus the node ui suite, workers={min(args.workers, jobs)}, "
+        f"slot={slot}"
     )
 
     start = time.monotonic()
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         node_future = pool.submit(run_node_process, node_files) if node else None
-        procs = dict(zip(SHARDS, pool.map(run_shard_process, SHARDS)))
+        procs = dict(
+            zip(SHARDS, pool.map(lambda name: run_shard_process(name, slot), SHARDS))
+        )
     wall = time.monotonic() - start
 
     failed = False
