@@ -226,7 +226,7 @@ class Profile:
     """One resolved `--with name[@version][:arg]`: its files, version, arg, metadata."""
 
     __slots__ = ("name", "version", "arg", "arg_pattern", "dir", "conf", "rules", "setup",
-                 "env", "context", "packages")
+                 "env", "context", "packages", "guest_credentials")
 
     def __init__(self, name, version=None, arg=None):
         self.name, self.dir = name, PROFILE_DIR / name
@@ -239,6 +239,17 @@ class Profile:
         self.env = _read_if(self.dir / "env")
         self.context = _read_if(self.dir / "context.md")
         self.packages = [t for t in re.split(r"[,\s]+", self.conf.get("packages", "")) if t]
+        # header -> the `KEY=VALUE` pair whose client sends that header; see
+        # _guest_credential_env. Checked at load, so `profiles` lists a defect too.
+        self.guest_credentials = {k.partition(".")[2].lower(): v for k, v in self.conf.items()
+                                  if k.startswith("guest_credential.")}
+        if self.conf.get("guest_credential") and not self.guest_credentials:
+            die(f"profile {name!r}: guest_credential names a secret but no "
+                "guest_credential.<header> line says what the guest holds")
+        for header, pair in self.guest_credentials.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S+", pair):
+                die(f"profile {name!r}: guest_credential.{header} must be KEY=VALUE, "
+                    f"got {pair!r}")
         default = self.conf.get("default_version")
         if version and not default:
             die(f"profile {name!r} takes no version (it installs nothing versioned)")
@@ -1920,6 +1931,30 @@ def _push_secrets(ruleset, session):
                     "session": session})
 
 
+def _guest_credential_env(profiles):
+    """The dummy credential each profile plants in its guest, as `KEY=VALUE` env pairs.
+
+    The proxy replaces only a header the guest already sends, so the guest must send the
+    header the host secret names. A profile's `guest_credential = <secret>` names that
+    secret, and each `guest_credential.<header>` line gives the env pair whose client sends
+    <header>. The host secret's header picks the line. An absent, malformed, or unlisted
+    secret falls back to the first line, so the guest still sends a header the proxy can
+    deny with the real reason in the audit record. Only the header's name decides: no part
+    of the secret's value reaches the guest.
+    """
+    env = []
+    for p in profiles:
+        name = p.conf.get("guest_credential")
+        if not name:
+            continue
+        choices = p.guest_credentials
+        value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{name.upper()}")
+        parsed = _parse_secret(value) if value else None
+        header = parsed[0].lower() if parsed else None
+        env.append(choices.get(header, next(iter(choices.values()))))
+    return env
+
+
 # --- msb session guests -----------------------------------------------------
 
 def _msb():
@@ -3148,7 +3183,8 @@ def cmd_run(args):
     image = ensure_image(profiles, args.image, base=args.base)
     proxy_was_running = _proxy_running()        # --port is the base port iff WE start it
     rc, provisioned, branch_ready, proxy = 1, False, False, None
-    create_env = list(args.env) + (list(_BRANCH_ENV) if args.branch else [])
+    create_env = (_guest_credential_env(profiles) + list(args.env)
+                  + (list(_BRANCH_ENV) if args.branch else []))
     try:
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)
@@ -3458,7 +3494,8 @@ def cmd_up(args):
         mounts += _checkout_workspace(spec)
     image = ensure_image(profiles, args.image, base=args.base)
     provisioned = False
-    create_env = list(args.env) + (list(_BRANCH_ENV) if args.branch else [])
+    create_env = (_guest_credential_env(profiles) + list(args.env)
+                  + (list(_BRANCH_ENV) if args.branch else []))
     try:
         proxy = ensure_proxy(args.port)
         port = pick_port(proxy, name)

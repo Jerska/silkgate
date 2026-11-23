@@ -899,6 +899,58 @@ class TestEmptyAllowlist(CliCase):
         self.assertIn("`api.anthropic.com/v1/**`", listed)
 
 
+class TestGuestCredential(ArgProfileCase):
+    """The guest's dummy credential follows the header the host secret names, since the
+    proxy swaps only a header the guest already sends. No part of the value crosses."""
+
+    API_KEY = "ANTHROPIC_API_KEY=sk-ant-DUMMY-replaced-by-egress-proxy"
+    OAUTH = "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-DUMMY-replaced-by-egress-proxy"
+
+    def env_for(self, secret):
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("SILKGATE_EGRESS_SECRET_")}
+        if secret is not None:
+            env["SILKGATE_EGRESS_SECRET_ANTHROPIC"] = secret
+        with mock.patch.dict(os.environ, env, clear=True):
+            return sg._guest_credential_env([sg.Profile("claude")])
+
+    def test_an_api_key_secret_plants_a_dummy_api_key(self):
+        self.assertEqual(self.env_for("x-api-key: sk-ant-api03-real"), [self.API_KEY])
+
+    def test_an_authorization_secret_plants_a_dummy_oauth_token(self):
+        self.assertEqual(self.env_for("Authorization: Bearer sk-ant-oat01-real"),
+                         [self.OAUTH])
+
+    def test_an_absent_malformed_or_unlisted_secret_plants_the_first_line(self):
+        for secret in (None, "no-colon-here", "x-other: value"):
+            with self.subTest(secret=secret):
+                self.assertEqual(self.env_for(secret), [self.API_KEY])
+
+    def test_the_secret_value_never_reaches_the_guest_env(self):
+        env = self.env_for("Authorization: Bearer sk-ant-oat01-real-value")
+        self.assertNotIn("real-value", " ".join(env))
+
+    def test_the_image_env_holds_no_credential(self):
+        """A baked ANTHROPIC_API_KEY would outrank CLAUDE_CODE_OAUTH_TOKEN in the guest
+        and could never be unset at launch."""
+        self.assertNotIn("ANTHROPIC_API_KEY", sg.Profile("claude").env)
+
+    def test_a_profile_without_the_key_plants_nothing(self):
+        self.profile_dir({"plain": {"profile.conf": "description = x\n"}})
+        self.assertEqual(sg._guest_credential_env([sg.Profile("plain")]), [])
+
+    def test_a_secret_name_without_header_lines_is_refused_at_load(self):
+        self.profile_dir({"bad": {"profile.conf": "guest_credential = anthropic\n"}})
+        with self.assertRaises(SystemExit):
+            sg.Profile("bad")
+
+    def test_a_header_line_that_is_not_key_value_is_refused_at_load(self):
+        self.profile_dir({"bad": {"profile.conf": "guest_credential = anthropic\n"
+                                                  "guest_credential.x-api-key = nope\n"}})
+        with self.assertRaises(SystemExit):
+            sg.Profile("bad")
+
+
 class TestSecretValidation(CliCase):
     """Launch-time secret checks: check_secrets validates values, not just presence;
     the session comes up even when secrets are missing or malformed; cmd_secret_set

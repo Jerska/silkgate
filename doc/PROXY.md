@@ -92,6 +92,13 @@ it over the control socket with `set_secret`, with the session name attached. Th
 it in an in-memory dict keyed by session, and `inject_auth=<name>` resolves only within the
 session the request arrived for.
 
+The guest holds a dummy that sends the header the secret names, because the proxy only
+replaces a header the guest sends. A profile's `guest_credential` lines in `profile.conf`
+map each header to the env pair that `up` sets in the guest. The claude profile maps
+`x-api-key` to a dummy `ANTHROPIC_API_KEY` and `authorization` to a dummy
+`CLAUDE_CODE_OAUTH_TOKEN`. Only the header's name decides, and no part of the value enters
+the guest (`TestGuestCredential` in `test/test_cli_validation.py`).
+
 Four properties, each pinned in `test/test_addon.py`:
 
 - A later session cannot spend a key an earlier session pushed

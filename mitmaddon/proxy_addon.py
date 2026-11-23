@@ -626,10 +626,12 @@ _SECRET_PATTERNS = [(name, re.compile(pattern)) for name, pattern in (
 )]
 
 # The guest environment deliberately holds dummy credentials the proxy swaps at the
-# boundary (profiles/claude/env), and agents echo their env — so the dummy would light
-# up the anthropic pattern on every transcript. Exact matched-text only, never a
-# prefix: a real key that merely starts like a dummy must still be sighted.
-_SECRET_ALLOWLIST = frozenset({"sk-ant-DUMMY-replaced-by-egress-proxy"})
+# boundary (guest_credential in profiles/claude/profile.conf), and agents echo their
+# env — so a dummy would light up the anthropic pattern on every transcript. Exact
+# matched-text only, never a prefix: a real key that merely starts like a dummy must
+# still be sighted.
+_SECRET_ALLOWLIST = frozenset({"sk-ant-DUMMY-replaced-by-egress-proxy",
+                               "sk-ant-oat01-DUMMY-replaced-by-egress-proxy"})
 
 # Every shape above needs one of these literals somewhere in its match, so _redact
 # skips a pattern's pass after one C-speed substring test — the passes run on the

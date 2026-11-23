@@ -341,13 +341,16 @@ class Sightings(unittest.TestCase):
                                   "822cd15d6c15b0f00a08")
         self.assertEqual([r["kind"] for r in records], ["content_block"])
 
-    def test_the_guest_dummy_key_is_allowlisted(self):
-        """profiles/claude/env plants sk-ant-DUMMY-replaced-by-egress-proxy in every
-        guest, and agents echo their env — the dummy must not light up the channel."""
-        text = "ANTHROPIC_API_KEY=sk-ant-DUMMY-replaced-by-egress-proxy"
-        records = self.text_block(text)
-        self.assertEqual([r["kind"] for r in records], ["content_block"])
-        self.assertEqual(records[0]["text"], text, "the dummy is stored as-is")
+    def test_the_guest_dummy_credentials_are_allowlisted(self):
+        """The claude profile's guest_credential lines plant a dummy API key or a dummy
+        OAuth token in every guest, and agents echo their env — neither dummy may light
+        up the channel."""
+        for text in ("ANTHROPIC_API_KEY=sk-ant-DUMMY-replaced-by-egress-proxy",
+                     "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-DUMMY-replaced-by-egress-proxy"):
+            with self.subTest(text=text):
+                records = self.text_block(text)
+                self.assertEqual([r["kind"] for r in records], ["content_block"])
+                self.assertEqual(records[0]["text"], text, "the dummy is stored as-is")
 
     def test_a_real_key_beside_the_dummy_is_still_sighted(self):
         """The allowlist is exact matched text, never a prefix."""

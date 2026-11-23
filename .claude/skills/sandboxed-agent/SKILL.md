@@ -74,7 +74,9 @@ key.**
   exactly what its profiles installed, so `--with claude` alone cannot run `node --test`.
 - `inject_auth=<name>` in a rules file maps to `SILKGATE_EGRESS_SECRET_<NAME>` in the
   host environment. That variable holds the complete header line the proxy sends upstream
-  (`"x-api-key: sk-ant-…"`, not a bare key). The operator chooses how the variable
+  (`"x-api-key: sk-ant-…"`, or `"Authorization: Bearer sk-ant-oat01-…"` for a subscription
+  token, not a bare key). Under a subscription token, never pass `--bare` to Claude Code:
+  it ignores the token there. The operator chooses how the variable
   reaches the environment: a shell profile, a per-launch prefix, a password-manager
   wrapper. That choice is the operator's responsibility.
 - A missing or malformed secret is a warning, not a startup error. The session comes up,

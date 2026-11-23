@@ -116,6 +116,7 @@ bump re-tests them.**
 | An in-guest `claude -p` waits at most 600 seconds for background subagents, and one env var overrides the ceiling | the sandboxed-agent skill | On a pin bump, run one background subagent and grep the new binary for the variable name. |
 | Plugin cache semantics, feature version floors, and every claim cited from the docs mirror | `doc/PLUGIN.md` | Re-fetch each cited page from `code.claude.com`, diff every claim, and run one `--plugin-dir` install on current Claude Code. |
 | The plugin manifest `$schema` URLs at `json.schemastore.org` | `.claude-plugin/plugin.json` | Run `claude plugin validate . --strict`, plus a HEAD request on both schema URLs. |
+| `CLAUDE_CODE_OAUTH_TOKEN` authenticates a plain `claude -p` but not `--bare`, and `ANTHROPIC_API_KEY` outranks it | `guest_credential.*` in `profiles/claude/profile.conf`, the README (A Claude subscription) | On a pin bump, run one `silkgate-claude -p` and one `claude --bare -p` under an `Authorization` secret. Expect an answer, then `Not logged in`. |
 | The example rule pins `h:anthropic-version=2023-06-01` | `doc/DSL.md` | Compare to the `anthropic-version` in the current API documentation. |
 
 ## Documentation snapshots
@@ -148,7 +149,7 @@ together.**
 
 | Fact | Copies | Check |
 |---|---|---|
-| The Anthropic dummy key | `profiles/claude/env`, `_SECRET_ALLOWLIST` in `mitmaddon/proxy_addon.py` | `grep -F sk-ant-DUMMY-` both files and compare the literals byte for byte. A mismatch raises a false sighting on every transcript. |
+| The Anthropic dummy key and dummy OAuth token | `guest_credential.*` in `profiles/claude/profile.conf`, `_SECRET_ALLOWLIST` in `mitmaddon/proxy_addon.py` | `grep -F DUMMY-replaced` both files and compare the literals byte for byte. A mismatch raises a false sighting on every transcript. |
 | The Claude Code pin against the rules derivation | `profiles/claude/profile.conf`, the comment in `profiles/claude/rules.txt` | Grep both for `2.1.` and check the versions agree. On a bump, re-derive the endpoint list, then update the comment. |
 | mitmproxy `12.3.1` | `.github/workflows/ci.yml`, `test/linux/Dockerfile`, `test/test_proxy_lifecycle.py` | `rg -n '12\.3\.1'` — all three sites must agree. |
 | msb `0.6.8` | `README.md` (three sites), `doc/THREAT-MODEL.md`, `test/linux/Dockerfile` | `rg -n '0\.6\.8'` and update every citation on a bump. |

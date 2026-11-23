@@ -30,7 +30,9 @@ export SILKGATE_EGRESS_SECRET_ANTHROPIC="x-api-key: sk-ant-…"   # host-only; n
 That single `--with claude` decides two things: the image (built on first use, then cached)
 and the egress policy (only `api.anthropic.com` and the Console probe, with the real key
 injected at the proxy). The audit log path prints at startup. Watch the allow and deny
-decisions with `tail -f`, or with `silkgate logs`.
+decisions with `tail -f`, or with `silkgate logs`. A Team or Enterprise subscription uses a
+token instead of a key, and that token does not work under `--bare`: see
+[A Claude subscription](#a-claude-subscription).
 
 No `--with` and no `--rule` is legal too. The policy is then empty — the tightest sandbox
 silkgate can express — and the guest can reach nothing at all.
@@ -225,6 +227,26 @@ because a session never inherits one already in the proxy. Add or rotate one wit
 `SILKGATE_EGRESS_SECRET_ANTHROPIC` from the environment — the value is never an argument.
 `silkgate secret ls` lists names only, and `--session` narrows it to one session.
 [doc/PROXY.md](doc/PROXY.md) specifies the full flow and its tests.
+
+### A Claude subscription
+
+**For a Team or Enterprise subscription, put a `claude setup-token` token in the same
+variable, as an `Authorization` header.**
+
+```sh
+claude setup-token                    # prints a one-year token
+export SILKGATE_EGRESS_SECRET_ANTHROPIC="Authorization: Bearer sk-ant-oat01-…"
+./cli/silkgate run --with claude -- silkgate-claude -p "task…"
+```
+
+The header in the secret decides which dummy the guest holds. An `x-api-key` secret plants
+a dummy `ANTHROPIC_API_KEY`. An `Authorization` secret plants a dummy
+`CLAUDE_CODE_OAUTH_TOKEN`. The proxy replaces the dummy with the real token at the boundary,
+as it does for a key. The `guest_credential` lines in `profiles/claude/profile.conf` hold
+this mapping, and `test/test_cli_validation.py` pins it.
+
+Do not pass `--bare` with a subscription token. Claude Code ignores
+`CLAUDE_CODE_OAUTH_TOKEN` under `--bare` and stops with `Not logged in`.
 
 ## The audit UI: `silkgate ui`
 
