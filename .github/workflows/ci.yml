@@ -61,7 +61,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: install the pinned mitmproxy
-        run: python3 -m pip install mitmproxy==12.2.3
+        run: python3 -m pip install mitmproxy==12.3.1
       - name: addon enforcement tests
         run: python3 test/test_addon.py
 

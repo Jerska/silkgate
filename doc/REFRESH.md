@@ -63,7 +63,7 @@ move in lockstep.**
 
 | Pin | Where | Check |
 |---|---|---|
-| mitmproxy `12.2.3`, the version the addon is verified against | `.github/workflows/ci.yml`, `test/linux/Dockerfile`, a comment in `test/test_proxy_lifecycle.py` | Run `rg -n '12\.2\.3'` and check that all three sites agree. Watch the `addon-mitmproxy-latest` canary job, and compare the pin to the PyPI latest. |
+| mitmproxy `12.3.1`, the version the addon is verified against | `.github/workflows/ci.yml`, `test/linux/Dockerfile`, a comment in `test/test_proxy_lifecycle.py` | Run `rg -n '12\.3\.1'` and check that all three sites agree. Watch the `addon-mitmproxy-latest` canary job, and compare the pin to the PyPI latest. |
 | msb `0.6.8` in CI, `0.5.4` and `0.5.7` by hand | `README.md`, `doc/THREAT-MODEL.md`, `test/linux/Dockerfile` | On a bump, run `silkgate verify --full` per platform and update every citation. |
 | `BASE_IMAGE = "debian:bookworm-slim"` | `cli/silkgate` | Compare to the current Debian stable codename and its release schedule. |
 | `FROM ubuntu:24.04` and the glibc `2.39` floor for msb release binaries | `test/linux/Dockerfile`, `README.md` | Run `ldd` on the current msb release binary and read the required GLIBC symbols. Bump the base image when noble ages out. |
@@ -136,7 +136,7 @@ bump re-tests them.**
 |---|---|---|
 | Fixture model ids (`claude-sonnet-4-5`, dated snapshot ids) and the frozen SSE event vocabulary | `test/test_capture_decoder.py`, `test/test_capture_tap.py`, `ui/capture.test.js`, `ui/fixtures.test.js` | Record one live streamed response per API change, diff its event set against the fixture builders, and refresh the ids. |
 | The fixture `pattern` values must be spelled as `_SECRET_PATTERNS` names them | `ui/fixtures.test.js` | Grep the fixture patterns against the producer's name list. |
-| The log scan matches the real line format mitmdump 12.2.3 writes | `test/test_proxy_lifecycle.py` | The `addon-mitmproxy-latest` canary job. Update the scan when the pin moves. |
+| The log scan matches the real line format mitmdump 12.3.1 writes | `test/test_proxy_lifecycle.py` | The `addon-mitmproxy-latest` canary job. Update the scan when the pin moves. |
 | The full check fetches `https://registry.npmjs.org/lodash` | `test/verify_guest.sh` | Fetch the URL from an unrestricted host in CI. |
 | `https://evil.com` is the guaranteed-unlisted host | `test/verify_guest.sh` | Grep every rules file for `evil.com`. Keep the header-discrimination check green. |
 | The external oracles: `1.1.1.1` answers TCP 443, ICMP and DNS (also `TIER1_PROBE_TARGET` in `cli/silkgate`), and TEST-NET-1 `192.0.2.1` never routes | `test/verify_guest.sh` | From an unrestricted host, run `curl -sv --connect-timeout 3 https://1.1.1.1/`, and send one ICMP echo from CI. |
@@ -150,7 +150,7 @@ together.**
 |---|---|---|
 | The Anthropic dummy key | `profiles/claude/env`, `_SECRET_ALLOWLIST` in `mitmaddon/proxy_addon.py` | `grep -F sk-ant-DUMMY-` both files and compare the literals byte for byte. A mismatch raises a false sighting on every transcript. |
 | The Claude Code pin against the rules derivation | `profiles/claude/profile.conf`, the comment in `profiles/claude/rules.txt` | Grep both for `2.1.` and check the versions agree. On a bump, re-derive the endpoint list, then update the comment. |
-| mitmproxy `12.2.3` | `.github/workflows/ci.yml`, `test/linux/Dockerfile`, `test/test_proxy_lifecycle.py` | `rg -n '12\.2\.3'` — all three sites must agree. |
+| mitmproxy `12.3.1` | `.github/workflows/ci.yml`, `test/linux/Dockerfile`, `test/test_proxy_lifecycle.py` | `rg -n '12\.3\.1'` — all three sites must agree. |
 | msb `0.6.8` | `README.md` (three sites), `doc/THREAT-MODEL.md`, `test/linux/Dockerfile` | `rg -n '0\.6\.8'` and update every citation on a bump. |
 | `node@22.11.0` | `profiles/node/profile.conf`, the sandboxed-agent skill examples | Diff every `@x.y.z` in the skill against the profile's `default_version`. |
 | Model prices and context windows | `ui/pricing.js`, re-hardcoded in `ui/pricing.test.js` | When `PRICES` changes, grep `pricing.test.js` for every dollar figure and every window. |

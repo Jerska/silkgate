@@ -164,7 +164,7 @@ while True:
 # stdout/stderr — which start_proxy points at the log file. mitmproxy 12 exits instead,
 # but only after a startup's worth of imports; this is the worst case either way: the
 # port never answers and the log is the only witness. The message is the one a real
-# mitmdump 12.2.3 writes (observed), so the log scan is held to the real format.
+# mitmdump 12.3.1 writes (observed), so the log scan is held to the real format.
 FAKE_MITMDUMP_BINDLESS_SRC = r"""
 import sys, time
 port = "?"

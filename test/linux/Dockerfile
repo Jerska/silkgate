@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # mitmproxy is the version the addon is verified against (test/test_addon.py; the addon
 # reads mitmproxy internals, so a floating version here would un-verify the container).
-RUN pipx install mitmproxy==12.2.3
+RUN pipx install mitmproxy==12.3.1
 
 # msb is the version the Linux verification in the docs actually used (v0.6.8 — README,
 # "Installing microsandbox"). The installer is asked for it, then the installed binary is
