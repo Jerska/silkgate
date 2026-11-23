@@ -18,9 +18,9 @@ schedule.** The pins, and the check for each:
 | Pin | Where | Check |
 |---|---|---|
 | Claude Code `2.1.226` | `default_version` in [`profiles/claude/profile.conf`](../profiles/claude/profile.conf) | Compare `npm view @anthropic-ai/claude-code version` to the pin. Claude Code releases near-daily, so this pin ages fastest. |
-| node `22.11.0` | `default_version` in [`profiles/node/profile.conf`](../profiles/node/profile.conf), echoed by examples in the sandboxed-agent skill | Compare to the latest 22.x on the Node release schedule. Diff every `@x.y.z` in the skill against the profile. Node 22 reaches end of life in 2027. |
-| python `3.12.7` | `default_version` in [`profiles/python/profile.conf`](../profiles/python/profile.conf) | Compare to the latest 3.12.x security release. |
-| uv `0.5.14` | `UV_VERSION` in [`profiles/python/setup.sh`](../profiles/python/setup.sh) | Compare to the latest uv release. The image build asserts `uv --version`. |
+| node `22.23.5` | `default_version` in [`profiles/node/profile.conf`](../profiles/node/profile.conf), echoed by examples in the sandboxed-agent skill | Compare to the latest 22.x on the Node release schedule. Diff every `@x.y.z` in the skill against the profile. Node 22 reaches end of life in 2027. |
+| python `3.12.16` | `default_version` in [`profiles/python/profile.conf`](../profiles/python/profile.conf) | Compare to the latest 3.12.x security release. |
+| uv `0.13.9` | `UV_VERSION` in [`profiles/python/setup.sh`](../profiles/python/setup.sh) | Compare to the latest uv release. The image build asserts `uv --version`. |
 
 **A pin bump can also break the install contract around the pin, so each contract has
 its own check.** These facts belong to the upstream vendor, not to this repository:
@@ -152,7 +152,7 @@ together.**
 | The Claude Code pin against the rules derivation | `profiles/claude/profile.conf`, the comment in `profiles/claude/rules.txt` | Grep both for `2.1.` and check the versions agree. On a bump, re-derive the endpoint list, then update the comment. |
 | mitmproxy `12.3.1` | `.github/workflows/ci.yml`, `test/linux/Dockerfile`, `test/test_proxy_lifecycle.py` | `rg -n '12\.3\.1'` — all three sites must agree. |
 | msb `0.6.8` | `README.md` (three sites), `doc/THREAT-MODEL.md`, `test/linux/Dockerfile` | `rg -n '0\.6\.8'` and update every citation on a bump. |
-| `node@22.11.0` | `profiles/node/profile.conf`, the sandboxed-agent skill examples | Diff every `@x.y.z` in the skill against the profile's `default_version`. |
+| `node@22.23.5` | `profiles/node/profile.conf`, the sandboxed-agent skill examples | Diff every `@x.y.z` in the skill against the profile's `default_version`. |
 | Model prices and context windows | `ui/pricing.js`, re-hardcoded in `ui/pricing.test.js` | When `PRICES` changes, grep `pricing.test.js` for every dollar figure and every window. |
 | The sighting pattern names | `_SECRET_PATTERNS` in `mitmaddon/proxy_addon.py`, `ui/fixtures.test.js` | Grep each fixture `pattern` value against the producer's names. |
 | The file-path keys shared by two maps: `file_path` for `read`, `edit`, `write`, and `multiedit`, and `notebook_path` for `notebookedit` | the salient map in `ui/views/session.js`, `FILE_KEYS` in `ui/timeline.js` | Diff the shared entries whenever either map changes. The files panel and the call lines must name the same paths for the same calls. |

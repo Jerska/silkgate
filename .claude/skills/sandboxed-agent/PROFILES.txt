@@ -35,7 +35,7 @@ github-write arg: [A-Za-z0-9._-]+/[A-Za-z0-9._-]+
   injects   SILKGATE_EGRESS_SECRET_GITHUB
   rules     profiles/github-write/rules.txt
 
-node 22.11.0
+node 22.23.5
   Node.js, from the official pinned tarball
   installs  curl xz-utils setup.sh
   reaches   registry.npmjs.org
@@ -46,7 +46,7 @@ probe (silkgate verify only — refused with run/up/build/proxy)
   reaches   deb.debian.org, registry.npmjs.org, security.debian.org
   rules     profiles/probe/rules.txt
 
-python 3.12.7
+python 3.12.16
   CPython at a pinned version, installed by uv (not the distro's python)
   installs  curl setup.sh
   reaches   files.pythonhosted.org, pypi.org

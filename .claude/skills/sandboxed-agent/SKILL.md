@@ -124,7 +124,7 @@ requirement covers `run` and `up` both.
 ```sh
 ./cli/silkgate run \
     --name fix-tests \
-    --with node@22.11.0 \
+    --with node@22.23.5 \
     --with claude \
     -v ./test/mock:/workspace:rw \
     -- silkgate-claude \
@@ -156,14 +156,14 @@ the guest's report, not evidence.**
   yourself in a fresh sandbox and read that exit code:
 
   ```sh
-  ./cli/silkgate run --name check-tests --with node@22.11.0 -v ./test/mock:/workspace:rw -- node --test
+  ./cli/silkgate run --name check-tests --with node@22.23.5 -v ./test/mock:/workspace:rw -- node --test
   ```
 
   That run needs no claude profile and no secret — the smallest policy that can answer
   the question. To check a harvested branch, point a disposable checkout at it:
 
   ```sh
-  ./cli/silkgate run --name check-branch --with git --with node@22.11.0 --checkout agent/fix-tests -- node --test
+  ./cli/silkgate run --name check-branch --with git --with node@22.23.5 --checkout agent/fix-tests -- node --test
   ```
 - The workspace diff is the deliverable. Review it on the host before you push. Check
   that only what you expected changed, and that no test got weakened to pass. If a
@@ -190,7 +190,7 @@ cannot name the follow-up, use `run`. When you can:
 ```sh
 ./cli/silkgate up \
     --name foo \
-    --with node@22.11.0 \
+    --with node@22.23.5 \
     --with claude \
     -v ~/projects/foo:/workspace:rw
 

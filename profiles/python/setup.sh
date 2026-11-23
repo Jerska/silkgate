@@ -2,7 +2,7 @@
 # standalone interpreter, so there's no compiler in the image and no distro version to inherit.
 # uv itself is pinned too — the image hash covers this file, so it must not say "latest".
 set -eu
-UV_VERSION=0.5.14
+UV_VERSION=0.13.9
 curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | sh
 export PATH="/root/.local/bin:$PATH"
 uv python install "$VERSION"
