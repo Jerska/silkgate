@@ -79,7 +79,6 @@ formats — and each drifts silently unless its check runs.**
 | Table | Where | Check |
 |---|---|---|
 | `PRICES`: model-id prefixes, dollars per MTok, cache multipliers, context windows, and a "last reconciled" date | [`ui/pricing.js`](../ui/pricing.js) | Diff every row against the published price list and the models list, then move the reconciled date. For every model in recent capture files, assert `priceFor()` is not null — a new model id answers null and hides its cost. |
-| The Sonnet 5 row holds an introductory rate that ends 2026-08-31 and reverts to `[3, 15, 0.3, 3.75]` | `ui/pricing.js` | Replace the row after that date. The row's own comment carries the deadline. |
 | `_SECRET_PATTERNS`: 20 vendor-prefixed regexes from the gitleaks default set, with `_SECRET_TRIGGERS` literals beside them | [`mitmaddon/proxy_addon.py`](../mitmaddon/proxy_addon.py) | Diff each regex against `config/gitleaks.toml` at the gitleaks HEAD. Vendors rotate token prefixes and lengths. |
 | The Anthropic key shape `sk-ant-[A-Za-z0-9_-]{16,}` | `mitmaddon/proxy_addon.py` | Check that a fresh Console key still matches, and cross-check the gitleaks anthropic rule. |
 | `CAPTURE_FORMATS`, the decoder names a `capture=` rule can cite (today only `anthropic`) | [`mitmaddon/rule_engine.py`](../mitmaddon/rule_engine.py) | When a decoder lands or retires, run the rule-engine self-tests and grep `doc/DSL.md` and the profiles for the format names. |

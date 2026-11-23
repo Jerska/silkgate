@@ -1,7 +1,7 @@
 // pricing.js — a longest-prefix table of Claude model prices and context
 // windows, with nothing attached: no DOM, no network. THE FIGURES ARE ESTIMATES
 // MAINTAINED BY HAND (per-MTok USD, cache-write at the 5-minute TTL; last
-// reconciled 2026-08-12 against public price lists) — the UI renders every cost
+// reconciled 2026-11-23 against public price lists) — the UI renders every cost
 // with a leading "~", and this table is the first place to check when a number
 // looks off. A model id that matches no prefix answers null everywhere: the UI
 // then shows tokens with no cost and hides the context gauge. Never guess a
@@ -9,12 +9,18 @@
 
 //                            $/MTok in   out   cache-read  cache-write  context
 const PRICES = {
+  "claude-fable-5-2":         [8,         40,   0.2,        10,          1_000_000],
+  "claude-mythos-5-2":        [8,         40,   0.2,        10,          1_000_000],
+  "claude-fable-5-1":         [10,        50,   0.25,       12.5,        1_000_000],
+  "claude-mythos-5-1":        [10,        50,   0.25,       12.5,        1_000_000],
   "claude-fable-5":           [10,        50,   1,          12.5,        1_000_000],
   "claude-mythos-5":          [10,        50,   1,          12.5,        1_000_000],
+  "claude-opus-5-5":          [4,         20,   0.2,        5,           1_000_000],
   "claude-opus-5":            [5,         25,   0.5,        6.25,        1_000_000],
-  // INTRODUCTORY rate, expires 2026-08-31 (verified 2026-08-12): becomes
-  // [3, 15, 0.3, 3.75, 1_000_000] after that date.
+  "claude-sonnet-5-5":        [2,         10,   0.1,        2.5,         1_000_000],
   "claude-sonnet-5":          [2,         10,   0.2,        2.5,         1_000_000],
+  // claude-haiku-5-5 has no row: its price rises past a 100k-token prompt,
+  // a tier this flat table cannot express, so it answers null.
   "claude-opus-4-8":          [5,         25,   0.5,        6.25,        1_000_000],
   "claude-opus-4-7":          [5,         25,   0.5,        6.25,        1_000_000],
   "claude-opus-4-6":          [5,         25,   0.5,        6.25,        1_000_000],
