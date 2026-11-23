@@ -9,5 +9,5 @@ uv python install "$VERSION"
 # Expose it as python3/python, so anything expecting a system python finds this one.
 ln -sf "$(uv python find "$VERSION")" /usr/local/bin/python3
 ln -sf /usr/local/bin/python3 /usr/local/bin/python
-python3 -VV
-uv --version
+test "$(python3 -c 'import platform; print(platform.python_version())')" = "$VERSION"
+case "$(uv --version)" in "uv $UV_VERSION"|"uv $UV_VERSION "*) ;; *) uv --version >&2; exit 1 ;; esac

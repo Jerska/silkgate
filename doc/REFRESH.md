@@ -19,7 +19,7 @@ schedule.** The pins, and the check for each:
 |---|---|---|
 | Claude Code `2.1.226` | `default_version` in [`profiles/claude/profile.conf`](../profiles/claude/profile.conf) | Compare `npm view @anthropic-ai/claude-code version` to the pin. Claude Code releases near-daily, so this pin ages fastest. |
 | node `22.23.5` | `default_version` in [`profiles/node/profile.conf`](../profiles/node/profile.conf), echoed by examples in the sandboxed-agent skill | Compare to the latest 22.x on the Node release schedule. Diff every `@x.y.z` in the skill against the profile. Node 22 reaches end of life in 2027. |
-| python `3.12.16` | `default_version` in [`profiles/python/profile.conf`](../profiles/python/profile.conf) | Compare to the latest 3.12.x security release. |
+| python `3.12.16` | `default_version` in [`profiles/python/profile.conf`](../profiles/python/profile.conf) | Compare to the latest 3.12.x security release. The image build asserts the interpreter version against the pin. |
 | uv `0.13.9` | `UV_VERSION` in [`profiles/python/setup.sh`](../profiles/python/setup.sh) | Compare to the latest uv release. The image build asserts `uv --version`. |
 
 **A pin bump can also break the install contract around the pin, so each contract has
@@ -27,7 +27,7 @@ its own check.** These facts belong to the upstream vendor, not to this reposito
 
 | Contract | Where | Check |
 |---|---|---|
-| The installer at `https://claude.ai/install.sh` accepts a pinned version argument | `profiles/claude/setup.sh` | Build the image and assert `claude --version` equals the pin. |
+| The installer at `https://claude.ai/install.sh` accepts a pinned version argument | `profiles/claude/setup.sh` | The image build asserts `claude --version` against the pin. |
 | `packages = curl libgcc-s1 libstdc++6 ripgrep` are the native binary's runtime needs | `profiles/claude/profile.conf` | After a bump, run `ldd` on the binary in a fresh image. |
 | `context_path` is read on a plain `claude -p` and not under `--bare` | `profiles/claude/profile.conf` | On a bump, check that a guest `claude -p` reads the file and `--bare` does not. |
 | `--permission-mode bypassPermissions` exists, and `IS_SANDBOX=1` lifts the refusal to bypass permissions as root | `profiles/claude/setup.sh` | On a bump, run the wrapper as root in a guest and expect no refusal. |

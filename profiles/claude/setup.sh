@@ -2,6 +2,7 @@
 # curl fetches it; libgcc/libstdc++/ripgrep are what it needs to run (both in profile.conf).
 set -eu
 curl -fsSL https://claude.ai/install.sh | bash -s "$VERSION"
+case "$(claude --version)" in "$VERSION"|"$VERSION "*) ;; *) claude --version >&2; exit 1 ;; esac
 install -d /root/.claude
 
 # A sandbox-flavoured entry point. The flags it adds are the ones that are always right in

@@ -8,4 +8,5 @@ case "$(uname -m)" in
 esac
 curl -fsSL "https://nodejs.org/dist/v$VERSION/node-v$VERSION-linux-$arch.tar.xz" \
     | tar -xJ -C /usr/local --strip-components=1
-node --version
+# The tarball names the version, so a wrong one fails here rather than at first use.
+test "$(node --version)" = "v$VERSION"
