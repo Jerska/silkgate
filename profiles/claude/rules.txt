@@ -1,7 +1,9 @@
 # Every path Claude Code was observed to use, and no more. The list is not a guess: eleven
-# sandboxed Claude Code runs produced exactly these requests in the audit logs. The profile
-# now pins 2.1.226 and the list awaits re-derivation at that version (doc/REFRESH.md tracks
-# this pair). The old host-wide /** also granted the Files and Batches APIs — a guest parking
+# sandboxed Claude Code runs produced exactly these requests in the audit logs. At 2.1.330,
+# under a subscription token, `claude -p` runs with tools and a subagent requested only
+# policy_limits, settings, and POST /v1/messages, with zero denies. The remaining paths date
+# from API-key runs before 2.1.226 and await a re-check under a working key (doc/REFRESH.md
+# tracks this pair). The old host-wide /** also granted the Files and Batches APIs — a guest parking
 # data in the host's own Anthropic org under the injected key — so the paths are enumerated
 # instead. The cost of enumerating: a path a newer Claude Code needs but this list lacks
 # fails as a 403 the guest will report as silkgate policy. When the pinned version is bumped,

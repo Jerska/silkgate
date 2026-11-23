@@ -1,4 +1,4 @@
-claude 2.1.226
+claude 2.1.330
   Claude Code, as a standalone native binary (no Node needed)
   installs  curl libgcc-s1 libstdc++6 ripgrep setup.sh
   reaches   api.anthropic.com, platform.claude.com

@@ -82,7 +82,7 @@ Because one `--with` list drives both halves, an image cannot end up with a tool
 traffic nobody allowed. Compose profiles freely, and pin versions where it matters:
 
 ```sh
-./cli/silkgate build --with node@22.23.5 --with claude@2.1.226
+./cli/silkgate build --with node@22.23.5 --with claude@2.1.330
 # -> silkgate/node-claude:f357122f17de
 ```
 

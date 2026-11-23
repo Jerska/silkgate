@@ -17,7 +17,7 @@ schedule.** The pins, and the check for each:
 
 | Pin | Where | Check |
 |---|---|---|
-| Claude Code `2.1.226` | `default_version` in [`profiles/claude/profile.conf`](../profiles/claude/profile.conf) | Compare `npm view @anthropic-ai/claude-code version` to the pin. Claude Code releases near-daily, so this pin ages fastest. |
+| Claude Code `2.1.330` | `default_version` in [`profiles/claude/profile.conf`](../profiles/claude/profile.conf) | Compare `npm view @anthropic-ai/claude-code version` to the pin. Claude Code releases near-daily, so this pin ages fastest. |
 | node `22.23.5` | `default_version` in [`profiles/node/profile.conf`](../profiles/node/profile.conf), echoed by examples in the sandboxed-agent skill | Compare to the latest 22.x on the Node release schedule. Diff every `@x.y.z` in the skill against the profile. Node 22 reaches end of life in 2027. |
 | python `3.12.16` | `default_version` in [`profiles/python/profile.conf`](../profiles/python/profile.conf) | Compare to the latest 3.12.x security release. The image build asserts the interpreter version against the pin. |
 | uv `0.13.9` | `UV_VERSION` in [`profiles/python/setup.sh`](../profiles/python/setup.sh) | Compare to the latest uv release. The image build asserts `uv --version`. |
@@ -52,9 +52,9 @@ policy, so audit-log denies are the staleness signal.
 | npm needs only `registry.npmjs.org/**` GET | `profiles/node/rules.txt` | Install a package in a guest and grep the audit log for denies. |
 | pip needs only `pypi.org/simple/**` and `files.pythonhosted.org/**` GET | `profiles/python/rules.txt` | Install a package in a guest and grep the audit log for denies. |
 
-The Claude Code list carries a known debt: it was derived from audit logs before the pin
-moved to 2.1.226. The file's own comment says so. Re-derive it at the current pin rather
-than widen a rule.
+The Claude Code list carries a known debt. Runs at 2.1.330 under a subscription token
+confirm three of its paths. The other paths come from API-key runs before 2.1.226, and the
+file's own comment says so. Re-check them under a working API key rather than widen a rule.
 
 ## Toolchain and CI pins
 
