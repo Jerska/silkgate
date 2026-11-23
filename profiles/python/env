@@ -1,0 +1,2 @@
+PIP_ROOT_USER_ACTION=ignore
+PATH=/opt/python/bin:$PATH
