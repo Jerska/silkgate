@@ -206,11 +206,14 @@ test("write renders its content verbatim, and the content drives open", () => {
   assert.equal(w.open, false);
 });
 
-test("task and notebookedit carry their payloads", () => {
-  const t = toolCallView({ tool_name: "Task",
-    tool_input: { description: "explore", prompt: "Read the tree." } });
-  assert.equal(t.line, "Task(explore)");
-  assert.equal(t.payload, "Read the tree.");
+test("task, agent, and notebookedit carry their payloads", () => {
+  // Claude Code names its subagent tool Task in older pins and Agent in newer.
+  for (const tool_name of ["Task", "Agent"]) {
+    const t = toolCallView({ tool_name,
+      tool_input: { description: "explore", prompt: "Read the tree." } });
+    assert.equal(t.line, `${tool_name}(explore)`);
+    assert.equal(t.payload, "Read the tree.");
+  }
   const n = toolCallView({ tool_name: "NotebookEdit",
     tool_input: { notebook_path: "/w/n.ipynb", new_source: "print(1)" } });
   assert.equal(n.line, "NotebookEdit(/w/n.ipynb)");

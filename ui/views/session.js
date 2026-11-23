@@ -59,10 +59,10 @@ const SALIENT = new Map([
   ["write", "file_path"], ["multiedit", "file_path"],
   ["notebookedit", "notebook_path"], ["grep", "pattern"], ["glob", "pattern"],
   ["webfetch", "url"], ["websearch", "query"], ["task", "description"],
-  ["skill", "skill"]]);
+  ["agent", "description"], ["skill", "skill"]]);
 const PAYLOAD = new Map([
   ["bash", "command"], ["write", "content"], ["task", "prompt"],
-  ["notebookedit", "new_source"]]);
+  ["agent", "prompt"], ["notebookedit", "new_source"]]);
 
 // One tool_use block → its activity line, the verbatim payload for tools
 // whose bulk lives in one string field, the full input JSON, and whether the
