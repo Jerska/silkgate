@@ -9,7 +9,7 @@ import threading
 import time
 from uuid import uuid4
 
-from . import console, core, paths
+from . import console, core, paths, profile
 
 
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
@@ -942,11 +942,11 @@ def cmd_verify(args):
     console.preflight("msb", "mitmdump")
     args.port = _verify_port(args.port)
     _reap_leaked_verify_guests()
-    rules_text = core.compose_rules(core.resolve_profiles(["probe"], allow_verify_only=True))
+    rules_text = profile.compose_rules(profile.resolve_profiles(["probe"], allow_verify_only=True))
     oracles = _VerifyOracles(args.port) if args.oracles else None
     if oracles:
         rules_text += oracles.rules()
-    core.load_ruleset(rules_text)
+    profile.load_ruleset(rules_text)
     script = "bash /mnt/poc/test/verify_guest.sh"
     mounts = [f"{paths.REPO}:/mnt/poc:ro"]
     if args.full:

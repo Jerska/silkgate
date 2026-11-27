@@ -16,7 +16,7 @@ import re
 import signal
 import sys
 
-from . import console, core, logs, ui_server, verify
+from . import console, core, logs, profile, ui_server, verify
 
 
 # The two argument types that reach a generated Dockerfile or an msb argv are checked by
@@ -36,7 +36,7 @@ def _with_arg(spec):
     """argparse type for --with: `name[@version][:arg]`. The name is resolved later,
     against the profiles that exist; the version and arg charsets are asked here."""
     try:
-        core._parse_spec(spec)
+        profile._parse_spec(spec)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e))
     return spec
@@ -44,7 +44,7 @@ def _with_arg(spec):
 
 def _image_arg(ref):
     """argparse type for --base and --image."""
-    bad = core._image_error(ref)
+    bad = profile._image_error(ref)
     if bad:
         raise argparse.ArgumentTypeError(bad)
     return ref

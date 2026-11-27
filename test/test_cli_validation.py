@@ -35,6 +35,7 @@ vf = pkg.verify
 gt = pkg.git
 pt = pkg.paths
 con = pkg.console
+prof = pkg.profile
 
 
 def tearDownModule():
@@ -131,27 +132,27 @@ class TestBuildArguments(CliCase):
 
     def test_version_charset(self):
         for version in self.GOOD_VERSIONS:
-            self.assertIsNone(sg._version_error(version), version)
+            self.assertIsNone(prof._version_error(version), version)
         for version in self.BAD_VERSIONS:
-            self.assertIsNotNone(sg._version_error(version), version)
+            self.assertIsNotNone(prof._version_error(version), version)
 
     def test_image_charset(self):
         for ref in ["debian:bookworm-slim", "silkgate/node-claude:f357122f17de",
                     "localhost:5000/x/y:1.2", "debian@sha256:" + "a" * 64]:
-            self.assertIsNone(sg._image_error(ref), ref)
+            self.assertIsNone(prof._image_error(ref), ref)
         for ref in ["debian:bookworm-slim\nRUN echo INJECTED-DIRECTIVE", "debian bookworm",
                     "-x", "", "deb$(id)", "deb;id", "deb\rian", "x" * 300]:
-            self.assertIsNotNone(sg._image_error(ref), ref)
+            self.assertIsNotNone(prof._image_error(ref), ref)
 
     def test_profile_rejects_injected_version(self):
-        self.assertEqual(sg.Profile("node", "22.11.0").version, "22.11.0")
-        self.refuses("invalid version", sg.Profile, "node",
+        self.assertEqual(prof.Profile("node", "22.11.0").version, "22.11.0")
+        self.refuses("invalid version", prof.Profile, "node",
                      '1" ; echo PWNED-AT-BUILD-TIME ; #')
 
     def test_profile_default_version_is_checked_too(self):
         for profile in ("node", "python", "claude"):
-            version = sg.Profile(profile).version
-            self.assertIsNone(sg._version_error(version), f"{profile} default_version")
+            version = prof.Profile(profile).version
+            self.assertIsNone(prof._version_error(version), f"{profile} default_version")
 
     def test_parse_time_errors_name_the_flag(self):
         self.refuses_argv("invalid version", "--with",
@@ -449,23 +450,23 @@ class TestMountGuards(CliCase):
 
 class TestEnvGuard(CliCase):
     def test_proxy_variables_are_refused(self):
-        sg.check_env(["FOO=bar", "PATH=/x"])                # ordinary pairs are fine
+        prof.check_env(["FOO=bar", "PATH=/x"])                # ordinary pairs are fine
         for pair in ["HTTPS_PROXY=http://x", "http_proxy=http://x",
                      "NO_PROXY=api.anthropic.com", "no_proxy=*"]:
-            self.refuses("-e", sg.check_env, [pair])
-        self.refuses("expected NAME=VALUE", sg.check_env, ["nonsense"])
-        self.refuses("newline", sg.check_env, ["FOO=a\nb"])
+            self.refuses("-e", prof.check_env, [pair])
+        self.refuses("expected NAME=VALUE", prof.check_env, ["nonsense"])
+        self.refuses("newline", prof.check_env, ["FOO=a\nb"])
 
 
 class TestProbeQuarantine(CliCase):
     def test_probe_only_resolves_for_verify(self):
-        self.refuses("verify", sg.resolve_profiles, ["probe"])
-        self.refuses("verify", sg.resolve_profiles, ["node", "probe"])
-        self.assertEqual([p.name for p in sg.resolve_profiles(["probe"], allow_verify_only=True)],
-                         ["probe"])
+        self.refuses("verify", prof.resolve_profiles, ["probe"])
+        self.refuses("verify", prof.resolve_profiles, ["node", "probe"])
+        resolved = prof.resolve_profiles(["probe"], allow_verify_only=True)
+        self.assertEqual([p.name for p in resolved], ["probe"])
 
     def test_probe_rules_are_what_the_quarantine_is_about(self):
-        rules = sg.compose_rules(sg.resolve_profiles(["probe"], allow_verify_only=True))
+        rules = prof.compose_rules(prof.resolve_profiles(["probe"], allow_verify_only=True))
         self.assertIn("deb.debian.org", rules)
 
     def test_listing_marks_probe_as_verify_only(self):
@@ -499,14 +500,14 @@ class TestProfileRequires(CliCase):
         self.enterContext(mock.patch.object(pt, "PROFILE_DIR", pdir))
 
     def test_missing_requirement_is_refused_and_named(self):
-        message = self.refuses("requires helper", sg.resolve_profiles, ["needy"])
+        message = self.refuses("requires helper", prof.resolve_profiles, ["needy"])
         self.assertIn("--with", message)                    # the error names the way out
-        self.refuses("requires helper, needy", sg.resolve_profiles, ["greedy"])
+        self.refuses("requires helper, needy", prof.resolve_profiles, ["greedy"])
 
     def test_satisfied_requirement_resolves_in_either_order(self):
         for specs in (["needy", "helper"], ["helper", "needy"]):
-            self.assertEqual([p.name for p in sg.resolve_profiles(specs)], specs)
-        self.assertEqual([p.name for p in sg.resolve_profiles(["helper", "needy", "greedy"])],
+            self.assertEqual([p.name for p in prof.resolve_profiles(specs)], specs)
+        self.assertEqual([p.name for p in prof.resolve_profiles(["helper", "needy", "greedy"])],
                          ["helper", "needy", "greedy"])
 
 
@@ -537,23 +538,23 @@ class TestProfileArgSpecs(ArgProfileCase):
     full-match arg_pattern."""
 
     def test_parse_spec_splits_all_three_parts(self):
-        self.assertEqual(sg._parse_spec("node"), ("node", None, None))
-        self.assertEqual(sg._parse_spec("node@22.11.0"), ("node", "22.11.0", None))
-        self.assertEqual(sg._parse_spec("tmpl:owner/repo"), ("tmpl", None, "owner/repo"))
-        self.assertEqual(sg._parse_spec("tmpl@1.2:o/r"), ("tmpl", "1.2", "o/r"))
+        self.assertEqual(prof._parse_spec("node"), ("node", None, None))
+        self.assertEqual(prof._parse_spec("node@22.11.0"), ("node", "22.11.0", None))
+        self.assertEqual(prof._parse_spec("tmpl:owner/repo"), ("tmpl", None, "owner/repo"))
+        self.assertEqual(prof._parse_spec("tmpl@1.2:o/r"), ("tmpl", "1.2", "o/r"))
         # The first ':' opens the arg, which may itself contain more of them.
-        self.assertEqual(sg._parse_spec("tmpl:a:b"), ("tmpl", None, "a:b"))
+        self.assertEqual(prof._parse_spec("tmpl:a:b"), ("tmpl", None, "a:b"))
 
     def test_version_errors_survive_the_new_grammar(self):
         with self.assertRaises(ValueError):
-            sg._parse_spec("node@")
+            prof._parse_spec("node@")
         with self.assertRaises(ValueError):
-            sg._parse_spec("node@1 2:arg")
+            prof._parse_spec("node@1 2:arg")
 
     def test_whitespace_and_control_chars_refused_unconditionally(self):
         for bad in ("a b", "a\tb", "a\nb", "a\rb", "\x01", "a\x7f", "\x1b[31m", ""):
             with self.assertRaises(ValueError, msg=repr(bad)):
-                sg._parse_spec(f"tmpl:{bad}")
+                prof._parse_spec(f"tmpl:{bad}")
 
     def test_bad_arg_via_flag_names_the_flag(self):
         self.refuses_argv("whitespace and control", "--with",
@@ -562,39 +563,39 @@ class TestProfileArgSpecs(ArgProfileCase):
 
     def test_arg_to_a_no_arg_profile_refused(self):
         self.profile_dir({"plain": self.PLAIN})
-        self.refuses("takes no argument", sg.resolve_profiles, ["plain:x/y"])
+        self.refuses("takes no argument", prof.resolve_profiles, ["plain:x/y"])
 
     def test_missing_arg_names_profile_and_pattern(self):
         self.profile_dir({"tmpl": self.TMPL})
-        message = self.refuses("requires an argument", sg.resolve_profiles, ["tmpl"])
+        message = self.refuses("requires an argument", prof.resolve_profiles, ["tmpl"])
         self.assertIn("'tmpl'", message)
         self.assertIn("[a-z]+/[a-z]+", message)
 
     def test_mismatched_arg_names_profile_and_pattern(self):
         self.profile_dir({"tmpl": self.TMPL})
-        message = self.refuses("does not match", sg.resolve_profiles, ["tmpl:UPPER/x"])
+        message = self.refuses("does not match", prof.resolve_profiles, ["tmpl:UPPER/x"])
         self.assertIn("'tmpl'", message)
         self.assertIn("[a-z]+/[a-z]+", message)
 
     def test_pattern_is_a_full_match_not_a_search(self):
         self.profile_dir({"tmpl": self.TMPL})
-        self.refuses("does not match", sg.resolve_profiles, ["tmpl:a/b/c"])
-        self.refuses("does not match", sg.resolve_profiles, ["tmpl:a/b!"])
-        self.assertEqual(sg.resolve_profiles(["tmpl:a/b"])[0].arg, "a/b")
+        self.refuses("does not match", prof.resolve_profiles, ["tmpl:a/b/c"])
+        self.refuses("does not match", prof.resolve_profiles, ["tmpl:a/b!"])
+        self.assertEqual(prof.resolve_profiles(["tmpl:a/b"])[0].arg, "a/b")
 
     def test_placeholder_without_pattern_is_a_load_error(self):
         self.profile_dir({"broken": {"rules.txt": "example.com/{arg}/** GET\n"}})
-        self.refuses("arg_pattern", sg.Profile, "broken")
+        self.refuses("arg_pattern", prof.Profile, "broken")
 
     def test_bad_and_empty_patterns_are_load_errors(self):
         self.profile_dir({"badre": {"profile.conf": "arg_pattern = [unclosed\n"},
                           "hollow": {"profile.conf": "arg_pattern =\n"}})
-        self.refuses("bad arg_pattern", sg.Profile, "badre")
-        self.refuses("empty arg_pattern", sg.Profile, "hollow")
+        self.refuses("bad arg_pattern", prof.Profile, "badre")
+        self.refuses("empty arg_pattern", prof.Profile, "hollow")
 
     def test_spec_property_carries_the_arg(self):
         self.profile_dir({"tmpl": self.TMPL})
-        self.assertEqual(sg.resolve_profiles(["tmpl:a/b"])[0].spec, "tmpl:a/b")
+        self.assertEqual(prof.resolve_profiles(["tmpl:a/b"])[0].spec, "tmpl:a/b")
 
 
 class TestProfileInstanceDedup(ArgProfileCase):
@@ -604,18 +605,18 @@ class TestProfileInstanceDedup(ArgProfileCase):
         self.profile_dir({"tmpl": self.TMPL})
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            profiles = sg.resolve_profiles(["tmpl:a/b", "tmpl:a/b"])
+            profiles = prof.resolve_profiles(["tmpl:a/b", "tmpl:a/b"])
         self.assertEqual([p.spec for p in profiles], ["tmpl:a/b"])
         self.assertEqual(err.getvalue(), "")
 
     def test_respellings_of_the_default_version_dedupe(self):
         self.profile_dir({"verd": {"profile.conf": "default_version = 1.0\n"}})
-        profiles = sg.resolve_profiles(["verd", "verd@1.0"])
+        profiles = prof.resolve_profiles(["verd", "verd@1.0"])
         self.assertEqual([p.spec for p in profiles], ["verd@1.0"])
 
     def test_distinct_args_are_distinct_instances(self):
         self.profile_dir({"tmpl": self.TMPL})
-        profiles = sg.resolve_profiles(["tmpl:a/b", "tmpl:c/d"])
+        profiles = prof.resolve_profiles(["tmpl:a/b", "tmpl:c/d"])
         self.assertEqual([p.spec for p in profiles], ["tmpl:a/b", "tmpl:c/d"])
 
 
@@ -633,7 +634,7 @@ class TestProfileSupersedes(ArgProfileCase):
     def resolves(self, specs):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            profiles = sg.resolve_profiles(specs)
+            profiles = prof.resolve_profiles(specs)
         return [p.spec for p in profiles], err.getvalue()
 
     def test_same_arg_instance_dropped_and_announced(self):
@@ -650,8 +651,8 @@ class TestProfileSupersedes(ArgProfileCase):
     def test_superseded_rules_never_compose(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            text = sg.compose_rules(sg.resolve_profiles(["tmpl:a/b", "wide:a/b"]))
-        governing = sg.load_ruleset(text).match("example.com", "/a/b/x", "GET")
+            text = prof.compose_rules(prof.resolve_profiles(["tmpl:a/b", "wide:a/b"]))
+        governing = prof.load_ruleset(text).match("example.com", "/a/b/x", "GET")
         self.assertIn("PUT", governing.methods)
         self.assertEqual(text.count("# --- profile"), 1, text)
 
@@ -661,20 +662,20 @@ class TestProfileArgExpansion(ArgProfileCase):
 
     def test_rules_template_expands_the_arg(self):
         self.profile_dir({"tmpl": self.TMPL})
-        text = sg.compose_rules(sg.resolve_profiles(["tmpl:owner/repo"]))
+        text = prof.compose_rules(prof.resolve_profiles(["tmpl:owner/repo"]))
         self.assertIn("example.com/owner/repo/** GET POST", text)
         self.assertNotIn("{arg}", text)
 
     def test_every_placeholder_occurrence_expands(self):
         self.profile_dir({"multi": {"profile.conf": "arg_pattern = [a-z]+\n",
                                     "rules.txt": "a.com/{arg}/** GET\nb.com/{arg} GET\n"}})
-        text = sg.compose_rules(sg.resolve_profiles(["multi:x"]))
+        text = prof.compose_rules(prof.resolve_profiles(["multi:x"]))
         self.assertIn("a.com/x/** GET", text)
         self.assertIn("b.com/x GET", text)
 
     def test_expanded_rules_parse_and_scope_to_the_arg(self):
         self.profile_dir({"tmpl": self.TMPL})
-        ruleset = sg.load_ruleset(sg.compose_rules(sg.resolve_profiles(["tmpl:a/b"])))
+        ruleset = prof.load_ruleset(prof.compose_rules(prof.resolve_profiles(["tmpl:a/b"])))
         self.assertIsNotNone(ruleset.match("example.com", "/a/b/x", "POST"))
         self.assertIsNone(ruleset.match("example.com", "/c/d/x", "POST"))
 
@@ -682,20 +683,20 @@ class TestProfileArgExpansion(ArgProfileCase):
         self.profile_dir({"tmpl": self.TMPL})
         for evil in ("a/b GET\nevil.com/** GET", "a/b evil.com/** GET",
                      "a/b\tPOST", "a/b\rmax_body=1g"):
-            self.refuses("whitespace and control", sg.resolve_profiles, [f"tmpl:{evil}"])
+            self.refuses("whitespace and control", prof.resolve_profiles, [f"tmpl:{evil}"])
 
     def test_structural_injection_without_whitespace_dies_at_the_pattern(self):
         # '#' would comment out the rest of the rule line; '**' would widen the path.
         self.profile_dir({"tmpl": self.TMPL})
-        self.refuses("does not match", sg.resolve_profiles, ["tmpl:a/b#x"])
-        self.refuses("does not match", sg.resolve_profiles, ["tmpl:**"])
+        self.refuses("does not match", prof.resolve_profiles, ["tmpl:a/b#x"])
+        self.refuses("does not match", prof.resolve_profiles, ["tmpl:**"])
 
     def test_setup_and_env_are_never_templated(self):
         self.profile_dir({"holey": {"profile.conf": "arg_pattern = [a-z]+\n",
                                     "rules.txt": "a.com/{arg} GET\n",
                                     "setup.sh": "echo {arg}\n",
                                     "env": "X={arg}\n"}})
-        (p,) = sg.resolve_profiles(["holey:x"])
+        (p,) = prof.resolve_profiles(["holey:x"])
         cert = self.tmp / "egress-ca.pem"
         cert.write_text("cert")
         context = self.tmp / "ctx"
@@ -712,7 +713,7 @@ class TestImageIdentityExcludesArg(ArgProfileCase):
 
     def test_hash_and_slug_unchanged_across_args(self):
         self.profile_dir({"tmpl": self.TMPL})
-        refs = {sg.image_ref(sg.resolve_profiles(spec))
+        refs = {sg.image_ref(prof.resolve_profiles(spec))
                 for spec in (["tmpl:a/b"], ["tmpl:c/d"], ["tmpl:a/b", "tmpl:c/d"])}
         self.assertEqual(len(refs), 1, refs)
         ref = refs.pop()
@@ -721,7 +722,7 @@ class TestImageIdentityExcludesArg(ArgProfileCase):
     def test_instances_contribute_one_layer_set(self):
         self.profile_dir({"tmpl": {**self.TMPL, "setup.sh": "echo hi\n"},
                           "plain": self.PLAIN})
-        profiles = sg.resolve_profiles(["tmpl:a/b", "plain", "tmpl:c/d"])
+        profiles = prof.resolve_profiles(["tmpl:a/b", "plain", "tmpl:c/d"])
         cert = self.tmp / "egress-ca.pem"
         cert.write_text("cert")
         context = self.tmp / "ctx"
@@ -733,8 +734,8 @@ class TestImageIdentityExcludesArg(ArgProfileCase):
 
     def test_guest_brief_lists_the_install_once_without_the_arg(self):
         self.profile_dir({"tmpl": self.TMPL})
-        profiles = sg.resolve_profiles(["tmpl:a/b", "tmpl:c/d"])
-        ctx = sg.session_context(profiles, sg.load_ruleset(sg.compose_rules(profiles)),
+        profiles = prof.resolve_profiles(["tmpl:a/b", "tmpl:c/d"])
+        ctx = sg.session_context(profiles, prof.load_ruleset(prof.compose_rules(profiles)),
                                  persistent=False)
         self.assertEqual(ctx.count("- `tmpl`"), 1, ctx)
         self.assertNotIn("tmpl:a/b`", ctx)
@@ -747,23 +748,23 @@ class TestCompositionOrder(ArgProfileCase):
 
     def test_rule_then_arg_expansion_then_static_floor(self):
         self.profile_dir({"tmpl": self.TMPL, "plain": self.PLAIN})
-        profiles = sg.resolve_profiles(["plain", "tmpl:a/b"])
-        text = sg.compose_rules(profiles, ["example.com/a/b/** GET POST PUT"])
+        profiles = prof.resolve_profiles(["plain", "tmpl:a/b"])
+        text = prof.compose_rules(profiles, ["example.com/a/b/** GET POST PUT"])
         blocks = [text.index("# --- --rule ---"),
                   text.index("# --- profile tmpl:a/b ---"),
                   text.index("# --- profile plain ---")]
         self.assertEqual(blocks, sorted(blocks), text)
-        ruleset = sg.load_ruleset(text)
+        ruleset = prof.load_ruleset(text)
         # All three rules cover GET /a/b/x; the --rule line (the only one with PUT)
         # must be the one that governs it.
         governing = ruleset.match("example.com", "/a/b/x", "GET")
         self.assertIn("PUT", governing.methods)
         # Without the --rule line the arg expansion (the POST-bearing rule) governs.
-        governing = sg.load_ruleset(sg.compose_rules(profiles)).match(
+        governing = prof.load_ruleset(prof.compose_rules(profiles)).match(
             "example.com", "/a/b/x", "GET")
         self.assertIn("POST", governing.methods)
         # Off the arg's paths, the static floor is all that matches.
-        governing = sg.load_ruleset(sg.compose_rules(profiles)).match(
+        governing = prof.load_ruleset(prof.compose_rules(profiles)).match(
             "example.com", "/elsewhere", "GET")
         self.assertEqual(governing.methods, {"GET"})
 
@@ -827,8 +828,8 @@ class TestProfileContextSnippets(ArgProfileCase):
             "context.md": "## Grant {arg}\n\n**Use the API at `example.com/{arg}`.**\n"}
 
     def brief_for(self, specs):
-        profiles = sg.resolve_profiles(specs)
-        return sg.session_context(profiles, sg.load_ruleset(sg.compose_rules(profiles)),
+        profiles = prof.resolve_profiles(specs)
+        return sg.session_context(profiles, prof.load_ruleset(prof.compose_rules(profiles)),
                                   persistent=False)
 
     def test_snippet_lands_expanded_once_per_instance(self):
@@ -851,15 +852,15 @@ class TestProfileContextSnippets(ArgProfileCase):
     def test_snippet_placeholder_without_pattern_refused_at_load(self):
         self.profile_dir({"holey": {"rules.txt": "a.com/x GET\n",
                                     "context.md": "hello {arg}\n"}})
-        self.refuses("context.md", sg.resolve_profiles, ["holey"])
+        self.refuses("context.md", prof.resolve_profiles, ["holey"])
 
 
 class TestEmptyAllowlist(CliCase):
     """No --with and no --rule is the strictest policy silkgate can express."""
 
     def test_empty_ruleset_parses_and_denies(self):
-        self.assertEqual(sg.compose_rules([]), "")
-        ruleset = sg.load_ruleset(sg.compose_rules([]))
+        self.assertEqual(prof.compose_rules([]), "")
+        ruleset = prof.load_ruleset(prof.compose_rules([]))
         self.assertEqual(ruleset.rules, [])
         self.assertIsNone(ruleset.match("api.anthropic.com", "/v1/messages", "POST"))
 
@@ -872,10 +873,10 @@ class TestEmptyAllowlist(CliCase):
         self.assertIn("reach nothing", err.getvalue())
 
     def test_guest_brief_describes_an_empty_allowlist(self):
-        empty = sg.session_context([], sg.load_ruleset(""), persistent=False)
+        empty = sg.session_context([], prof.load_ruleset(""), persistent=False)
         self.assertIn("The allowlist is empty", empty)
         self.assertNotIn("Only these", empty)
-        listed = sg.session_context([], sg.load_ruleset("api.anthropic.com/v1/** POST\n"),
+        listed = sg.session_context([], prof.load_ruleset("api.anthropic.com/v1/** POST\n"),
                                     persistent=False)
         self.assertIn("Only these", listed)
         self.assertIn("`api.anthropic.com/v1/**`", listed)
@@ -894,7 +895,7 @@ class TestGuestCredential(ArgProfileCase):
         if secret is not None:
             env["SILKGATE_EGRESS_SECRET_ANTHROPIC"] = secret
         with mock.patch.dict(os.environ, env, clear=True):
-            return sg._guest_credential_env([sg.Profile("claude")])
+            return sg._guest_credential_env([prof.Profile("claude")])
 
     def test_an_api_key_secret_plants_a_dummy_api_key(self):
         self.assertEqual(self.env_for("x-api-key: sk-ant-api03-real"), [self.API_KEY])
@@ -915,22 +916,22 @@ class TestGuestCredential(ArgProfileCase):
     def test_the_image_env_holds_no_credential(self):
         """A baked ANTHROPIC_API_KEY would outrank CLAUDE_CODE_OAUTH_TOKEN in the guest
         and could never be unset at launch."""
-        self.assertNotIn("ANTHROPIC_API_KEY", sg.Profile("claude").env)
+        self.assertNotIn("ANTHROPIC_API_KEY", prof.Profile("claude").env)
 
     def test_a_profile_without_the_key_plants_nothing(self):
         self.profile_dir({"plain": {"profile.conf": "description = x\n"}})
-        self.assertEqual(sg._guest_credential_env([sg.Profile("plain")]), [])
+        self.assertEqual(sg._guest_credential_env([prof.Profile("plain")]), [])
 
     def test_a_secret_name_without_header_lines_is_refused_at_load(self):
         self.profile_dir({"bad": {"profile.conf": "guest_credential = anthropic\n"}})
         with self.assertRaises(SystemExit):
-            sg.Profile("bad")
+            prof.Profile("bad")
 
     def test_a_header_line_that_is_not_key_value_is_refused_at_load(self):
         self.profile_dir({"bad": {"profile.conf": "guest_credential = anthropic\n"
                                                   "guest_credential.x-api-key = nope\n"}})
         with self.assertRaises(SystemExit):
-            sg.Profile("bad")
+            prof.Profile("bad")
 
 
 class TestSecretValidation(CliCase):
@@ -941,7 +942,7 @@ class TestSecretValidation(CliCase):
     _RULE = "api.anthropic.com/v1/** POST inject_auth=anthropic max_body=10m"
 
     def _ruleset(self):
-        return sg.load_ruleset(self._RULE)
+        return prof.load_ruleset(self._RULE)
 
     def test_check_secrets_passes_when_valid(self):
         ruleset = self._ruleset()
@@ -949,7 +950,7 @@ class TestSecretValidation(CliCase):
         with mock.patch.dict(os.environ,
                              {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: sk-ant-test"}):
             with contextlib.redirect_stderr(err):
-                sg.check_secrets(ruleset)
+                prof.check_secrets(ruleset)
         self.assertEqual(err.getvalue(), "")
 
     def test_check_secrets_warns_when_absent(self):
@@ -959,7 +960,7 @@ class TestSecretValidation(CliCase):
                if not k.startswith("SILKGATE_EGRESS_SECRET_")}
         with mock.patch.dict(os.environ, env, clear=True):
             with contextlib.redirect_stderr(err):
-                sg.check_secrets(ruleset)
+                prof.check_secrets(ruleset)
         self.assertIn("SILKGATE_EGRESS_SECRET_ANTHROPIC", err.getvalue())
         self.assertIn("is not set", err.getvalue())
         self.assertIn("inject_auth=anthropic", err.getvalue())
@@ -972,7 +973,7 @@ class TestSecretValidation(CliCase):
         with mock.patch.dict(os.environ,
                              {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: "}):
             with contextlib.redirect_stderr(err):
-                sg.check_secrets(ruleset)
+                prof.check_secrets(ruleset)
         self.assertIn("SILKGATE_EGRESS_SECRET_ANTHROPIC", err.getvalue())
         self.assertIn('not a valid', err.getvalue())
         self.assertIn("inject_auth=anthropic", err.getvalue())
@@ -984,7 +985,7 @@ class TestSecretValidation(CliCase):
                if not k.startswith("SILKGATE_EGRESS_SECRET_")}
         with mock.patch.dict(os.environ, env, clear=True):
             with contextlib.redirect_stderr(io.StringIO()):
-                sg.check_secrets(ruleset)   # must not raise
+                prof.check_secrets(ruleset)   # must not raise
 
     def test_check_secrets_does_not_die_when_malformed(self):
         """A malformed but set secret is a warning, not a fatal error at launch."""
@@ -992,7 +993,7 @@ class TestSecretValidation(CliCase):
         with mock.patch.dict(os.environ,
                              {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "no-colon-here"}):
             with contextlib.redirect_stderr(io.StringIO()):
-                sg.check_secrets(ruleset)   # must not raise
+                prof.check_secrets(ruleset)   # must not raise
 
     def test_cmd_secret_set_rejects_malformed_value(self):
         """cmd_secret_set keeps a hard error so push errors are caught before the proxy."""
@@ -1044,7 +1045,7 @@ class TestSecretValidation(CliCase):
         self.assertNotIn("x-api-key", ctx)
 
     def test_session_context_omits_section_when_no_inject_auth(self):
-        ruleset = sg.load_ruleset("api.anthropic.com/v1/** POST\n")
+        ruleset = prof.load_ruleset("api.anthropic.com/v1/** POST\n")
         ctx = sg.session_context([], ruleset, persistent=False)
         self.assertNotIn("Injected credentials", ctx)
 
@@ -1926,7 +1927,7 @@ class TestGithubProfiles(CliCase):
 
     def compose(self, *specs):
         with contextlib.redirect_stderr(io.StringIO()):        # supersedes announcements
-            return sg.load_ruleset(sg.compose_rules(sg.resolve_profiles(list(specs))))
+            return prof.load_ruleset(prof.compose_rules(prof.resolve_profiles(list(specs))))
 
     # --- the read grant: no request a push or upload needs ---
 
@@ -2134,8 +2135,8 @@ class TestGithubProfiles(CliCase):
 
     def test_write_supersedes_read_for_the_same_arg_only(self):
         with contextlib.redirect_stderr(io.StringIO()):
-            same = sg.resolve_profiles(["github-read:a/b", "github-write:a/b"])
-            other = sg.resolve_profiles(["github-read:c/d", "github-write:a/b"])
+            same = prof.resolve_profiles(["github-read:a/b", "github-write:a/b"])
+            other = prof.resolve_profiles(["github-read:c/d", "github-write:a/b"])
         self.assertEqual([p.spec for p in same], ["github-write:a/b"])
         self.assertEqual([p.spec for p in other],
                          ["github-read:c/d", "github-write:a/b"])
@@ -2143,10 +2144,10 @@ class TestGithubProfiles(CliCase):
     # --- the arg contract ---
 
     def test_arg_pattern_wants_exactly_owner_slash_repo(self):
-        self.refuses("requires an argument", sg.resolve_profiles, ["github-read"])
-        self.refuses("does not match", sg.resolve_profiles, ["github-read:noslash"])
-        self.refuses("does not match", sg.resolve_profiles, ["github-write:a/b/c"])
-        self.refuses("does not match", sg.resolve_profiles, ["github-read:a/b?x=1"])
+        self.refuses("requires an argument", prof.resolve_profiles, ["github-read"])
+        self.refuses("does not match", prof.resolve_profiles, ["github-read:noslash"])
+        self.refuses("does not match", prof.resolve_profiles, ["github-write:a/b/c"])
+        self.refuses("does not match", prof.resolve_profiles, ["github-read:a/b?x=1"])
 
     def test_traversal_arg_composes_dead_rules_not_wider_ones(self):
         # '..' passes the charset, but the addon matches normalized paths, in which
@@ -2182,9 +2183,9 @@ class TestGithubProfiles(CliCase):
 
     def test_grant_snippets_steer_the_guest_to_the_rest_api(self):
         with contextlib.redirect_stderr(io.StringIO()):
-            profiles = sg.resolve_profiles(["github-read:a/b", "github-write:c/d"])
+            profiles = prof.resolve_profiles(["github-read:a/b", "github-write:c/d"])
             ctx = sg.session_context(profiles,
-                                     sg.load_ruleset(sg.compose_rules(profiles)),
+                                     prof.load_ruleset(prof.compose_rules(profiles)),
                                      persistent=False)
         self.assertIn("## GitHub grant: a/b (read)", ctx)
         self.assertIn("## GitHub grant: c/d (write)", ctx)
@@ -2374,7 +2375,7 @@ class TestGuestBriefMounts(CliCase):
     every other mount with its mode."""
 
     def ctx(self, mounts, branch=None, checkout=None):
-        return sg.session_context([], sg.load_ruleset(""), mounts=mounts,
+        return sg.session_context([], prof.load_ruleset(""), mounts=mounts,
                                   persistent=False, branch=branch, checkout=checkout)
 
     def test_workspace_rw_text(self):
@@ -2420,7 +2421,7 @@ class TestGuestBriefEgress(CliCase):
     the 500 action, and the report channel."""
 
     def ctx(self, rules="api.anthropic.com/v1/** POST inject_auth=anthropic\n"):
-        return sg.session_context([], sg.load_ruleset(rules), persistent=False)
+        return sg.session_context([], prof.load_ruleset(rules), persistent=False)
 
     def test_injected_rule_carries_the_marker(self):
         self.assertIn("- `api.anthropic.com/v1/**`: POST, injects `anthropic`",

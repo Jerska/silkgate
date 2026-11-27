@@ -45,6 +45,7 @@ sg = pkg.core
 vf = pkg.verify
 pt = pkg.paths
 con = pkg.console
+prof = pkg.profile
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet                                          # noqa: E402
@@ -244,7 +245,7 @@ class RecorderRule(unittest.TestCase):
         self.recorder_port = 9192
         # Exactly what cmd_verify composes: the probe profile's rules plus the one rule the
         # recorder adds, parsed by the engine the proxy will use.
-        self.rules = (sg.compose_rules(sg.resolve_profiles(["probe"], allow_verify_only=True))
+        self.rules = (prof.compose_rules(prof.resolve_profiles(["probe"], allow_verify_only=True))
                       + vf._recorder_rules(self.recorder_port))
         self.ruleset = RuleSet.parse(self.rules)
 

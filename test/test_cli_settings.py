@@ -32,6 +32,7 @@ pkg = clipkg.load("sg_cli_settings", home=_SCRATCH)
 sg = pkg.core
 pt = pkg.paths
 con = pkg.console
+prof = pkg.profile
 
 
 def tearDownModule():
@@ -212,7 +213,7 @@ class TestSettingsFor(SettingsCase):
 
     def test_the_shipped_claude_profile_names_the_path(self):
         self.write("user", {"effortLevel": "xhigh"})
-        profile = sg.Profile("claude")
+        profile = prof.Profile("claude")
         with mock.patch.object(sg, "CLAUDE_SETTINGS", self.user_file):
             text, paths = sg._settings_for(self.args(), [profile], None)
         self.assertEqual(paths, ["/root/.claude/settings.json"])
@@ -294,7 +295,7 @@ class TestProvisionStaging(SettingsCase):
         with mock.patch.object(sg, "_push_secrets", lambda *a, **k: None), \
                 mock.patch.object(sg, "_msb", lambda: "/fake/bin/msb"), \
                 mock.patch.object(sg.subprocess, "run", fake_run):
-            sg._provision_session(name, "img:1", 8090, "", sg.load_ruleset(""),
+            sg._provision_session(name, "img:1", 8090, "", prof.load_ruleset(""),
                                   [], None, [], {"profiles": [], "command": None}, **kwargs)
         self.addCleanup(shutil.rmtree, sg.session_dir(name), ignore_errors=True)
         copies = [calls["argv"][i + 1] for i, a in enumerate(calls["argv"])

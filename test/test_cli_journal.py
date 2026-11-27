@@ -36,6 +36,7 @@ sg = pkg.core
 gt = pkg.git
 pt = pkg.paths
 con = pkg.console
+prof = pkg.profile
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -481,7 +482,7 @@ class TestBrief(JournalCase):
 
     def test_context_points_at_the_brief_only_when_one_lands(self):
         pointer = f"Your task brief is at `{sg.GUEST_BRIEF}`. Read it first."
-        ruleset = sg.load_ruleset("")
+        ruleset = prof.load_ruleset("")
         with_brief = sg.session_context([], ruleset, persistent=False, brief=True)
         self.assertIn(pointer, with_brief)
         self.assertLess(with_brief.index(pointer), with_brief.index("## What's installed"),
@@ -492,10 +493,10 @@ class TestBrief(JournalCase):
     def test_context_for_keys_the_pointer_on_the_flag(self):
         args = types.SimpleNamespace(no_context=False, branch=None, checkout=None,
                                      brief="/tmp/task.md")
-        ctx, _ = sg._context_for(args, [], sg.load_ruleset(""), (), persistent=False)
+        ctx, _ = sg._context_for(args, [], prof.load_ruleset(""), (), persistent=False)
         self.assertIn("BRIEF.md", ctx)
         args.brief = None
-        ctx, _ = sg._context_for(args, [], sg.load_ruleset(""), (), persistent=False)
+        ctx, _ = sg._context_for(args, [], prof.load_ruleset(""), (), persistent=False)
         self.assertNotIn("BRIEF.md", ctx)
 
     def test_provision_writes_brief_and_copy_file_argv(self):
