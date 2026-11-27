@@ -37,6 +37,7 @@ pt = pkg.paths
 con = pkg.console
 prof = pkg.profile
 mt = pkg.mitm
+im = pkg.images
 
 
 def tearDownModule():
@@ -107,7 +108,7 @@ class CliCase(unittest.TestCase):
             raise SystemExit(42)
 
         with self.no_preflight(), \
-                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
+                mock.patch.object(im, "ensure_image", lambda *a, **k: "img:1"), \
                 mock.patch.object(mt, "_proxy_running", lambda: True), \
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
@@ -167,7 +168,7 @@ class TestBuildArguments(CliCase):
     def test_valid_spec_survives_parsing(self):
         self.assertEqual(pkg.main._with_arg("node@22.11.0"), "node@22.11.0")
         self.assertEqual(pkg.main._with_arg("claude"), "claude")
-        self.assertEqual(pkg.main._image_arg(sg.BASE_IMAGE), sg.BASE_IMAGE)
+        self.assertEqual(pkg.main._image_arg(im.BASE_IMAGE), im.BASE_IMAGE)
 
 
 class TestBaseFlag(CliCase):
@@ -179,12 +180,12 @@ class TestBaseFlag(CliCase):
                      ["up", "--name", "bf1", "--base", "example.com/alt:9"]):
             seen = {}
 
-            def spy(profiles, image, *, base=sg.BASE_IMAGE):
+            def spy(profiles, image, *, base=im.BASE_IMAGE):
                 seen["base"] = base
                 raise SystemExit(42)                        # stop before any proxy/msb work
 
             with self.no_preflight(), \
-                    mock.patch.object(sg, "ensure_image", spy), \
+                    mock.patch.object(im, "ensure_image", spy), \
                     mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                     contextlib.redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit) as caught:
@@ -195,8 +196,8 @@ class TestBaseFlag(CliCase):
     def test_image_beside_a_named_base_is_refused(self):
         # An explicit image means nothing is built, so the base would be ignored — the
         # exact accepted-then-inert behaviour the passthrough above exists to end.
-        self.assertEqual(sg.ensure_image([], "explicit:1"), "explicit:1")
-        self.refuses("--image and --base", sg.ensure_image, [], "explicit:1",
+        self.assertEqual(im.ensure_image([], "explicit:1"), "explicit:1")
+        self.refuses("--image and --base", im.ensure_image, [], "explicit:1",
                      base="example.com/alt:9")
         with self.no_preflight(), \
                 mock.patch.object(sys, "argv", ["silkgate", "run", "--image", "img:1",
@@ -209,12 +210,12 @@ class TestImageRef(CliCase):
     lookup in ensure_image serves a stale build after that thing changes."""
 
     def test_hash_covers_the_base(self):
-        self.assertNotEqual(sg.image_ref([]), sg.image_ref([], base="ubuntu:24.04"))
+        self.assertNotEqual(im.image_ref([]), im.image_ref([], base="ubuntu:24.04"))
 
     def test_hash_covers_the_base_layer_bytes(self):
-        before = sg.image_ref([])
-        with mock.patch.object(sg, "_BASE_LAYER", sg._BASE_LAYER + "ENV X=1\n"):
-            self.assertNotEqual(before, sg.image_ref([]))
+        before = im.image_ref([])
+        with mock.patch.object(im, "_BASE_LAYER", im._BASE_LAYER + "ENV X=1\n"):
+            self.assertNotEqual(before, im.image_ref([]))
 
 
 class TestGuestCaEnv(CliCase):
@@ -243,7 +244,7 @@ class TestGuestCaEnv(CliCase):
                                  f"alone leaves the build unable to reach the internet")
 
     def test_base_layer_sets_every_promised_var(self):
-        self.assert_ca_env(sg._BASE_LAYER)
+        self.assert_ca_env(im._BASE_LAYER)
 
     def test_written_dockerfile_carries_them(self):
         cert = self.tmp / "egress-ca.pem"
@@ -251,7 +252,7 @@ class TestGuestCaEnv(CliCase):
         context = self.tmp / "context"
         context.mkdir()
         with mock.patch.object(mt, "ensure_ca", lambda: cert):
-            sg.write_build_context(context, [], "debian:bookworm-slim")
+            im.write_build_context(context, [], "debian:bookworm-slim")
         dockerfile = (context / "Dockerfile").read_text()
         self.assertTrue(dockerfile.startswith("FROM debian:bookworm-slim\n"))
         self.assert_ca_env(dockerfile)
@@ -703,7 +704,7 @@ class TestProfileArgExpansion(ArgProfileCase):
         context = self.tmp / "ctx"
         context.mkdir()
         with mock.patch.object(mt, "ensure_ca", lambda: cert):
-            sg.write_build_context(context, [p], sg.BASE_IMAGE)
+            im.write_build_context(context, [p], im.BASE_IMAGE)
         self.assertEqual((context / "setup-holey.sh").read_text(), "echo {arg}\n")
         self.assertIn("X={arg}", (context / "Dockerfile").read_text())
 
@@ -714,7 +715,7 @@ class TestImageIdentityExcludesArg(ArgProfileCase):
 
     def test_hash_and_slug_unchanged_across_args(self):
         self.profile_dir({"tmpl": self.TMPL})
-        refs = {sg.image_ref(prof.resolve_profiles(spec))
+        refs = {im.image_ref(prof.resolve_profiles(spec))
                 for spec in (["tmpl:a/b"], ["tmpl:c/d"], ["tmpl:a/b", "tmpl:c/d"])}
         self.assertEqual(len(refs), 1, refs)
         ref = refs.pop()
@@ -729,7 +730,7 @@ class TestImageIdentityExcludesArg(ArgProfileCase):
         context = self.tmp / "ctx"
         context.mkdir()
         with mock.patch.object(mt, "ensure_ca", lambda: cert):
-            sg.write_build_context(context, profiles, sg.BASE_IMAGE)
+            im.write_build_context(context, profiles, im.BASE_IMAGE)
         dockerfile = (context / "Dockerfile").read_text()
         self.assertEqual(dockerfile.count("COPY setup-tmpl.sh"), 1, dockerfile)
 
@@ -1642,7 +1643,7 @@ class TestHarvestWiring(CliCase):
                 self.no_preflight(), \
                 mock.patch.object(gt, "_branch_spec", lambda *a: dict(self.FAKE_SPEC)), \
                 mock.patch.object(gt, "_branch_workspace", lambda spec, name: (ws, [])), \
-                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
+                mock.patch.object(im, "ensure_image", lambda *a, **k: "img:1"), \
                 mock.patch.object(mt, "_proxy_running", lambda: True), \
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
@@ -2255,7 +2256,7 @@ class TestMemoryFlag(CliCase):
 
         with self.no_preflight(), \
                 mock.patch.object(sg, "_msb", lambda: "msb"), \
-                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
+                mock.patch.object(im, "ensure_image", lambda *a, **k: "img:1"), \
                 mock.patch.object(mt, "_proxy_running", lambda: True), \
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \

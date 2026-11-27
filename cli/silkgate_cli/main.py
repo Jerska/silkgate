@@ -16,7 +16,7 @@ import re
 import signal
 import sys
 
-from . import console, core, logs, mitm, profile, ui_server, verify
+from . import console, core, images, logs, mitm, profile, ui_server, verify
 
 
 # The two argument types that reach a generated Dockerfile or an msb argv are checked by
@@ -104,8 +104,8 @@ def main():
                        help="add a profile: what to install and what it may reach "
                             "(repeatable; see `silkgate profiles`)")
         if not rules_only:
-            p.add_argument("--base", default=core.BASE_IMAGE, type=_image_arg,
-                           help=f"base image under the profiles (default: {core.BASE_IMAGE})")
+            p.add_argument("--base", default=images.BASE_IMAGE, type=_image_arg,
+                           help=f"base image under the profiles (default: {images.BASE_IMAGE})")
         p.add_argument("--rule", action="append", metavar="RULE",
                        help="add one rule, e.g. 'example.com/** GET' (repeatable)")
 

@@ -38,6 +38,7 @@ pt = pkg.paths
 con = pkg.console
 prof = pkg.profile
 mt = pkg.mitm
+im = pkg.images
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -542,7 +543,7 @@ class TestMetaAdditions(JournalCase):
             raise SystemExit(42)
 
         with mock.patch.object(con, "preflight", lambda *a: None), \
-                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
+                mock.patch.object(im, "ensure_image", lambda *a, **k: "img:1"), \
                 mock.patch.object(mt, "_proxy_running", lambda: True), \
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
@@ -746,7 +747,7 @@ class TestExecBrief(JournalCase):
             self.write_session(name, **meta_extra)
 
         with mock.patch.object(con, "preflight", lambda *a: None), \
-                mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
+                mock.patch.object(im, "ensure_image", lambda *a, **k: "img:1"), \
                 mock.patch.object(mt, "_proxy_running", lambda: True), \
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
