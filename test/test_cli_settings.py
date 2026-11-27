@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parent.parent
 # Everything the CLI would write lives under one scratch home for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-settings-tests-"))
 pkg = clipkg.load("sg_cli_settings", home=_SCRATCH)
-sg = pkg.core
+sg = pkg.commands
 pt = pkg.paths
 con = pkg.console
 prof = pkg.profile

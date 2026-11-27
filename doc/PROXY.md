@@ -23,7 +23,7 @@ Pinned by: `test/test_proxy_lifecycle.py`.
 
 ## The port pool
 
-<!-- Mirrors POOL_SIZE and DEFAULT_BASE_PORT in cli/silkgate_cli/. Update both. -->
+<!-- Mirrors POOL_SIZE and DEFAULT_BASE_PORT in cli/silkgate_cli/mitm.py. Update both. -->
 **The proxy listens on 16 consecutive ports, normally 8090 to 8105.**
 
 - The scan starts at 8090, or at `--port`. A taken port anywhere shifts the whole pool to
@@ -173,7 +173,7 @@ Pinned by: `test/test_cli_journal.py`, `test/test_capture_decoder.py`.
 The sid is a UTC stamp, the session name, and six hex characters, so sorting by name sorts
 by time. `silkgate ls -a` lists archives, and the audit UI reads them.
 
-<!-- Mirrors _teardown_session and _SNAPSHOT_TAIL_LINES in cli/silkgate_cli/. Update both. -->
+<!-- Mirrors _teardown_session and _SNAPSHOT_TAIL_LINES in cli/silkgate_cli/lifecycle.py. Update both. -->
 | File | Holds |
 |---|---|
 | `meta.json` | the session's metadata, plus `sid`, `ended`, `last_rc` |
@@ -197,7 +197,7 @@ Pinned by: `test/test_cli_journal.py`.
 **A file goes only when it's both older than its age limit and beyond its newest-count
 guard. Each removal prints a line.**
 
-<!-- Mirrors LOG_RETAIN_*, CAPTURE_RETAIN_DAYS, and ARCHIVE_RETAIN_* in cli/silkgate_cli/. Update both. -->
+<!-- Mirrors LOG_RETAIN_* and CAPTURE_RETAIN_DAYS in cli/silkgate_cli/mitm.py, and ARCHIVE_RETAIN_* in lifecycle.py. Update both. -->
 | Kind | Age | Keeps at least | Knob (`0` keeps everything) |
 |---|---|---|---|
 | `proxy-*.log`, `events-*.jsonl`, `*.rules` | 30 days | newest 20 per kind | `SILKGATE_LOG_RETAIN_DAYS` |

@@ -1,4 +1,4 @@
-"""The machinery behind the silkgate commands: profiles, images, sessions, the proxy, guests."""
+"""The silkgate commands, one cmd_<name> per subcommand, and the helpers only they share."""
 import hashlib
 import os
 import shutil
@@ -351,12 +351,12 @@ def _context_for(args, profiles, ruleset, mounts, *, persistent):
     """
     if args.no_context:
         return None, ()
-    paths = list(dict.fromkeys(
+    dsts = list(dict.fromkeys(
         [briefing.GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
                                     if p.conf.get("context_path")]))
     return briefing.session_context(profiles, ruleset, mounts=mounts, persistent=persistent,
                                     branch=args.branch, checkout=args.checkout,
-                                    brief=bool(getattr(args, "brief", None))), paths
+                                    brief=bool(getattr(args, "brief", None))), dsts
 
 
 def cmd_up(args):

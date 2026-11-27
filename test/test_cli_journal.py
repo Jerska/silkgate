@@ -32,7 +32,7 @@ REPO = Path(__file__).resolve().parent.parent
 # Everything the CLI would write lives under one scratch home for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-journal-tests-"))
 pkg = clipkg.load("sg_cli_journal", home=_SCRATCH)
-sg = pkg.core
+sg = pkg.commands
 gt = pkg.git
 pt = pkg.paths
 con = pkg.console

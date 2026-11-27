@@ -16,6 +16,9 @@ The README's [Layout](README.md#layout) maps the directories.
 
 - `cli/` and `mitmaddon/` are stdlib-only Python 3. Keep them that way. mitmproxy is the one
   third-party dependency, and only the addon needs it.
+- In `cli/silkgate_cli/`, import modules, never names: `from . import mitm`, then
+  `mitm.stop_proxy()`. A test then patches the module that defines a name, and every caller
+  sees the patch. Don't name a local like a module: it hides the module in that function.
 - `ui/` is vanilla ES modules: no framework, no build step.
 - Minimize state. Prefer clarity over cleverness. Write comments for a reader of the file,
   not for a reviewer of your change.

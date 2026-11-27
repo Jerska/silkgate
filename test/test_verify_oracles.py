@@ -41,7 +41,7 @@ import clipkg
 REPO = Path(__file__).resolve().parents[1]
 
 pkg = clipkg.load("sg_verify_oracles")
-sg = pkg.core
+sg = pkg.commands
 vf = pkg.verify
 pt = pkg.paths
 con = pkg.console

@@ -58,7 +58,7 @@ REPO = Path(__file__).resolve().parents[1]
 CLI = REPO / "cli" / "silkgate"
 
 pkg = clipkg.load("sg_ui")
-MOD = pkg.core
+MOD = pkg.commands
 UI = pkg.ui_server
 GIT = pkg.git
 PATHS = pkg.paths

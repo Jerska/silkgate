@@ -162,7 +162,7 @@ def _wait_proxy_ready(proc, ports, log_path):
 # pruning favors keeping: a file goes only when it's BOTH older than the retention age AND
 # beyond the newest LOG_RETAIN_COUNT of its kind. Every removal is announced, and
 # SILKGATE_LOG_RETAIN_DAYS=0 keeps everything.
-# Mirrored with ARCHIVE_RETAIN_* in doc/PROXY.md (Retention). Update both.
+# Mirrored with ARCHIVE_RETAIN_* (lifecycle.py) in doc/PROXY.md (Retention). Update both.
 LOG_RETAIN_DAYS = 30
 LOG_RETAIN_COUNT = 20
 # Capture files hold conversation content — bulkier and more sensitive than audit
@@ -571,10 +571,10 @@ def _release_port(name, port=None):
     Only claims naming `name` are touched, so a port that was reaped and re-claimed by
     a newer session is left alone."""
     try:
-        paths = [_claim_path(port)] if port else list(_port_claims_dir().iterdir())
+        claims = [_claim_path(port)] if port else list(_port_claims_dir().iterdir())
     except OSError:
         return
-    for path in paths:
+    for path in claims:
         info = sessions._read_json(path)
         if info and info.get("name") == name:
             try:

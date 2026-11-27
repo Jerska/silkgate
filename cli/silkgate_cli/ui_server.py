@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import console, core, git, lifecycle, logs, mitm, paths, sessions, vm
+from . import commands, console, git, lifecycle, logs, mitm, paths, sessions, vm
 
 
 # --- ui: a local web view over the events files -------------------------------------
@@ -870,7 +870,7 @@ def _ui_server(port):
                     {"error": "an archived session cannot be controlled"}, 409)
             if action == "down":
                 try:
-                    core._down_session(meta)
+                    commands._down_session(meta)
                 except SystemExit:               # die() inside the teardown: kept whole
                     return self._json({"error": "teardown failed — the session is "
                                                 "kept; run `silkgate down` for the "

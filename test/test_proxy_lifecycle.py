@@ -57,7 +57,7 @@ CLI = REPO / "cli" / "silkgate"
 os.environ.pop("SILKGATE_PROXY_BIND", None)
 
 pkg = clipkg.load("sg_proxy_lifecycle")
-MOD = pkg.core
+MOD = pkg.commands
 PATHS = pkg.paths
 CONSOLE = pkg.console
 FOREGROUND = pkg.foreground

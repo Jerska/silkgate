@@ -9,6 +9,7 @@ this module. Importing it has no side effects on disk, but its state paths are d
 from $HOME at import time, so it loads with $HOME at a scratch directory. Nothing here
 may touch a real ~/.silkgate: live sessions use it.
 """
+import ast
 import contextlib
 import io
 import itertools
@@ -30,7 +31,7 @@ REPO = Path(__file__).resolve().parent.parent
 # Everything the CLI would write lives under one scratch home for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-tests-"))
 pkg = clipkg.load("sg_cli_validation", home=_SCRATCH)
-sg = pkg.core
+sg = pkg.commands
 vf = pkg.verify
 gt = pkg.git
 pt = pkg.paths
@@ -453,6 +454,37 @@ class TestMountGuards(CliCase):
             self.assertEqual(caught.exception.code, 42, argv)
             self.assertEqual(seen["specs"], [spec], argv)
             self.assertTrue(seen["flag"], argv)
+
+
+class TestImportRule(unittest.TestCase):
+    """Package modules import modules, never names, so a test that patches the module
+    defining a name reaches every caller. A local named like a module would hide it."""
+
+    MODULES = {p.stem for p in clipkg.PKG_DIR.glob("*.py")} - {"__init__"}
+
+    def trees(self):
+        for path in sorted(clipkg.PKG_DIR.glob("*.py")):
+            yield path.name, ast.parse(path.read_text())
+
+    def test_relative_imports_bring_in_modules_only(self):
+        for name, tree in self.trees():
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.level:
+                    for alias in node.names:
+                        self.assertIn(alias.name, self.MODULES,
+                                      f"{name} imports the name {alias.name}, not a module")
+
+    def test_no_local_is_named_like_a_module(self):
+        for name, tree in self.trees():
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    continue
+                args = fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs
+                bound = {a.arg for a in args}
+                bound |= {n.id for n in ast.walk(fn)
+                          if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+                self.assertFalse(bound & self.MODULES,
+                                 f"{name}:{fn.lineno} binds {sorted(bound & self.MODULES)}")
 
 
 class TestEnvGuard(CliCase):

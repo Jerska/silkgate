@@ -141,10 +141,11 @@ def _snapshot_output(sandbox, sdir):
         console.say(f"warning: could not write the guest-output snapshot: {e}")
 
 
-# Retention for ~/.silkgate/archive, favouring keeping like the audit logs above: an
+# Retention for ~/.silkgate/archive, favouring keeping like the audit logs (mitm.py): an
 # archived session goes only when BOTH older than the age AND beyond the newest
 # ARCHIVE_RETAIN_COUNT, every removal is announced, and SILKGATE_ARCHIVE_RETAIN_DAYS=0
 # (or less) keeps everything.
+# Mirrored with LOG_RETAIN_* in doc/PROXY.md (Retention). Update both.
 ARCHIVE_RETAIN_DAYS = 30
 ARCHIVE_RETAIN_COUNT = 50
 

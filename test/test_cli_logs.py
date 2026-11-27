@@ -46,7 +46,7 @@ os.environ.pop("SILKGATE_PROXY_BIND", None)
 os.environ.pop("SILKGATE_LOG_RETAIN_DAYS", None)
 
 pkg = clipkg.load("sg_cli_logs")
-MOD = pkg.core
+MOD = pkg.commands
 LOGS = pkg.logs
 PATHS = pkg.paths
 CONSOLE = pkg.console

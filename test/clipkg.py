@@ -1,7 +1,7 @@
 """Load a private copy of the cli/silkgate_cli package for one test module.
 
     pkg = clipkg.load("sg_relay")
-    sg = pkg.core
+    vm = pkg.vm
 
 Each copy imports with $HOME at a scratch directory, so every path it derives from the home
 directory (~/.silkgate, the mitmproxy CA, ~/.claude/settings.json) starts out there, never

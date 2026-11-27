@@ -31,7 +31,7 @@ if shutil.which("git") is None:
 # Everything the CLI would write lives under one scratch home for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-ingest-tests-"))
 pkg = clipkg.load("sg_cli_branch_ingest", home=_SCRATCH)
-sg = pkg.core
+sg = pkg.commands
 gt = pkg.git
 pt = pkg.paths
 

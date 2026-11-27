@@ -16,7 +16,7 @@ import re
 import signal
 import sys
 
-from . import briefing, console, core, images, logs, mitm, mount, profile, ui_server, verify
+from . import briefing, commands, console, images, logs, mitm, mount, profile, ui_server, verify
 
 
 # The two argument types that reach a generated Dockerfile or an msb argv are checked by
@@ -161,21 +161,21 @@ def main():
                    type=_with_arg,
                    help="print the rules a session with these --with specs enforces "
                         "(repeatable)")
-    p.set_defaults(fn=core.cmd_profiles)
+    p.set_defaults(fn=commands.cmd_profiles)
 
     p = sub.add_parser("doctor", help="list missing tools (docker, msb, mitmdump), with "
                                       "install commands")
-    p.set_defaults(fn=core.cmd_doctor)
+    p.set_defaults(fn=commands.cmd_doctor)
 
     p = sub.add_parser("build", help="build the image for a profile list, into msb")
     profile_opts(p)
     p.add_argument("--platform", metavar="P", help="docker platform (default: the host's)")
-    p.set_defaults(fn=core.cmd_build)
+    p.set_defaults(fn=commands.cmd_build)
 
     p = sub.add_parser("proxy", help="run one ruleset on one port, in the foreground")
     profile_opts(p, rules_only=True)
     p.add_argument("--port", type=int, default=8090, help="listen port (default: 8090)")
-    p.set_defaults(fn=core.cmd_proxy)
+    p.set_defaults(fn=commands.cmd_proxy)
 
     p = sub.add_parser("verify", help="prove containment from inside a root guest")
     p.add_argument("--full", action="store_true",
@@ -200,12 +200,12 @@ def main():
                         "--no-tty keeps stdout and stderr apart.")
     p.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD ...",
                    help="guest command (default: the profile's command)")
-    p.set_defaults(fn=core.cmd_run)
+    p.set_defaults(fn=commands.cmd_run)
 
     p = sub.add_parser("up", help="start a session: a guest that stays up between commands")
     guest_opts(p)
     brief_opt(p, "the default")
-    p.set_defaults(fn=core.cmd_up)
+    p.set_defaults(fn=commands.cmd_up)
 
     p = sub.add_parser("exec", help="run a command in a session's guest")
     p.add_argument("name", metavar="NAME", help="session name")
@@ -218,12 +218,12 @@ def main():
     # -t/-e that follow NAME. '*' lets them parse; use `--` to pass flags on to CMD.
     p.add_argument("cmd", nargs="*", metavar="-- CMD ...",
                    help="guest command (put -- before one with flags)")
-    p.set_defaults(fn=core.cmd_exec)
+    p.set_defaults(fn=commands.cmd_exec)
 
     p = sub.add_parser("attach", help="open a terminal on a session, running its profile's "
                                       "command")
     p.add_argument("name", metavar="NAME", help="session name")
-    p.set_defaults(fn=core.cmd_attach)
+    p.set_defaults(fn=commands.cmd_attach)
 
     p = sub.add_parser("logs", help="print a session's guest output, or its proxy decisions")
     p.add_argument("name", metavar="NAME", help="session name")
@@ -245,16 +245,16 @@ def main():
     p = sub.add_parser("harvest", help="bring a --branch session's commits back now, "
                                        "without stopping it")
     p.add_argument("name", metavar="NAME", help="session name")
-    p.set_defaults(fn=core.cmd_harvest)
+    p.set_defaults(fn=commands.cmd_harvest)
 
     p = sub.add_parser("down", help="stop and remove a session. The last one stops the proxy.")
     p.add_argument("name", metavar="NAME", help="session name")
-    p.set_defaults(fn=core.cmd_down)
+    p.set_defaults(fn=commands.cmd_down)
 
     p = sub.add_parser("ls", help="list sessions and proxy health")
     p.add_argument("-a", "--all", action="store_true",
                    help="include archived sessions. ID is the archive's sid.")
-    p.set_defaults(fn=core.cmd_ls)
+    p.set_defaults(fn=commands.cmd_ls)
 
     p = sub.add_parser("secret", help="push or list the secrets the proxy holds")
     ssub = p.add_subparsers(dest="secret_cmd", required=True)
@@ -263,11 +263,11 @@ def main():
     q.add_argument("name", metavar="NAME", help="secret name: reads SILKGATE_EGRESS_SECRET_<NAME>")
     q.add_argument("--session", required=True, metavar="SESSION",
                    help="the session that may spend it")
-    q.set_defaults(fn=core.cmd_secret_set)
+    q.set_defaults(fn=commands.cmd_secret_set)
     q = ssub.add_parser("ls", help="list secret names, never values")
     q.add_argument("--session", metavar="SESSION",
                    help="one session only (default: all, by session)")
-    q.set_defaults(fn=core.cmd_secret_ls)
+    q.set_defaults(fn=commands.cmd_secret_ls)
 
     # SIGTERM must run the finally-blocks that stop mitmdump/msb, not kill us outright.
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))

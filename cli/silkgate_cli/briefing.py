@@ -262,10 +262,10 @@ def _settings_for(args, profiles, workspace):
     """
     if args.no_settings:
         return None, ()
-    paths = [p.conf["settings_path"] for p in profiles if p.conf.get("settings_path")]
-    if not paths:
+    dsts = [p.conf["settings_path"] for p in profiles if p.conf.get("settings_path")]
+    if not dsts:
         return None, ()
     resolved = _resolve_settings(workspace, CLAUDE_SETTINGS)
     if not resolved:
         return None, ()
-    return json.dumps(resolved) + "\n", paths
+    return json.dumps(resolved) + "\n", dsts
