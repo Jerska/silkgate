@@ -64,6 +64,7 @@ FOREGROUND = pkg.foreground
 MITM = pkg.mitm
 SESSIONS = pkg.sessions
 VM = pkg.vm
+LIFECYCLE = pkg.lifecycle
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -370,9 +371,9 @@ def _teardown_worker(barrier, q, name, down_style):
     the _maybe_stop_proxy that `down` follows up with."""
     try:
         barrier.wait(timeout=20)
-        MOD._teardown_session(SESSIONS.read_meta(name))
+        LIFECYCLE._teardown_session(SESSIONS.read_meta(name))
         if down_style:
-            MOD._maybe_stop_proxy()
+            LIFECYCLE._maybe_stop_proxy()
         q.put((name, "ok"))
     except SystemExit as e:
         q.put((name, f"die: {e}"))
@@ -740,14 +741,14 @@ class LifecycleTest(_FakeToolsCase):
         stub = self.start_stub_sock()
         self.proxy_meta(pid=stub.pid)
         self.write_claim(8090, "starting", os.getpid())
-        MOD._maybe_stop_proxy()
+        LIFECYCLE._maybe_stop_proxy()
         self.assertIsNone(stub.poll(), "proxy killed under a starting session")
 
     def test_maybe_stop_proxy_stops_when_idle(self):
         stub = self.start_stub_sock()
         _autoreap(stub.pid)
         self.proxy_meta(pid=stub.pid)
-        MOD._maybe_stop_proxy()
+        LIFECYCLE._maybe_stop_proxy()
         stub.wait(5)
         self.assertIsNotNone(stub.poll(), "idle proxy left running")
         self.assertFalse(PATHS.PROXY_JSON.exists())
@@ -764,7 +765,7 @@ class LifecycleTest(_FakeToolsCase):
         port = MITM.pick_port(proxy, "prov1")
         ruleset = rule_engine.RuleSet.parse(RULE)
         with self.assertRaises(SystemExit):
-            MOD._provision_session("prov1", "img", port, RULE, ruleset,
+            LIFECYCLE._provision_session("prov1", "img", port, RULE, ruleset,
                                    [], None, [], {"profiles": [], "command": None})
         self.assertFalse(SESSIONS.session_dir("prov1").exists())
         self.assertFalse((PATHS.SESSIONS_DIR / ".tmp-prov1").exists())
@@ -790,7 +791,7 @@ class LifecycleTest(_FakeToolsCase):
         SESSIONS._write_json = landing_racer
         self.addCleanup(setattr, SESSIONS, "_write_json", orig)
         with self.assertRaises(SystemExit):
-            MOD._provision_session("racy", "img", 8090, RULE, ruleset,
+            LIFECYCLE._provision_session("racy", "img", 8090, RULE, ruleset,
                                    [], None, [], {"profiles": [], "command": None})
         self.assertTrue((SESSIONS.session_dir("racy") / "marker").exists(),
                         "loser's cleanup deleted the winner's session dir")
@@ -805,13 +806,13 @@ class LifecycleTest(_FakeToolsCase):
         self.msb_cfg({"rm_ok": False, "listed": ["sg-t1"]})
         meta = SESSIONS.read_meta("t1")
         with self.assertRaises(SystemExit):
-            MOD._teardown_session(meta)
+            LIFECYCLE._teardown_session(meta)
         self.assertTrue(SESSIONS.session_dir("t1").exists(),
                         "session dir removed while its guest may be alive")
         self.assertTrue(self.claim_path(8090).exists(),
                         "port freed while its guest may be alive")
         self.msb_cfg({"rm_ok": True})
-        MOD._teardown_session(meta)
+        LIFECYCLE._teardown_session(meta)
         self.assertFalse(SESSIONS.session_dir("t1").exists())
         self.assertFalse(self.claim_path(8090).exists())
 
@@ -820,7 +821,7 @@ class LifecycleTest(_FakeToolsCase):
         self.write_session("t2", 8090)
         self.write_claim(8090, "t2", _dead_pid())
         self.msb_cfg({"rm_ok": False, "listed": []})
-        MOD._teardown_session(SESSIONS.read_meta("t2"))
+        LIFECYCLE._teardown_session(SESSIONS.read_meta("t2"))
         self.assertFalse(SESSIONS.session_dir("t2").exists())
         self.assertFalse(self.claim_path(8090).exists())
 
@@ -828,7 +829,7 @@ class LifecycleTest(_FakeToolsCase):
         self.write_session("t3", 8090)
         self.write_claim(8090, "t3", _dead_pid())
         self.msb_cfg({"rm_ok": True})
-        MOD._teardown_session(SESSIONS.read_meta("t3"))
+        LIFECYCLE._teardown_session(SESSIONS.read_meta("t3"))
         self.assertFalse(SESSIONS.session_dir("t3").exists())
         self.assertFalse(self.claim_path(8090).exists(), "port claim outlived its session")
 
@@ -843,7 +844,7 @@ class LifecycleTest(_FakeToolsCase):
         self.proxy_meta(pid=stub.pid)
         self.write_session("last", 8090)
         self.write_claim(8090, "last", os.getpid())
-        MOD._teardown_session(SESSIONS.read_meta("last"))
+        LIFECYCLE._teardown_session(SESSIONS.read_meta("last"))
         self._settle(stub)
         self.assertIsNotNone(stub.poll(),
                              "the proxy outlived its last session — the #29 orphan")
@@ -854,7 +855,7 @@ class LifecycleTest(_FakeToolsCase):
         self.proxy_meta(pid=stub.pid)
         self.write_session("going", 8090)
         self.write_session("staying", 8091)
-        MOD._teardown_session(SESSIONS.read_meta("going"))
+        LIFECYCLE._teardown_session(SESSIONS.read_meta("going"))
         self.assertIsNone(stub.poll(), "proxy stopped while a session still needs it")
         self.assertTrue(PATHS.PROXY_JSON.exists())
 
@@ -865,7 +866,7 @@ class LifecycleTest(_FakeToolsCase):
         self.proxy_meta(pid=stub.pid)
         self.write_session("going", 8090)
         self.write_claim(8091, "starting", os.getpid())
-        MOD._teardown_session(SESSIONS.read_meta("going"))
+        LIFECYCLE._teardown_session(SESSIONS.read_meta("going"))
         self.assertIsNone(stub.poll(), "proxy killed under a starting session")
         self.assertTrue(PATHS.PROXY_JSON.exists())
 
@@ -914,7 +915,7 @@ class LifecycleTest(_FakeToolsCase):
         port = MITM.pick_port(proxy, "solo")
         ruleset = rule_engine.RuleSet.parse(RULE)
         with self.assertRaises(SystemExit):
-            MOD._provision_session("solo", "img", port, RULE, ruleset,
+            LIFECYCLE._provision_session("solo", "img", port, RULE, ruleset,
                                    [], None, [], {"profiles": [], "command": None})
         self._settle(stub)
         self.assertIsNotNone(stub.poll(),

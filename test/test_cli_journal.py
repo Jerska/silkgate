@@ -42,6 +42,7 @@ im = pkg.images
 br = pkg.briefing
 ss = pkg.sessions
 vm = pkg.vm
+lc = pkg.lifecycle
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -275,11 +276,11 @@ class TestTeardownArchive(JournalCase):
                  archive=True):
         """_teardown_session with the msb seams stubbed; returns captured stderr."""
         err = io.StringIO()
-        with mock.patch.object(sg, "_remove_sandbox", lambda sandbox: removed), \
+        with mock.patch.object(lc, "_remove_sandbox", lambda sandbox: removed), \
                 mock.patch.object(vm, "_run_msb_logs",
                                   lambda sandbox, tail_n=None, since=None: logs), \
                 contextlib.redirect_stderr(err):
-            sg._teardown_session(meta, archive=archive)
+            lc._teardown_session(meta, archive=archive)
         return err.getvalue()
 
     def claim(self, port, name):
@@ -344,11 +345,11 @@ class TestTeardownArchive(JournalCase):
     def test_unremovable_sandbox_still_keeps_the_session(self):
         meta = self.write_session("t6", sid=ss._new_sid("t6"))
         err = io.StringIO()
-        with mock.patch.object(sg, "_remove_sandbox", lambda sandbox: False), \
+        with mock.patch.object(lc, "_remove_sandbox", lambda sandbox: False), \
                 mock.patch.object(vm, "_run_msb_logs",
                                   lambda sandbox, tail_n=None, since=None: ([], None)), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
-            sg._teardown_session(meta)
+            lc._teardown_session(meta)
         self.assertTrue(ss.session_dir("t6").exists(),
                         "enforcement stays fail-closed: no removal, no archive")
         self.assertEqual(list(pt.ARCHIVE_DIR.iterdir()), [])
@@ -359,7 +360,7 @@ class TestTeardownArchive(JournalCase):
         big = ["x" * 1000] * 2000                        # ~2 MiB of guest chatter
         self.teardown(meta, logs=(big, None))
         size = (pt.ARCHIVE_DIR / sid / "output.log").stat().st_size
-        self.assertLessEqual(size, sg._SNAPSHOT_MAX_BYTES)
+        self.assertLessEqual(size, lc._SNAPSHOT_MAX_BYTES)
 
     def test_snapshot_byte_knob_slices_before_the_write_keeping_the_tail(self):
         sid = ss._new_sid("t8")
@@ -382,19 +383,19 @@ class TestTeardownArchive(JournalCase):
             return [], None
 
         with mock.patch.object(vm, "_run_msb_logs", spy_logs):
-            sg._snapshot_output("sg-t9", self.tmp)
+            lc._snapshot_output("sg-t9", self.tmp)
             os.environ["SILKGATE_SNAPSHOT_TAIL_LINES"] = "123"
             self.addCleanup(os.environ.pop, "SILKGATE_SNAPSHOT_TAIL_LINES", None)
-            sg._snapshot_output("sg-t9", self.tmp)
-        self.assertEqual(seen, [sg._SNAPSHOT_TAIL_LINES, 123])
+            lc._snapshot_output("sg-t9", self.tmp)
+        self.assertEqual(seen, [lc._SNAPSHOT_TAIL_LINES, 123])
 
     def test_snapshot_knob_that_does_not_parse_positive_keeps_the_default(self):
         for bad in ("junk", "0", "-5", "1.5"):
             os.environ["SILKGATE_SNAPSHOT_TAIL_LINES"] = bad
             self.addCleanup(os.environ.pop, "SILKGATE_SNAPSHOT_TAIL_LINES", None)
-            self.assertEqual(sg._snapshot_cap("SILKGATE_SNAPSHOT_TAIL_LINES",
-                                              sg._SNAPSHOT_TAIL_LINES),
-                             sg._SNAPSHOT_TAIL_LINES, bad)
+            self.assertEqual(lc._snapshot_cap("SILKGATE_SNAPSHOT_TAIL_LINES",
+                                              lc._SNAPSHOT_TAIL_LINES),
+                             lc._SNAPSHOT_TAIL_LINES, bad)
 
     def test_planted_sid_is_refused_before_the_rename(self):
         """A hostile sid in a live meta must never become the rename destination:
@@ -427,50 +428,50 @@ class TestPruneArchive(JournalCase):
         return d
 
     def test_removal_needs_both_beyond_count_and_beyond_age(self):
-        n = sg.ARCHIVE_RETAIN_COUNT + 5
-        dirs = [self.archive_dir(i, age_days=sg.ARCHIVE_RETAIN_DAYS + 10 + i)
+        n = lc.ARCHIVE_RETAIN_COUNT + 5
+        dirs = [self.archive_dir(i, age_days=lc.ARCHIVE_RETAIN_DAYS + 10 + i)
                 for i in range(n)]
         newest_first = sorted(dirs, key=lambda d: d.stat().st_mtime, reverse=True)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            sg._prune_archive()
+            lc._prune_archive()
         kept = [d for d in dirs if d.exists()]
-        self.assertEqual(len(kept), sg.ARCHIVE_RETAIN_COUNT)
-        self.assertEqual(set(kept), set(newest_first[:sg.ARCHIVE_RETAIN_COUNT]))
+        self.assertEqual(len(kept), lc.ARCHIVE_RETAIN_COUNT)
+        self.assertEqual(set(kept), set(newest_first[:lc.ARCHIVE_RETAIN_COUNT]))
         self.assertEqual(err.getvalue().count("pruned "), 1, "one summary line")
         self.assertIn("pruned 5 archived session(s)", err.getvalue())
 
     def test_age_alone_never_prunes(self):
         for i in range(5):
             self.archive_dir(i, age_days=400 + i)
-        sg._prune_archive()
+        lc._prune_archive()
         self.assertEqual(len(list(pt.ARCHIVE_DIR.iterdir())), 5)
 
     def test_count_alone_never_prunes(self):
-        for i in range(sg.ARCHIVE_RETAIN_COUNT + 10):
+        for i in range(lc.ARCHIVE_RETAIN_COUNT + 10):
             self.archive_dir(i, age_days=0)
-        sg._prune_archive()
+        lc._prune_archive()
         self.assertEqual(len(list(pt.ARCHIVE_DIR.iterdir())),
-                         sg.ARCHIVE_RETAIN_COUNT + 10)
+                         lc.ARCHIVE_RETAIN_COUNT + 10)
 
     def test_retention_zero_keeps_everything(self):
-        for i in range(sg.ARCHIVE_RETAIN_COUNT + 10):
+        for i in range(lc.ARCHIVE_RETAIN_COUNT + 10):
             self.archive_dir(i, age_days=400 + i)
         os.environ["SILKGATE_ARCHIVE_RETAIN_DAYS"] = "0"
         self.addCleanup(os.environ.pop, "SILKGATE_ARCHIVE_RETAIN_DAYS", None)
-        sg._prune_archive()
+        lc._prune_archive()
         self.assertEqual(len(list(pt.ARCHIVE_DIR.iterdir())),
-                         sg.ARCHIVE_RETAIN_COUNT + 10)
+                         lc.ARCHIVE_RETAIN_COUNT + 10)
 
     def test_foreign_dirs_are_never_touched(self):
         foreign = pt.ARCHIVE_DIR / "keep-me"
         foreign.mkdir()
         past = time.time() - 400 * 86400
         os.utime(foreign, (past, past))
-        for i in range(sg.ARCHIVE_RETAIN_COUNT + 5):
-            self.archive_dir(i, age_days=sg.ARCHIVE_RETAIN_DAYS + 10 + i)
+        for i in range(lc.ARCHIVE_RETAIN_COUNT + 5):
+            self.archive_dir(i, age_days=lc.ARCHIVE_RETAIN_DAYS + 10 + i)
         with contextlib.redirect_stderr(io.StringIO()):
-            sg._prune_archive()
+            lc._prune_archive()
         self.assertTrue(foreign.exists())
 
 
@@ -516,7 +517,7 @@ class TestBrief(JournalCase):
         ruleset = rule_engine.RuleSet.parse(RULE)
         with mock.patch.object(vm, "_msb", lambda: "msb"), \
                 mock.patch.object(sg.subprocess, "run", fake_run):
-            sg._provision_session("br1", "img:1", 8090, RULE, ruleset, [], None, [],
+            lc._provision_session("br1", "img:1", 8090, RULE, ruleset, [], None, [],
                                   {}, context="ctx", context_paths=(br.GUEST_CONTEXT,),
                                   brief=b"# the task\n")
         sdir = ss.session_dir("br1")
@@ -551,7 +552,7 @@ class TestMetaAdditions(JournalCase):
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
                 mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
-                mock.patch.object(sg, "_provision_session", spy), \
+                mock.patch.object(lc, "_provision_session", spy), \
                 mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
                 mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
@@ -755,12 +756,12 @@ class TestExecBrief(JournalCase):
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
                 mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
-                mock.patch.object(sg, "_provision_session", fake_provision), \
+                mock.patch.object(lc, "_provision_session", fake_provision), \
                 mock.patch.object(vm, "tier1_fault", lambda *a, **k: None), \
                 mock.patch.object(sg, "_land_brief_in_guest",
                                   lambda s, d: landed.append((s, d)) or None), \
                 mock.patch.object(vm, "run_guest", lambda *a, **k: 0), \
-                mock.patch.object(sg, "_teardown_session",
+                mock.patch.object(lc, "_teardown_session",
                                   lambda meta, archive=True: None), \
                 mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
                 mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \

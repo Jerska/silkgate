@@ -38,6 +38,7 @@ im = pkg.images
 br = pkg.briefing
 ss = pkg.sessions
 vm = pkg.vm
+lc = pkg.lifecycle
 
 
 def tearDownModule():
@@ -244,7 +245,7 @@ class TestRunUpWiring(SettingsCase):
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
                 mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
-                mock.patch.object(sg, "_provision_session", spy), \
+                mock.patch.object(lc, "_provision_session", spy), \
                 mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
                 mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(br, "CLAUDE_SETTINGS", self.user_file), \
@@ -300,7 +301,7 @@ class TestProvisionStaging(SettingsCase):
         with mock.patch.object(mt, "_push_secrets", lambda *a, **k: None), \
                 mock.patch.object(vm, "_msb", lambda: "/fake/bin/msb"), \
                 mock.patch.object(sg.subprocess, "run", fake_run):
-            sg._provision_session(name, "img:1", 8090, "", prof.load_ruleset(""),
+            lc._provision_session(name, "img:1", 8090, "", prof.load_ruleset(""),
                                   [], None, [], {"profiles": [], "command": None}, **kwargs)
         self.addCleanup(shutil.rmtree, ss.session_dir(name), ignore_errors=True)
         copies = [calls["argv"][i + 1] for i, a in enumerate(calls["argv"])

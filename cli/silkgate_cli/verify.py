@@ -9,7 +9,7 @@ import threading
 import time
 from uuid import uuid4
 
-from . import console, core, foreground, mitm, paths, profile, vm
+from . import console, foreground, lifecycle, mitm, paths, profile, vm
 
 
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
@@ -207,7 +207,7 @@ def _create_verify_guest(sandbox, port, *, mounts=(), leaky=False, why=""):
     reads as a hang. `leaky` is the negative control's guest — the same guest, egress open."""
     argv = _verify_msb_argv(sandbox, port, mounts=mounts)
     if subprocess.run(_leaky_argv(argv) if leaky else argv).returncode:
-        core._remove_sandbox(sandbox)         # a failed create can still register the name
+        lifecycle._remove_sandbox(sandbox)    # a failed create can still register the name
         console.die(f"msb create failed for verify guest {sandbox} (see msb's output above){why}")
 
 
@@ -217,7 +217,7 @@ def _drop_verify_guest(sandbox, guests):
     Uses _remove_sandbox, as sessions do. A guest that survives isn't just untidy: its port
     allowance collides with the next verify.
     """
-    if core._remove_sandbox(sandbox):
+    if lifecycle._remove_sandbox(sandbox):
         guests.discard(sandbox)
         return True
     return False
@@ -243,7 +243,7 @@ def _reap_leaked_verify_guests():
             continue
         console.say(f"removing {name}: an interrupted verify left it behind (pid {match[1]} is "
                     "gone), and it still holds a Tier-1 rule and a port allowance")
-        if not core._remove_sandbox(name):
+        if not lifecycle._remove_sandbox(name):
             console.say(f"could not remove {name} — `msb stop {name} && msb rm {name}` by hand")
 
 
@@ -1053,6 +1053,6 @@ def cmd_verify(args):
         if oracles:
             oracles.close()
         for name in sorted(guests):
-            if not core._remove_sandbox(name):
+            if not lifecycle._remove_sandbox(name):
                 console.say(f"could not remove verify guest {name} — `msb stop {name} && msb rm "
                             f"{name}` by hand; it holds a Tier-1 rule and a port allowance")

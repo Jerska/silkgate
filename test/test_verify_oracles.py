@@ -49,6 +49,7 @@ prof = pkg.profile
 mt = pkg.mitm
 ss = pkg.sessions
 vm = pkg.vm
+lc = pkg.lifecycle
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet                                          # noqa: E402
@@ -992,7 +993,7 @@ class LeakedGuests(unittest.TestCase):
     def test_a_removal_that_cannot_be_confirmed_names_the_manual_command(self):
         dead = _dead_pid()
         self.listed(f"silkgate-verify-{dead}-main")
-        with mock.patch.object(sg, "_remove_sandbox", lambda name: False):
+        with mock.patch.object(lc, "_remove_sandbox", lambda name: False):
             said, _ = self.reap()
         self.assertIn(f"msb stop silkgate-verify-{dead}-main", said)
 
@@ -1472,7 +1473,7 @@ class VerifyWiring(unittest.TestCase):
 
     def test_a_guest_that_cannot_be_removed_is_a_failure_of_its_own(self):
         self.aim_probes_at(self.dead_port())
-        with mock.patch.object(sg, "_remove_sandbox", lambda name: False):
+        with mock.patch.object(lc, "_remove_sandbox", lambda name: False):
             said, refused = self.verify()
         self.assertTrue(refused)
         self.assertIn("could not be removed", said)

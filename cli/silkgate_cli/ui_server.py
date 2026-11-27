@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import console, core, git, logs, mitm, paths, sessions, vm
+from . import console, core, git, lifecycle, logs, mitm, paths, sessions, vm
 
 
 # --- ui: a local web view over the events files -------------------------------------
@@ -545,7 +545,7 @@ def _kill_in_guest(meta, exec_id):
                                                ["sh", "-c", _KILL_SH, "_", exec_id]),
                               stdin=subprocess.DEVNULL, capture_output=True, text=True,
                               start_new_session=True,
-                              timeout=_KILL_GRACE + core._MSB_TIMEOUT)
+                              timeout=_KILL_GRACE + lifecycle._MSB_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         return "SILKGATE_ERROR", "the guest did not answer the kill request in time"
     for line in reversed(proc.stdout.splitlines()):

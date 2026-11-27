@@ -42,6 +42,7 @@ br = pkg.briefing
 ss = pkg.sessions
 vm = pkg.vm
 mnt = pkg.mount
+lc = pkg.lifecycle
 
 
 def tearDownModule():
@@ -117,7 +118,7 @@ class CliCase(unittest.TestCase):
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
                 mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
-                mock.patch.object(sg, "_provision_session", spy), \
+                mock.patch.object(lc, "_provision_session", spy), \
                 mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
                 mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
@@ -1652,13 +1653,13 @@ class TestHarvestWiring(CliCase):
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
                 mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
-                mock.patch.object(sg, "_provision_session", lambda *a, **k: None), \
+                mock.patch.object(lc, "_provision_session", lambda *a, **k: None), \
                 mock.patch.object(vm, "tier1_fault", lambda *a: None), \
                 mock.patch.object(gt, "_setup_branch_guest", lambda *a: None), \
                 mock.patch.object(vm, "run_guest", lambda *a, **k: 0), \
                 mock.patch.object(ss, "read_meta", read_meta), \
                 mock.patch.object(gt, "_harvest_branch", harvest), \
-                mock.patch.object(sg, "_teardown_session",
+                mock.patch.object(lc, "_teardown_session",
                                   lambda meta: calls.append("teardown")), \
                 mock.patch.object(gt, "_reap_derived_workspace",
                                   lambda meta: calls.append("reap")), \
@@ -1706,7 +1707,7 @@ class TestHarvestWiring(CliCase):
                 self.no_preflight(), \
                 mock.patch.object(ss, "read_meta", lambda name: dict(meta)), \
                 mock.patch.object(gt, "_harvest_branch", harvest), \
-                mock.patch.object(sg, "_teardown_session",
+                mock.patch.object(lc, "_teardown_session",
                                   lambda m: calls.append("teardown")), \
                 mock.patch.object(gt, "_reap_derived_workspace",
                                   lambda m: calls.append("reap")), \
@@ -1918,7 +1919,7 @@ class TestCheckoutSessions(GitRepoCase):
                                   lambda meta: calls.append("harvest") or True), \
                 mock.patch.object(gt, "_reap_derived_workspace",
                                   lambda meta: calls.append("reap")), \
-                mock.patch.object(sg, "_teardown_session",
+                mock.patch.object(lc, "_teardown_session",
                                   lambda meta: calls.append("teardown")), \
                 contextlib.redirect_stderr(io.StringIO()):
             sg.cmd_down(args)
@@ -2266,7 +2267,7 @@ class TestMemoryFlag(CliCase):
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
                 mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
                 mock.patch.object(vm, "msb_create_argv", spy), \
-                mock.patch.object(sg, "_remove_sandbox", lambda *a, **k: True), \
+                mock.patch.object(lc, "_remove_sandbox", lambda *a, **k: True), \
                 mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
                 mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \

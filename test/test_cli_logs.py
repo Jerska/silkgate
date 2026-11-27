@@ -523,7 +523,7 @@ class LogsAuditTest(SilkgateTest):
                 raise AssertionError("follow kept polling on pid liveness alone")
 
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(MOD.time, "sleep", guarded_sleep), \
+        with mock.patch.object(LOGS.time, "sleep", guarded_sleep), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit):
                 LOGS._logs_audit(_args("foo", follow=True))
@@ -550,7 +550,7 @@ class LogsAuditTest(SilkgateTest):
                 raise AssertionError("follow did not stop after its session went away")
 
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(MOD.time, "sleep", scripted_sleep), \
+        with mock.patch.object(LOGS.time, "sleep", scripted_sleep), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit):
                 LOGS._logs_audit(_args("foo", follow=True))
