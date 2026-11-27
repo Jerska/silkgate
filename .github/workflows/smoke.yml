@@ -1,0 +1,51 @@
+# The claude profile end to end, as a user first meets it: test/smoke_claude.py builds the
+# image, opens interactive Claude Code in a real guest, and fails on any first-run screen
+# or unexpected deny. With the SILKGATE_EGRESS_SECRET_ANTHROPIC repo secret set, it also
+# runs one `silkgate-claude -p`. Weekly too, because Anthropic's endpoints change on their
+# own schedule while the pin stands still.
+#
+# It runs on the runner itself, not in test/linux: the image build needs docker, and noble
+# has the glibc msb needs.
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  claude:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # mitmproxy and msb at the versions the rest of the repo pins.
+      - name: install mitmproxy and msb
+        run: |
+          pipx install mitmproxy==12.3.1
+          curl -fsSL https://install.microsandbox.dev | sh -s -- --version 0.6.8
+          echo "$HOME/.microsandbox/bin" >> "$GITHUB_PATH"
+
+      - name: probe for KVM
+        id: kvm
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+            echo "present=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=no" >> "$GITHUB_OUTPUT"
+            echo "::warning title=smoke test DID NOT RUN::no /dev/kvm on this runner"
+          fi
+
+      - name: smoke-test the claude profile
+        if: steps.kvm.outputs.present == 'yes'
+        env:
+          SILKGATE_EGRESS_SECRET_ANTHROPIC: ${{ secrets.SILKGATE_EGRESS_SECRET_ANTHROPIC }}
+        run: python3 test/smoke_claude.py

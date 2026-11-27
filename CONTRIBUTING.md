@@ -30,6 +30,7 @@ python3 tests.py                        # everything, sharded, ~15 s
 python3 -m unittest discover -s test    # python only, one process, ~1 min
 python3 mitmaddon/rule_engine.py        # rule-engine self-tests
 ./cli/silkgate verify --full            # containment; needs docker and msb (CI runs it)
+python3 test/smoke_claude.py            # the claude profile in a real guest (CI runs it)
 ```
 
 - Comments alone: `python3 -m py_compile <file>`, `node --check <file>`, or `sh -n <file>`.

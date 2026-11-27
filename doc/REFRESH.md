@@ -27,7 +27,7 @@ Every `setup.sh` fails the build when the installed version misses its pin.
 | `install.sh` takes a version argument | `profiles/claude/setup.sh` | the build's version check |
 | `curl libgcc-s1 libstdc++6 ripgrep` are the binary's runtime needs | `profiles/claude/profile.conf` | `ldd` on the binary in a fresh image |
 | a plain `claude -p` reads `context_path`, `--bare` doesn't | `profiles/claude/profile.conf` | ask a guest `claude -p` about its context, then `--bare` |
-| `/root/.claude.json` keys `hasCompletedOnboarding`, `lastOnboardingVersion`, `bypassPermissionsModeAccepted`, and `projects./workspace.hasTrustDialogAccepted` skip first-run prompts | `profiles/claude/setup.sh` | `run --tty --with claude -- silkgate-claude`: it opens on the prompt, not a theme picker or a bypass warning |
+| `/root/.claude.json` keys `hasCompletedOnboarding`, `lastOnboardingVersion`, `bypassPermissionsModeAccepted`, `customApiKeyResponses`, and `projects./workspace.hasTrustDialogAccepted` skip first-run prompts | `profiles/claude/setup.sh` | `test/smoke_claude.py` |
 | `IS_SANDBOX=1` lets root use `bypassPermissions` | `profiles/claude/setup.sh` | run `silkgate-claude` in a guest: no refusal. Plain `claude --permission-mode bypassPermissions` refuses. |
 | the switches in the env file (`DISABLE_AUTOUPDATER`, …) | `profiles/claude/env` | check each name in the settings docs, and watch the audit log for new hosts |
 | the `nodejs.org/dist` tarball layout | `profiles/node/setup.sh` | the build's version check |
@@ -42,7 +42,7 @@ audit-log deny.**
 |---|---|---|
 | Claude Code's endpoints | `profiles/claude/rules.txt` | grep fresh audit logs for denies on `api.anthropic.com` and `platform.claude.com` |
 | `max_body=10m` on the two Anthropic POSTs, `64k` on oauth | `profiles/claude/rules.txt` | grep audit logs for 413s |
-| interactive startup probes `api.anthropic.com/api/hello` and `platform.claude.com/v1/oauth/hello`, and refuses to start on a deny | `profiles/claude/rules.txt` | `run --tty --with claude -- claude`: it reaches the theme picker, with no denies |
+| interactive startup probes `api.anthropic.com/api/hello` and `platform.claude.com/v1/oauth/hello`, and refuses to start on a deny | `profiles/claude/rules.txt` | `test/smoke_claude.py` (CI, weekly) |
 | GitHub smart HTTP: `?service=`, protocol v2, 1 MiB negotiation | `profiles/github/rules.txt` | clone and fetch a public repo: no denies, no 413 |
 | `raw.githubusercontent.com`, `codeload.github.com` | `profiles/github/rules.txt` | fetch a raw file and a tarball |
 | LFS hosts (`lfs.github.com`, `github-cloud.*`), and S3's 501 on a second `Authorization` | `profiles/github-{read,write}/rules.txt` | an LFS clone and push on a scratch repo: no denies |
@@ -137,7 +137,7 @@ than widen a rule.
 
 | Fact | Copies | Check |
 |---|---|---|
-| the dummy key and dummy OAuth token | `guest_credential.*` in `profiles/claude/profile.conf`, `_SECRET_ALLOWLIST` in `mitmaddon/proxy_addon.py` | `grep -F DUMMY-replaced` both. A mismatch flags every transcript. |
+| the dummy key and dummy OAuth token | `guest_credential.*` in `profiles/claude/profile.conf`, `_SECRET_ALLOWLIST` in `mitmaddon/proxy_addon.py`, the dummy key's last 20 characters in `profiles/claude/setup.sh` | `grep -F DUMMY-replaced` both. A mismatch flags every transcript. |
 | the Claude Code pin and its rules note | `profiles/claude/profile.conf`, the comment in `profiles/claude/rules.txt` | grep both for `2.1.` |
 | mitmproxy `12.3.1` | see Toolchain | `rg -n '12\.3\.1'` |
 | msb `0.6.8` | see Toolchain | `rg -n '0\.6\.8'` |

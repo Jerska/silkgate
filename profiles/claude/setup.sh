@@ -6,11 +6,14 @@ case "$(claude --version)" in "$VERSION"|"$VERSION "*) ;; *) claude --version >&
 install -d /root/.claude
 
 # Claude Code's first-run state, so an interactive session opens on its prompt: no theme
-# picker, no trust dialog for /workspace, and no bypass-mode confirmation, since the VM is
-# the boundary that confirmation warns about.
+# picker, no trust dialog for /workspace, no bypass-mode confirmation (the VM is the
+# boundary it warns about), and no "use this API key?" question for the dummy key, which
+# Claude Code records by its last 20 characters. The dummy is guest_credential.x-api-key
+# in profile.conf: update both.
 cat > /root/.claude.json <<EOF
 {"hasCompletedOnboarding": true, "lastOnboardingVersion": "$VERSION",
  "bypassPermissionsModeAccepted": true,
+ "customApiKeyResponses": {"approved": ["aced-by-egress-proxy"], "rejected": []},
  "projects": {"/workspace": {"hasTrustDialogAccepted": true}}}
 EOF
 
