@@ -1,35 +1,15 @@
 #!/usr/bin/env python3
-"""silkgate — host control CLI for the egress-proxied agent sandbox.
+"""silkgate: run an untrusted agent in a microVM whose only way out is an allowlisting proxy.
 
-`run` is one-shot: proxy + guest born and torn down per command. Persistent
-sessions instead share ONE background mitmdump (a pool of listener ports) across
-many background guests — `up`/`exec`/`attach`/`down`, one guest per session, one
-dedicated proxy port each. Host state lives under ~/.silkgate. See ../README.md.
+  silkgate run --name fix --with git --with claude --branch agent/fix -- \\
+      silkgate-claude -p "fix the failing test, commit as you go"
+  silkgate up --name foo --with claude -v ~/notes:/workspace
+  silkgate exec foo -- silkgate-claude -p "summarize the notes"
+  silkgate down foo
 
-    silkgate profiles [--render S] list the profiles in profiles/, or print the rules
-                                   one or more specs compose to
-    silkgate doctor                report every missing tool and its install command
-    silkgate build --with X        build the image a profile list describes, into msb
-    silkgate verify [--full]       Tier-1 containment check (test/verify_guest.sh)
-    silkgate proxy --with X        run one ruleset on one port, audit on stdout
-    silkgate run [-- CMD ...]      ephemeral session (up + exec + down), foreground
-    silkgate up [--name N ...]     start a persistent session (bg guest + shared proxy)
-    silkgate exec N [-t] -- CMD    run a command in a session's guest
-    silkgate attach N              attach a TTY to a session, running its default command
-    silkgate logs N [-f|--audit]   tail a session's guest output (or its proxy decisions)
-    silkgate ui [--port P]         serve the local web UI over the proxy's audit trail
-    silkgate down N                stop + remove a session (+ the proxy if it was the last)
-    silkgate ls                    list sessions + shared-proxy health
-    silkgate secret set NAME       push SILKGATE_EGRESS_SECRET_<NAME> to the shared proxy (never argv)
-    silkgate secret ls             list secret names held by the proxy (names only)
-
-A profile (profiles/<name>/) is one capability: setup.sh installs it at image build
-time, rules.txt says what it may reach at run time. One `--with` list therefore
-decides both the image — synthesized here, hash-tagged, cached in msb — and the
-egress policy, so a guest can't hold a tool whose traffic nobody allowed.
-
-Secrets stay in the environment: SILKGATE_EGRESS_SECRET_<NAME>="<header>: <value>" on the
-host feeds inject_auth=<name> rules; the guest never sees them.
+Each --with profile decides both what's installed and what it may reach. Secrets stay on
+the host as SILKGATE_EGRESS_SECRET_<NAME>="<Header>: <value>". State lives in ~/.silkgate.
+Docs: README.md, and doc/ beside it.
 """
 import argparse
 import hashlib
@@ -6034,225 +6014,172 @@ def main():
     def profile_opts(p, *, rules_only=False):
         p.add_argument("-w", "--with", dest="with_", action="append",
                        metavar="PROFILE[@VER][:ARG]", type=_with_arg,
-                       help="a profile from profiles/ — what to install and what it may reach "
-                            "(repeatable; `silkgate profiles` lists them and each ARG pattern)")
+                       help="add a profile: what to install and what it may reach "
+                            "(repeatable; see `silkgate profiles`)")
         if not rules_only:
             p.add_argument("--base", default=BASE_IMAGE, type=_image_arg,
-                           help=f"image the profiles layer onto (default: {BASE_IMAGE})")
+                           help=f"base image under the profiles (default: {BASE_IMAGE})")
         p.add_argument("--rule", action="append", metavar="RULE",
-                       help="one extra rule in DSL syntax, e.g. 'example.com/** GET' (repeatable)")
-
-    p = sub.add_parser("profiles", help="list the available profiles")
-    p.add_argument("--render", action="append", metavar="PROFILE[@VER][:ARG]",
-                   type=_with_arg,
-                   help="print the composed rules for these specs instead of the table — "
-                        "exactly what a session with the same --with list enforces "
-                        "(repeatable)")
-    p.set_defaults(fn=cmd_profiles)
-
-    p = sub.add_parser("doctor", help="report every missing tool (docker, msb, mitmdump) "
-                                      "and its install command")
-    p.set_defaults(fn=cmd_doctor)
-
-    p = sub.add_parser("build", help="build the image a profile list describes, into msb")
-    profile_opts(p)
-    p.add_argument("--platform", metavar="P", help="docker platform (default: matches the host arch)")
-    p.set_defaults(fn=cmd_build)
-
-    p = sub.add_parser("proxy", help="run one ruleset on one port, in the foreground")
-    profile_opts(p, rules_only=True)
-    p.add_argument("--port", type=int, default=8090, help="proxy listen port (default: 8090)")
-    p.set_defaults(fn=cmd_proxy)
-
-    p = sub.add_parser("verify", help="Tier-1 containment check in a bare debian guest")
-    p.add_argument("--full", action="store_true",
-                   help="also exercise the proxy path (apt through the proxy + CA trust)")
-    p.add_argument("--port", type=int, default=None,
-                   help="proxy listen port (default: auto-select the first free 16-port "
-                        "range at or above 8090, so a shared proxy holding the default "
-                        "pool never blocks verify; an explicit port is honored and dies "
-                        "if taken)")
-    p.add_argument("--oracles", action=argparse.BooleanOptionalAction, default=True,
-                   help="assert the host's own record of the run beside the guest's verdict: "
-                        "the audit log must hold the decisions the probes provoked, a host "
-                        "listener must receive nothing on a port Tier 1 denies, and a "
-                        "recording endpoint must show the injected credential replacing the "
-                        "header the guest sent (--no-oracles runs the guest checks alone)")
-    p.add_argument("--negative-control", action="store_true",
-                   help="also run the same script in a second guest with egress left open, and "
-                        "require check 3 to FAIL there — the only evidence that a "
-                        "blocked-direction check can fail at all (one extra guest)")
-    p.set_defaults(fn=cmd_verify)
+                       help="add one rule, e.g. 'example.com/** GET' (repeatable)")
 
     def env_opt(p):
         p.add_argument("-e", "--env", action="append", default=[], metavar="NAME=VALUE",
-                       help="set an env var in the guest (repeatable; secrets belong in "
-                            "SILKGATE_EGRESS_SECRET_* + inject_auth instead)")
+                       help="set an env var in the guest (repeatable). Secrets go in "
+                            "SILKGATE_EGRESS_SECRET_<NAME> instead.")
         p.add_argument("--no-context", action="store_true",
-                       help=f"don't describe the sandbox to the guest ({GUEST_CONTEXT} and "
-                            "$SILKGATE_CONTEXT)")
+                       help=f"don't write {GUEST_CONTEXT} or $SILKGATE_CONTEXT")
         p.add_argument("--no-settings", action="store_true",
-                       help="don't forward the host's Claude Code model settings (model, "
-                            "effortLevel) to each profile's settings_path")
+                       help="don't copy your Claude Code model and effortLevel into the guest")
+
+    def brief_opt(p, scope):
+        p.add_argument("--brief", metavar="FILE",
+                       help=f"{scope} task brief, copied to {GUEST_BRIEF} (max 1 MiB)")
 
     # Session guests default to 1G and half the host's CPUs — msb's own 512M / 1 vCPU
     # OOM-kills a guest that runs an agent beside a test suite. Both are limits the
     # host scheduler shares, not reservations, so oversubscription across guests is safe.
     default_cpus = str(max(1, (os.cpu_count() or 2) // 2))
 
-    p = sub.add_parser("run", help="run an egress-locked guest behind the proxy")
-    p.add_argument("--name", metavar="N", help="session name (default: random 6-char id)")
+    def guest_opts(p):
+        """The options `run` and `up` share: the guest's image, resources, and workspace."""
+        p.add_argument("--name", metavar="N", help="session name (default: a random 6-char id)")
+        profile_opts(p)
+        p.add_argument("--image", metavar="REF", type=_image_arg,
+                       help="run this image as-is instead of building one. It must trust "
+                            "the proxy's CA.")
+        p.add_argument("--memory", metavar="SIZE", type=_memory_arg, default="1G",
+                       help="guest memory, e.g. 512M or 2G (default: %(default)s)")
+        p.add_argument("--cpus", metavar="COUNT", type=_cpus_arg, default=default_cpus,
+                       help="guest CPUs (default: %(default)s, half the host's)")
+        p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
+                       help="where the proxy's 16-port pool starts, if this command starts "
+                            "the proxy (default: %(default)s)")
+        p.add_argument("-v", "--mount", action="append", default=[], metavar="SRC:DST[:ro|rw]",
+                       type=_mount_arg,
+                       help="mount host directory SRC at DST, read-only unless :rw "
+                            "(repeatable). $HOME, /, and silkgate's own files are refused.")
+        p.add_argument("--allow-git-dir", action="store_true",
+                       help="allow an rw mount that holds a .git directory. Its hooks then "
+                            "run on your host the next time you use git there.")
+        p.add_argument("--checkout", nargs="?", const="HEAD", default=None, metavar="REF",
+                       help="give the guest a throwaway clone of this repo at REF (default "
+                            "HEAD) in /workspace. Nothing comes back. Needs --with git.")
+        p.add_argument("--branch", metavar="NAME",
+                       help="like --checkout, on a new branch NAME whose commits come back "
+                            "when the session ends. --checkout REF sets its base.")
+        env_opt(p)
+
+    p = sub.add_parser("profiles", help="list the profiles, or print the rules a spec composes")
+    p.add_argument("--render", action="append", metavar="PROFILE[@VER][:ARG]",
+                   type=_with_arg,
+                   help="print the rules a session with these --with specs enforces "
+                        "(repeatable)")
+    p.set_defaults(fn=cmd_profiles)
+
+    p = sub.add_parser("doctor", help="list missing tools (docker, msb, mitmdump), with "
+                                      "install commands")
+    p.set_defaults(fn=cmd_doctor)
+
+    p = sub.add_parser("build", help="build the image for a profile list, into msb")
     profile_opts(p)
-    p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
-                   help="shared-proxy scan floor when this command starts it: the pool "
-                        "lands on the first free 16-port range at or above this, not "
-                        "necessarily here (default: 8090)")
-    p.add_argument("--image", metavar="REF", type=_image_arg,
-                   help="run this image instead of the one the profiles describe")
-    p.add_argument("--memory", metavar="SIZE", type=_memory_arg, default="1G",
-                   help="guest memory size as digits then M or G, e.g. 512M or 2G — passed "
-                        "to msb create as -m (default: %(default)s)")
-    p.add_argument("--cpus", metavar="COUNT", type=_cpus_arg, default=default_cpus,
-                   help="guest virtual CPU count as a positive integer, e.g. 2 — passed "
-                        "to msb create as -c (default: %(default)s, half the host's CPUs)")
-    p.add_argument("-v", "--mount", action="append", default=[], metavar="SRC:DST[:ro|rw]",
-                   type=_mount_arg,
-                   help="mount host directory SRC at DST in the guest, read-only unless the "
-                        "spec says :rw (repeatable). Refused for $HOME and silkgate's own "
-                        "checkout and state, and for a DST at / or touching /silkgate, "
-                        "/root/lfsstore or /root/gitdir; an rw mount holding a .git "
-                        "directory needs --allow-git-dir")
-    p.add_argument("--allow-git-dir", action="store_true",
-                   help="allow an rw mount that holds .git directories — their hooks and "
-                        "config become guest-writable, which is host code execution the "
-                        "next time a human runs git there")
-    p.add_argument("--checkout", nargs="?", const="HEAD", default=None, metavar="REF",
-                   help="give the guest a disposable, writable checkout of the enclosing "
-                        "repo at REF (default HEAD) at /workspace — guest-local, nothing "
-                        "returns to the host (needs --with git)")
-    p.add_argument("--branch", metavar="NAME",
-                   help="like --checkout, but on new branch NAME whose commits land in the "
-                        "host repo at teardown; beside --checkout REF, REF is the branch "
-                        "base (needs --with git; owns /workspace, so no -v may target it)")
-    p.add_argument("--brief", metavar="FILE",
-                   help=f"this run's task brief: FILE (≤ 1 MiB) lands at {GUEST_BRIEF} "
-                        "before the command runs, is stored per exec and journaled "
-                        "with its sha256")
-    env_opt(p)
+    p.add_argument("--platform", metavar="P", help="docker platform (default: the host's)")
+    p.set_defaults(fn=cmd_build)
+
+    p = sub.add_parser("proxy", help="run one ruleset on one port, in the foreground")
+    profile_opts(p, rules_only=True)
+    p.add_argument("--port", type=int, default=8090, help="listen port (default: 8090)")
+    p.set_defaults(fn=cmd_proxy)
+
+    p = sub.add_parser("verify", help="prove containment from inside a root guest")
+    p.add_argument("--full", action="store_true",
+                   help="also install probe tools through the proxy, and trust its CA")
+    p.add_argument("--port", type=int, default=None,
+                   help="proxy port (default: the first free 16-port range from 8090). "
+                        "An explicit port fails if taken.")
+    p.add_argument("--oracles", action=argparse.BooleanOptionalAction, default=True,
+                   help="also check from outside the guest: the audit log, a listener that "
+                        "must hear nothing, and a recorder that must see the credential "
+                        "swapped (default: on)")
+    p.add_argument("--negative-control", action="store_true",
+                   help="also run a guest with egress open, which must fail check 3: the "
+                        "proof the checks can fail")
+    p.set_defaults(fn=cmd_verify)
+
+    p = sub.add_parser("run", help="run one command in a fresh guest, then remove it")
+    guest_opts(p)
+    brief_opt(p, "this run's")
     p.add_argument("--tty", action=argparse.BooleanOptionalAction,
-                   help="give the command a terminal, for a TUI (default: yes if stdin is a "
-                        "TTY). --no-tty runs it non-interactively — output is still live, "
-                        "with stdout and stderr kept apart")
+                   help="give the command a terminal (default: if stdin is one). "
+                        "--no-tty keeps stdout and stderr apart.")
     p.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD ...",
-                   help="guest command (default: whatever the profiles name)")
+                   help="guest command (default: the profile's command)")
     p.set_defaults(fn=cmd_run)
 
-    p = sub.add_parser("up", help="start a persistent session (background guest + shared proxy)")
-    p.add_argument("--name", metavar="N", help="session name (default: random 6-char id)")
-    p.add_argument("-v", "--mount", action="append", default=[], metavar="SRC:DST[:ro|rw]",
-                   type=_mount_arg,
-                   help="mount host directory SRC at DST in the guest, read-only unless the "
-                        "spec says :rw (repeatable). Refused for $HOME and silkgate's own "
-                        "checkout and state, and for a DST at / or touching /silkgate, "
-                        "/root/lfsstore or /root/gitdir; an rw mount holding a .git "
-                        "directory needs --allow-git-dir")
-    p.add_argument("--allow-git-dir", action="store_true",
-                   help="allow an rw mount that holds .git directories — their hooks and "
-                        "config become guest-writable, which is host code execution the "
-                        "next time a human runs git there")
-    p.add_argument("--checkout", nargs="?", const="HEAD", default=None, metavar="REF",
-                   help="give the guest a disposable, writable checkout of the enclosing "
-                        "repo at REF (default HEAD) at /workspace — guest-local, nothing "
-                        "returns to the host (needs --with git)")
-    p.add_argument("--branch", metavar="NAME",
-                   help="like --checkout, but on new branch NAME whose commits land in the "
-                        "host repo at down; beside --checkout REF, REF is the branch base "
-                        "(needs --with git; owns /workspace, so no -v may target it)")
-    profile_opts(p)
-    p.add_argument("--brief", metavar="FILE",
-                   help=f"session-default task brief: copied to {GUEST_BRIEF} (≤ 1 MiB), "
-                        "applied to every exec that does not pass its own --brief; "
-                        "meta records its path and sha256")
-    env_opt(p)
-    p.add_argument("--image", metavar="REF", type=_image_arg,
-                   help="run this image instead of the one the profiles describe")
-    p.add_argument("--memory", metavar="SIZE", type=_memory_arg, default="1G",
-                   help="guest memory size as digits then M or G, e.g. 512M or 2G — passed "
-                        "to msb create as -m (default: %(default)s)")
-    p.add_argument("--cpus", metavar="COUNT", type=_cpus_arg, default=default_cpus,
-                   help="guest virtual CPU count as a positive integer, e.g. 2 — passed "
-                        "to msb create as -c (default: %(default)s, half the host's CPUs)")
-    p.add_argument("--port", type=int, default=DEFAULT_BASE_PORT,
-                   help="shared-proxy scan floor when this command starts it: the pool "
-                        "lands on the first free 16-port range at or above this, not "
-                        "necessarily here (default: 8090)")
+    p = sub.add_parser("up", help="start a session: a guest that stays up between commands")
+    guest_opts(p)
+    brief_opt(p, "the default")
     p.set_defaults(fn=cmd_up)
 
     p = sub.add_parser("exec", help="run a command in a session's guest")
     p.add_argument("name", metavar="NAME", help="session name")
     p.add_argument("-t", "--tty", action=argparse.BooleanOptionalAction,
-                   help="give the command a terminal, for a TUI (default: yes if stdin is a "
-                        "TTY). --no-tty runs it non-interactively — output is still live, "
-                        "with stdout and stderr kept apart")
-    p.add_argument("--brief", metavar="FILE",
-                   help=f"this exec's task brief: FILE (≤ 1 MiB) lands at {GUEST_BRIEF} "
-                        "before the command runs, is stored per exec and journaled "
-                        "with its sha256 (default: the session's up --brief, if any)")
+                   help="give the command a terminal (default: if stdin is one). "
+                        "--no-tty keeps stdout and stderr apart.")
+    brief_opt(p, "this exec's")
     env_opt(p)
     # nargs='*' (not REMAINDER): with a positional NAME first, REMAINDER would swallow
     # -t/-e that follow NAME. '*' lets them parse; use `--` to pass flags on to CMD.
     p.add_argument("cmd", nargs="*", metavar="-- CMD ...",
-                   help="command to run in the guest (use -- before flag-bearing commands)")
+                   help="guest command (put -- before one with flags)")
     p.set_defaults(fn=cmd_exec)
 
-    p = sub.add_parser("attach", help="attach a TTY to a session, running its default command")
+    p = sub.add_parser("attach", help="open a terminal on a session, running its profile's "
+                                      "command")
     p.add_argument("name", metavar="NAME", help="session name")
     p.set_defaults(fn=cmd_attach)
 
-    p = sub.add_parser("logs", help="tail a session's guest output (or --audit its proxy decisions)")
+    p = sub.add_parser("logs", help="print a session's guest output, or its proxy decisions")
     p.add_argument("name", metavar="NAME", help="session name")
-    p.add_argument("-f", "--follow", action="store_true",
-                   help="keep printing new lines by polling (default: print once and exit)")
+    p.add_argument("-f", "--follow", action="store_true", help="keep printing new lines")
     p.add_argument("--tail", type=int, metavar="N", help="start from the last N lines")
     p.add_argument("--since", metavar="DUR",
-                   help="start from lines newer than DUR (e.g. 30s, 5m); guest log only")
+                   help="only lines newer than DUR, e.g. 30s or 5m (guest output only)")
     p.add_argument("--audit", action="store_true",
-                   help="this session's proxy allow/deny decisions instead of guest output")
+                   help="print this session's allow and deny decisions")
     p.add_argument("--interval", type=float, default=1.0, metavar="SECS",
-                   help="follow poll interval in seconds (default: 1.0)")
+                   help="poll interval for -f (default: 1.0)")
     p.set_defaults(fn=cmd_logs)
 
-    p = sub.add_parser("ui", help="serve the local web UI over the proxy's audit trail")
+    p = sub.add_parser("ui", help="serve the audit UI on 127.0.0.1")
     p.add_argument("--port", type=int, default=DEFAULT_UI_PORT,
-                   help=f"listen port on 127.0.0.1 (default: {DEFAULT_UI_PORT})")
+                   help=f"listen port (default: {DEFAULT_UI_PORT})")
     p.set_defaults(fn=cmd_ui)
 
-    p = sub.add_parser("harvest", help="bank a --branch session's commits into the host repo "
+    p = sub.add_parser("harvest", help="bring a --branch session's commits back now, "
                                        "without stopping it")
     p.add_argument("name", metavar="NAME", help="session name")
     p.set_defaults(fn=cmd_harvest)
 
-    p = sub.add_parser("down", help="stop + remove a session (and the proxy if it was the last)")
+    p = sub.add_parser("down", help="stop and remove a session. The last one stops the proxy.")
     p.add_argument("name", metavar="NAME", help="session name")
     p.set_defaults(fn=cmd_down)
 
-    p = sub.add_parser("ls", help="list sessions and shared-proxy health")
+    p = sub.add_parser("ls", help="list sessions and proxy health")
     p.add_argument("-a", "--all", action="store_true",
-                   help="include archived sessions (STATUS archived); the final ID "
-                        "column is the sid an archive is filed under")
+                   help="include archived sessions. ID is the archive's sid.")
     p.set_defaults(fn=cmd_ls)
 
-    p = sub.add_parser("secret", help="manage host-held secrets in the shared proxy")
+    p = sub.add_parser("secret", help="push or list the secrets the proxy holds")
     ssub = p.add_subparsers(dest="secret_cmd", required=True)
-    q = ssub.add_parser("set", help="push SILKGATE_EGRESS_SECRET_<NAME> to the proxy, scoped to one "
-                                    "session (value never on argv)")
-    q.add_argument("name", metavar="NAME", help="secret name (reads SILKGATE_EGRESS_SECRET_<NAME>)")
+    q = ssub.add_parser("set", help="push SILKGATE_EGRESS_SECRET_<NAME> to one session. "
+                                    "The value never touches argv.")
+    q.add_argument("name", metavar="NAME", help="secret name: reads SILKGATE_EGRESS_SECRET_<NAME>")
     q.add_argument("--session", required=True, metavar="SESSION",
-                   help="session the secret belongs to — only its guest can spend it")
+                   help="the session that may spend it")
     q.set_defaults(fn=cmd_secret_set)
-    q = ssub.add_parser("ls", help="list secret names held by the proxy (names only)")
+    q = ssub.add_parser("ls", help="list secret names, never values")
     q.add_argument("--session", metavar="SESSION",
-                   help="one session's names (default: every session, session-qualified)")
+                   help="one session only (default: all, by session)")
     q.set_defaults(fn=cmd_secret_ls)
 
     # SIGTERM must run the finally-blocks that stop mitmdump/msb, not kill us outright.
