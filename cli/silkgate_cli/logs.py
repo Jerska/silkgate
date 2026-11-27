@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import console, core, mitm, sessions
+from . import console, mitm, sessions, vm
 
 
 # --- logs: per-session observability ----------------------------------------
@@ -22,7 +22,7 @@ def _emit(lines):
 def _logs_guest(args, meta):
     sandbox = meta["sandbox"]
     if not args.follow:                              # one-shot: pass shaping straight to msb
-        lines, err = core._run_msb_logs(sandbox, args.tail, args.since)
+        lines, err = vm._run_msb_logs(sandbox, args.tail, args.since)
         if err is not None:
             console.die(f"cannot read guest logs for {args.name!r}: {err}")
         _emit(lines)
@@ -31,14 +31,14 @@ def _logs_guest(args, meta):
     # whole append-only log and prints the suffix. --tail and --since shape the first view
     # only. --since needs msb's clock, so msb counts the recent lines, after `full` is
     # fetched, so nothing appended between the calls is lost or doubled.
-    full, err = core._run_msb_logs(sandbox)
+    full, err = vm._run_msb_logs(sandbox)
     if err is not None:
         console.die(f"cannot read guest logs for {args.name!r}: {err}")
     start = 0
     if args.tail is not None:
         start = max(0, len(full) - args.tail)
     elif args.since is not None:
-        win, werr = core._run_msb_logs(sandbox, since=args.since)
+        win, werr = vm._run_msb_logs(sandbox, since=args.since)
         if werr is None:
             start = max(0, len(full) - len(win))
     _emit(full[start:])
@@ -47,7 +47,7 @@ def _logs_guest(args, meta):
         time.sleep(args.interval)
         if not sessions.session_dir(args.name).exists():  # someone ran `silkgate down`
             console.die(f"session {args.name!r} is gone — stopped following")
-        lines, err = core._run_msb_logs(sandbox)
+        lines, err = vm._run_msb_logs(sandbox)
         if err is not None:                          # sandbox removed / msb unhappy
             console.die(f"session {args.name!r}: {err} — stopped following")
         n = len(lines)

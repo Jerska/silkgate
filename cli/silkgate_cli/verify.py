@@ -9,7 +9,7 @@ import threading
 import time
 from uuid import uuid4
 
-from . import console, core, foreground, mitm, paths, profile
+from . import console, core, foreground, mitm, paths, profile, vm
 
 
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
@@ -169,7 +169,7 @@ def _verify_msb_argv(sandbox, port, *, mounts=()):
     msb_argv's, so verify tests the policy every session gets. _leaky_argv derives the
     negative control from this.
     """
-    argv = [core._msb(), "create", _VERIFY_IMAGE, "--name", sandbox]
+    argv = [vm._msb(), "create", _VERIFY_IMAGE, "--name", sandbox]
     for m in mounts:
         argv += ["-v", m]
     url = f"http://{mitm.PROXY_ALIAS}:{port}"
@@ -876,8 +876,8 @@ class _VerifyOracles:
                                       observer_port=self.observer.port,
                                       recorder_port=self.recorder.port,
                                       token=self.observer.guest_token)
-        core.run_guest(lambda cmd: core.msb_exec_argv(sandbox, cmd), ["bash", "-c", script],
-                       tty=False, on_line=lines.append)
+        vm.run_guest(lambda cmd: vm.msb_exec_argv(sandbox, cmd), ["bash", "-c", script],
+                     tty=False, on_line=lines.append)
         self.observer.drain()
         return _oracle_report(lines)
 
@@ -977,8 +977,8 @@ def cmd_verify(args):
             if oracles:
                 oracles.arm()
                 report = oracles.probe(guest)
-            core.run_guest(lambda cmd: core.msb_exec_argv(guest, cmd), ["bash", "-c", script],
-                           tty=False, on_line=note)
+            vm.run_guest(lambda cmd: vm.msb_exec_argv(guest, cmd), ["bash", "-c", script],
+                         tty=False, on_line=note)
         _drop_verify_guest(guest, guests)      # nothing waits on it; the finally re-tries
 
         result, checks = found.get("result"), found.get("checks")
@@ -1022,8 +1022,8 @@ def cmd_verify(args):
                                      why=" — the control did not run, so this verify says "
                                          "nothing about whether its checks can fail")
                 guests.add(leaky)
-                core.run_guest(lambda cmd: core.msb_exec_argv(leaky, cmd), ["bash", "-c", script],
-                               tty=False, on_line=leaky_lines.append)
+                vm.run_guest(lambda cmd: vm.msb_exec_argv(leaky, cmd), ["bash", "-c", script],
+                             tty=False, on_line=leaky_lines.append)
             _drop_verify_guest(leaky, guests)
             problem, summary = _negative_control_problem(_check_outcomes(lines),
                                                          _check_outcomes(leaky_lines))

@@ -30,8 +30,8 @@ import clipkg
 REPO = Path(__file__).resolve().parent.parent
 
 pkg = clipkg.load("sg_relay")
-sg = pkg.core
 con = pkg.console
+vm = pkg.vm
 
 RS = con._ERR_TAG        # tags a stderr line; also the mark on the host's own voice
 US = con._OUT_TAG        # tags a stdout line
@@ -41,18 +41,18 @@ US = con._OUT_TAG        # tags a stdout line
 DRIVER = r"""
 import sys
 sys.path.insert(0, sys.argv[1])
-from silkgate_cli import console as con, core as sg
+from silkgate_cli import console as con, vm
 mode, script = sys.argv[2], sys.argv[3]
 if mode == "run":               # the default path: wrapper + demux
-    sys.exit(sg.run_guest(lambda argv: argv, ["sh", "-c", script], tty=False))
+    sys.exit(vm.run_guest(lambda argv: argv, ["sh", "-c", script], tty=False))
 if mode == "run-say":           # a run followed by the host speaking for itself
-    rc = sg.run_guest(lambda argv: argv, ["sh", "-c", script], tty=False)
+    rc = vm.run_guest(lambda argv: argv, ["sh", "-c", script], tty=False)
     con.say("session demo up · proxy :8090")
     sys.exit(rc)
 if mode == "tty":               # -t with stdout a pipe: passthrough, no demux
-    sys.exit(sg.run_guest(lambda argv: argv, ["sh", "-c", script], tty=True))
+    sys.exit(vm.run_guest(lambda argv: argv, ["sh", "-c", script], tty=True))
 if mode == "bare":              # bytes on the PTY with no wrapper: msb noise, a bypass
-    sys.exit(sg._pty_relay(["sh", "-c", script], demux=True))
+    sys.exit(vm._pty_relay(["sh", "-c", script], demux=True))
 """
 
 
@@ -66,13 +66,13 @@ class Plain(unittest.TestCase):
     stream can carry, so the tag bytes must never make it through."""
 
     def test_strips_tag_bytes_anywhere(self):
-        self.assertEqual(sg._plain(b"a" + RS + b"b" + US + b"c"), b"abc")
+        self.assertEqual(vm._plain(b"a" + RS + b"b" + US + b"c"), b"abc")
 
     def test_keeps_tabs_and_text(self):
-        self.assertEqual(sg._plain(b"a\tb"), b"a\tb")
+        self.assertEqual(vm._plain(b"a\tb"), b"a\tb")
 
     def test_ansi_and_trailing_cr_still_stripped(self):
-        self.assertEqual(sg._plain(b"\x1b[31mred\x1b[0m\r"), b"red")
+        self.assertEqual(vm._plain(b"\x1b[31mred\x1b[0m\r"), b"red")
 
 
 class Routing(unittest.TestCase):
@@ -86,7 +86,7 @@ class Routing(unittest.TestCase):
         sys.stderr = types.SimpleNamespace(buffer=err)
         try:
             for line in lines:
-                sg._relay(line, newline=newline)
+                vm._relay(line, newline=newline)
         finally:
             sys.stdout, sys.stderr = real_out, real_err
         return out.getvalue(), err.getvalue()

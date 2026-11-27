@@ -4,7 +4,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import console, core, paths, sessions
+from . import console, core, paths, sessions, vm
 
 
 # --- checkout/branch sessions: a clone in the guest, from the host repo ---------
@@ -200,8 +200,8 @@ git checkout -b "$branch" "$base"
 
 def _setup_branch_guest(sandbox, branch, base, session):
     """Clone + checkout in the guest, streamed (a big repo's clone must show progress)."""
-    rc = core.run_guest(lambda c: core.msb_exec_argv(sandbox, c),
-                        ["sh", "-c", _BRANCH_SETUP_SH, "_", branch, base, session], tty=False)
+    rc = vm.run_guest(lambda c: vm.msb_exec_argv(sandbox, c),
+                      ["sh", "-c", _BRANCH_SETUP_SH, "_", branch, base, session], tty=False)
     if rc:
         console.die("guest git setup failed — session torn down")
 
@@ -226,8 +226,8 @@ git -C /workspace checkout --detach --quiet "$base"
 
 def _setup_checkout_guest(sandbox, base, session):
     """Clone + detached checkout in the guest, streamed like _setup_branch_guest."""
-    rc = core.run_guest(lambda c: core.msb_exec_argv(sandbox, c),
-                        ["sh", "-c", _CHECKOUT_SETUP_SH, "_", base, session], tty=False)
+    rc = vm.run_guest(lambda c: vm.msb_exec_argv(sandbox, c),
+                      ["sh", "-c", _CHECKOUT_SETUP_SH, "_", base, session], tty=False)
     if rc:
         console.die("guest git setup failed — session torn down")
 
@@ -256,9 +256,9 @@ def _bundle_in_guest(meta):
     try:
         # stdin closed: the script reads none, and msb exec waits on an inherited
         # stdin for EOF (see tier1_fault) — a detached caller's would never close.
-        proc = subprocess.run(core.msb_exec_argv(meta["sandbox"],
-                                                 ["sh", "-c", _BUNDLE_SH, "_", meta["branch"],
-                                                  since, meta["base"]]),
+        proc = subprocess.run(vm.msb_exec_argv(meta["sandbox"],
+                                               ["sh", "-c", _BUNDLE_SH, "_", meta["branch"],
+                                                since, meta["base"]]),
                               stdin=subprocess.DEVNULL, capture_output=True, text=True,
                               start_new_session=True, timeout=_GIT_TIMEOUT)
     except subprocess.TimeoutExpired:

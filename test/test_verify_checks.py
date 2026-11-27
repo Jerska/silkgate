@@ -43,7 +43,6 @@ SCRIPT = REPO / "test" / "verify_guest.sh"
 
 
 pkg = clipkg.load("sg_verify_checks")
-sg = pkg.core
 vf = pkg.verify
 TEXT = SCRIPT.read_text()
 

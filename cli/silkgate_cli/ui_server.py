@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import console, core, git, logs, mitm, paths, sessions
+from . import console, core, git, logs, mitm, paths, sessions, vm
 
 
 # --- ui: a local web view over the events files -------------------------------------
@@ -304,7 +304,7 @@ def _session_output(meta, state, sdir, tail):
         hit = _OUTPUT_CACHE.get(key)
         if hit and time.monotonic() - hit[0] < UI_OUTPUT_TTL:
             return hit[1], hit[2]
-        lines, err = core._run_msb_logs(meta["sandbox"], tail_n=tail)
+        lines, err = vm._run_msb_logs(meta["sandbox"], tail_n=tail)
         if err is not None:
             payload, code = {"error": f"cannot read guest output: {err}"}, 502
         else:
@@ -341,9 +341,9 @@ def _diff_in_guest(meta):
     try:
         # stdin closed: the script reads none, and msb exec waits on an inherited
         # stdin for EOF (see tier1_fault) — a detached caller's would never close.
-        proc = subprocess.run(core.msb_exec_argv(meta["sandbox"],
-                                                 ["sh", "-c", script, "_", meta["base"]],
-                                                 env=env),
+        proc = subprocess.run(vm.msb_exec_argv(meta["sandbox"],
+                                               ["sh", "-c", script, "_", meta["base"]],
+                                               env=env),
                               stdin=subprocess.DEVNULL, capture_output=True, text=True,
                               errors="replace", start_new_session=True,
                               timeout=_DIFF_TIMEOUT)
@@ -523,7 +523,7 @@ _KILL_GRACE = 5     # seconds between TERM and the KILL escalation, in-guest
 # pidfile names, politely first, then hard once the grace runs out. The pidfile is
 # guest-written, so its content is held to digits before it reaches kill's argv.
 _KILL_SH = ("set -eu\n"
-            f'pidfile={core.GUEST_EXECS}/$1.pid\n'
+            f'pidfile={vm.GUEST_EXECS}/$1.pid\n'
             'if [ ! -f "$pidfile" ]; then echo SILKGATE_NO_PIDFILE; exit 0; fi\n'
             'pgid=$(cat "$pidfile")\n'
             'case "$pgid" in ""|*[!0-9]*) echo SILKGATE_NO_PIDFILE; exit 0;; esac\n'
@@ -541,8 +541,8 @@ def _kill_in_guest(meta, exec_id):
     try:
         # stdin closed: the script reads none, and msb exec waits on an inherited
         # stdin for EOF (see tier1_fault) — a detached caller's would never close.
-        proc = subprocess.run(core.msb_exec_argv(meta["sandbox"],
-                                                 ["sh", "-c", _KILL_SH, "_", exec_id]),
+        proc = subprocess.run(vm.msb_exec_argv(meta["sandbox"],
+                                               ["sh", "-c", _KILL_SH, "_", exec_id]),
                               stdin=subprocess.DEVNULL, capture_output=True, text=True,
                               start_new_session=True,
                               timeout=_KILL_GRACE + core._MSB_TIMEOUT)

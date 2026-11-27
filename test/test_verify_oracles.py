@@ -48,6 +48,7 @@ con = pkg.console
 prof = pkg.profile
 mt = pkg.mitm
 ss = pkg.sessions
+vm = pkg.vm
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet                                          # noqa: E402
@@ -868,7 +869,7 @@ class GuestArgv(unittest.TestCase):
     def test_the_flag_shape_is_the_sessions_shape(self):
         # The policy under test must be the one a real session gets, or verify tests something
         # nobody runs. Compare against the session builder's own flags.
-        session = sg.msb_create_argv("sg-x", "img", 8090)
+        session = vm.msb_create_argv("sg-x", "img", 8090)
         mine = self.argv()
         for flag in ("--net-default-egress", "--net-rule"):
             self.assertEqual(session[session.index(flag) + 1], mine[mine.index(flag) + 1])

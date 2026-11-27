@@ -64,6 +64,7 @@ GIT = pkg.git
 PATHS = pkg.paths
 MITM = pkg.mitm
 SESSIONS = pkg.sessions
+VM = pkg.vm
 
 
 def event(**kw):
@@ -861,7 +862,7 @@ class UiOutputTest(UiServerTest):
             calls.append((sandbox, tail_n))
             return ["line"], None
 
-        with mock.patch.object(MOD, "_run_msb_logs", fake_logs):
+        with mock.patch.object(VM, "_run_msb_logs", fake_logs):
             _, got = self.get_json("/api/session/s1/output")
             _, again = self.get_json("/api/session/s1/output")
         self.assertEqual(got["source"], "live")
@@ -879,7 +880,7 @@ class UiOutputTest(UiServerTest):
             calls.append(sandbox)
             return None, "sandbox gone"
 
-        with mock.patch.object(MOD, "_run_msb_logs", dead):
+        with mock.patch.object(VM, "_run_msb_logs", dead):
             resp, got = self.get_json("/api/session/s2/output")
             self.get_json("/api/session/s2/output")
         self.assertEqual(resp.status, 502)
@@ -897,7 +898,7 @@ class UiOutputTest(UiServerTest):
             seen.append(tail_n)
             return [], None
 
-        with mock.patch.object(MOD, "_run_msb_logs", fake_logs):
+        with mock.patch.object(VM, "_run_msb_logs", fake_logs):
             self.get_json("/api/session/s3/output?tail=999999")
         self.assertEqual(seen, [UI.UI_OUTPUT_TAIL_MAX])
 
@@ -1098,7 +1099,7 @@ class UiDiffTest(UiServerTest):
                 return types.SimpleNamespace(
                     returncode=0, stdout="SILKGATE_DIFF_SPLIT\n", stderr="")
 
-            with mock.patch.object(MOD, "_msb", lambda: "msb"), \
+            with mock.patch.object(VM, "_msb", lambda: "msb"), \
                     mock.patch.object(MOD.subprocess, "run", fake_run):
                 UI._diff_in_guest(meta)
             script = seen["argv"][seen["argv"].index("-c") + 1]
@@ -1314,7 +1315,7 @@ class UiControlTest(UiServerTest):
             return types.SimpleNamespace(returncode=0, stdout="SILKGATE_KILLED\n",
                                          stderr="")
 
-        with mock.patch.object(MOD, "_msb", lambda: "msb"), \
+        with mock.patch.object(VM, "_msb", lambda: "msb"), \
                 mock.patch.object(MOD.subprocess, "run", fake_run):
             resp, got = self.post_json("/api/session/k1/exec/cafe1234/kill")
         self.assertEqual((resp.status, got), (200, {"ok": True}))
@@ -1322,7 +1323,7 @@ class UiControlTest(UiServerTest):
         self.assertIn("sg-k1", seen["argv"])
         script = seen["argv"][seen["argv"].index("-c") + 1] \
             if "-c" in seen["argv"] else " ".join(seen["argv"])
-        self.assertIn(f"{MOD.GUEST_EXECS}/$1.pid", script)
+        self.assertIn(f"{VM.GUEST_EXECS}/$1.pid", script)
         self.assertIn('kill -TERM -- -"$pgid"', script)
         self.assertIn('kill -KILL -- -"$pgid"', script)
         self.assertEqual(seen["argv"][-1], "cafe1234",

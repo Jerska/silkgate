@@ -16,19 +16,19 @@ import clipkg
 REPO = Path(__file__).resolve().parent.parent
 
 pkg = clipkg.load("sg_tier1_probe")
-sg = pkg.core
 con = pkg.console
 mt = pkg.mitm
+vm = pkg.vm
 
-TARGET_HOST = sg.TIER1_PROBE_TARGET.partition(":")[0]
+TARGET_HOST = vm.TIER1_PROBE_TARGET.partition(":")[0]
 
 
 class ProbeCmd(unittest.TestCase):
     def test_posix_sh_with_both_connects_bounded(self):
-        cmd = sg.tier1_probe_cmd(8093)
+        cmd = vm.tier1_probe_cmd(8093)
         self.assertEqual(cmd[:2], ["sh", "-c"])
         script = cmd[2]
-        host, _, port = sg.TIER1_PROBE_TARGET.partition(":")
+        host, _, port = vm.TIER1_PROBE_TARGET.partition(":")
         self.assertIn(f"/dev/tcp/{host}/{port}", script)
         self.assertIn(f"/dev/tcp/{mt.PROXY_ALIAS}/8093", script)
         # every connect is timeout-bounded: this runs on the hot path of every up/run
@@ -52,7 +52,7 @@ class ProbeScript(unittest.TestCase):
                     f'case "$*" in *"{TARGET_HOST}"*) exit {outside};; esac\n'
                     f"exit {proxy}\n")
                 (stub / "timeout").chmod(0o755)
-            script = sg.tier1_probe_cmd(8093)[2]
+            script = vm.tier1_probe_cmd(8093)[2]
             done = subprocess.run(["/bin/sh", "-c", script], capture_output=True,
                                   text=True, env=dict(os.environ, PATH=str(stub)))
             self.assertEqual(done.returncode, 0, done.stderr)
@@ -86,37 +86,37 @@ class Verdict(unittest.TestCase):
     """Which outcomes hand the session over: exactly one, TIER1_OK from a clean run."""
 
     def test_ok_hands_over(self):
-        self.assertIsNone(sg.tier1_verdict("TIER1_OK\n", 8093))
+        self.assertIsNone(vm.tier1_verdict("TIER1_OK\n", 8093))
 
     def test_ok_amid_other_output_still_hands_over(self):
-        self.assertIsNone(sg.tier1_verdict("some chatter\nTIER1_OK\n", 8093))
+        self.assertIsNone(vm.tier1_verdict("some chatter\nTIER1_OK\n", 8093))
 
     def test_leak_refuses_and_names_the_target(self):
-        msg = sg.tier1_verdict("TIER1_LEAK\n", 8093)
-        self.assertIn(sg.TIER1_PROBE_TARGET, msg)
+        msg = vm.tier1_verdict("TIER1_LEAK\n", 8093)
+        self.assertIn(vm.TIER1_PROBE_TARGET, msg)
 
     def test_noproxy_refuses_and_names_the_proxy(self):
-        msg = sg.tier1_verdict("TIER1_NOPROXY\n", 8093)
+        msg = vm.tier1_verdict("TIER1_NOPROXY\n", 8093)
         self.assertIn(f"{mt.PROXY_ALIAS}:8093", msg)
 
     def test_untestable_refuses_and_names_the_missing_tool(self):
-        msg = sg.tier1_verdict("TIER1_UNTESTABLE:bash\n", 8093)
+        msg = vm.tier1_verdict("TIER1_UNTESTABLE:bash\n", 8093)
         self.assertIn("'bash'", msg)
 
     def test_no_verdict_refuses(self):
-        self.assertIsNotNone(sg.tier1_verdict("", 8093))
-        self.assertIsNotNone(sg.tier1_verdict("sh: 1: not found\n", 8093))
+        self.assertIsNotNone(vm.tier1_verdict("", 8093))
+        self.assertIsNotNone(vm.tier1_verdict("sh: 1: not found\n", 8093))
 
     def test_unknown_token_refuses(self):
-        self.assertIsNotNone(sg.tier1_verdict("TIER1_BOGUS\n", 8093))
+        self.assertIsNotNone(vm.tier1_verdict("TIER1_BOGUS\n", 8093))
 
     def test_exec_error_refuses_and_is_reported(self):
-        msg = sg.tier1_verdict("", 8093, error="msb exec exited 7: boom")
+        msg = vm.tier1_verdict("", 8093, error="msb exec exited 7: boom")
         self.assertIn("msb exec exited 7: boom", msg)
 
     def test_exec_error_outranks_a_verdict_token(self):
         # a token from a run msb itself reports as failed proves nothing — fail closed
-        self.assertIsNotNone(sg.tier1_verdict("TIER1_OK\n", 8093, error="msb exec exited 1"))
+        self.assertIsNotNone(vm.tier1_verdict("TIER1_OK\n", 8093, error="msb exec exited 1"))
 
 
 class Fault(unittest.TestCase):
@@ -125,13 +125,13 @@ class Fault(unittest.TestCase):
 
     def setUp(self):
         self.runs, self.run_kwargs, self.notes = [], [], []
-        self._orig = (subprocess.run, sg._msb, con.say)
-        sg._msb = lambda: "msb"
+        self._orig = (subprocess.run, vm._msb, con.say)
+        vm._msb = lambda: "msb"
         con.say = self.notes.append
         self.addCleanup(self._restore)
 
     def _restore(self):
-        subprocess.run, sg._msb, con.say = self._orig
+        subprocess.run, vm._msb, con.say = self._orig
 
     def fault(self, outcomes):
         """Run tier1_fault with subprocess.run scripted: each entry is either an
@@ -145,7 +145,7 @@ class Fault(unittest.TestCase):
                 raise out
             return out
         subprocess.run = run
-        return sg.tier1_fault("sb", 8093)
+        return vm.tier1_fault("sb", 8093)
 
     @staticmethod
     def timeout():
@@ -164,7 +164,7 @@ class Fault(unittest.TestCase):
 
     def test_two_timeouts_refuse_with_the_unchanged_message(self):
         msg = self.fault([self.timeout(), self.timeout()])
-        self.assertEqual(msg, sg.tier1_verdict(
+        self.assertEqual(msg, vm.tier1_verdict(
             "", 8093, error="msb exec did not return within 15s"))
         self.assertEqual(len(self.runs), 2)
         self.assertEqual(self.notes, [])

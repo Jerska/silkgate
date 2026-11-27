@@ -41,6 +41,7 @@ mt = pkg.mitm
 im = pkg.images
 br = pkg.briefing
 ss = pkg.sessions
+vm = pkg.vm
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -275,7 +276,7 @@ class TestTeardownArchive(JournalCase):
         """_teardown_session with the msb seams stubbed; returns captured stderr."""
         err = io.StringIO()
         with mock.patch.object(sg, "_remove_sandbox", lambda sandbox: removed), \
-                mock.patch.object(sg, "_run_msb_logs",
+                mock.patch.object(vm, "_run_msb_logs",
                                   lambda sandbox, tail_n=None, since=None: logs), \
                 contextlib.redirect_stderr(err):
             sg._teardown_session(meta, archive=archive)
@@ -344,7 +345,7 @@ class TestTeardownArchive(JournalCase):
         meta = self.write_session("t6", sid=ss._new_sid("t6"))
         err = io.StringIO()
         with mock.patch.object(sg, "_remove_sandbox", lambda sandbox: False), \
-                mock.patch.object(sg, "_run_msb_logs",
+                mock.patch.object(vm, "_run_msb_logs",
                                   lambda sandbox, tail_n=None, since=None: ([], None)), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
             sg._teardown_session(meta)
@@ -380,7 +381,7 @@ class TestTeardownArchive(JournalCase):
             seen.append(tail_n)
             return [], None
 
-        with mock.patch.object(sg, "_run_msb_logs", spy_logs):
+        with mock.patch.object(vm, "_run_msb_logs", spy_logs):
             sg._snapshot_output("sg-t9", self.tmp)
             os.environ["SILKGATE_SNAPSHOT_TAIL_LINES"] = "123"
             self.addCleanup(os.environ.pop, "SILKGATE_SNAPSHOT_TAIL_LINES", None)
@@ -513,7 +514,7 @@ class TestBrief(JournalCase):
             return types.SimpleNamespace(returncode=0)
 
         ruleset = rule_engine.RuleSet.parse(RULE)
-        with mock.patch.object(sg, "_msb", lambda: "msb"), \
+        with mock.patch.object(vm, "_msb", lambda: "msb"), \
                 mock.patch.object(sg.subprocess, "run", fake_run):
             sg._provision_session("br1", "img:1", 8090, RULE, ruleset, [], None, [],
                                   {}, context="ctx", context_paths=(br.GUEST_CONTEXT,),
@@ -627,7 +628,7 @@ class TestExecBrief(JournalCase):
         args = types.SimpleNamespace(name=name, env=[], tty=False, brief=flag,
                                      cmd=["--", "true"])
         with mock.patch.object(sg, "_land_brief_in_guest", fake_land), \
-                mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
+                mock.patch.object(vm, "run_guest", lambda *a, **k: 0), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit):
             sg.cmd_exec(args)
@@ -690,7 +691,7 @@ class TestExecBrief(JournalCase):
                                      cmd=["--", "true"])
         with mock.patch.object(sg, "_land_brief_in_guest",
                                lambda sandbox, data: "guest is gone"), \
-                mock.patch.object(sg, "run_guest",
+                mock.patch.object(vm, "run_guest",
                                   lambda *a, **k: ran.append(1) or 0):
             self.refuses("could not land the brief", sg.cmd_exec, args)
         self.assertEqual(ran, [], "the command must not run without its brief")
@@ -703,7 +704,7 @@ class TestExecBrief(JournalCase):
         landed = []
         with mock.patch.object(sg, "_land_brief_in_guest",
                                lambda s, d: landed.append((s, d)) or None), \
-                mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
+                mock.patch.object(vm, "run_guest", lambda *a, **k: 0), \
                 self.assertRaises(SystemExit):
             sg.cmd_attach(types.SimpleNamespace(name="x6"))
         start = ss._read_journal(ss.session_dir("x6") / "journal.jsonl")[0]
@@ -717,7 +718,7 @@ class TestExecBrief(JournalCase):
             seen["argv"], seen["kwargs"] = argv, kwargs
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-        with mock.patch.object(sg, "_msb", lambda: "msb"), \
+        with mock.patch.object(vm, "_msb", lambda: "msb"), \
                 mock.patch.object(sg.subprocess, "run", fake_run):
             self.assertIsNone(sg._land_brief_in_guest("sg-x", b"# ask\n"))
         script = seen["argv"][seen["argv"].index("-c") + 1]
@@ -732,7 +733,7 @@ class TestExecBrief(JournalCase):
         big.write_bytes(b"x" * (sg._BRIEF_MAX_BYTES + 1))
         args = types.SimpleNamespace(name="x7", env=[], tty=False, brief=str(big),
                                      cmd=["--", "true"])
-        with mock.patch.object(sg, "run_guest", lambda *a, **k: 0):
+        with mock.patch.object(vm, "run_guest", lambda *a, **k: 0):
             self.refuses("over the 1 MiB limit", sg.cmd_exec, args)
 
     def test_run_journals_its_exec_brief(self):
@@ -755,10 +756,10 @@ class TestExecBrief(JournalCase):
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
                 mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
                 mock.patch.object(sg, "_provision_session", fake_provision), \
-                mock.patch.object(sg, "tier1_fault", lambda *a, **k: None), \
+                mock.patch.object(vm, "tier1_fault", lambda *a, **k: None), \
                 mock.patch.object(sg, "_land_brief_in_guest",
                                   lambda s, d: landed.append((s, d)) or None), \
-                mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
+                mock.patch.object(vm, "run_guest", lambda *a, **k: 0), \
                 mock.patch.object(sg, "_teardown_session",
                                   lambda meta, archive=True: None), \
                 mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
@@ -794,7 +795,7 @@ class TestExecJournal(JournalCase):
             captured.update(cmd=list(cmd), tty=tty, exec_id=exec_id)
             return rc
 
-        with mock.patch.object(sg, "run_guest", fake_run_guest), \
+        with mock.patch.object(vm, "run_guest", fake_run_guest), \
                 self.assertRaises(SystemExit) as caught:
             fn(args)
         self.assertEqual(caught.exception.code, rc)
@@ -838,7 +839,7 @@ class TestExecJournal(JournalCase):
         def interrupted(*a, **k):
             raise KeyboardInterrupt
 
-        with mock.patch.object(sg, "run_guest", interrupted), \
+        with mock.patch.object(vm, "run_guest", interrupted), \
                 self.assertRaises(KeyboardInterrupt):
             sg.cmd_exec(args)
         records = ss._read_journal(ss.session_dir("e3") / "journal.jsonl")
@@ -856,7 +857,7 @@ class TestExecJournal(JournalCase):
         def dies(*a, **k):
             raise SystemExit("not an int")
 
-        with mock.patch.object(sg, "run_guest", dies), self.assertRaises(SystemExit):
+        with mock.patch.object(vm, "run_guest", dies), self.assertRaises(SystemExit):
             sg.cmd_exec(args)
         records = ss._read_journal(ss.session_dir("e4") / "journal.jsonl")
         self.assertEqual([r["event"] for r in records], ["exec_start", "exec_end"])
@@ -967,8 +968,8 @@ class TestExecMarker(JournalCase):
             seen["argv"] = argv
             return 0
 
-        with mock.patch.object(sg, "_pty_relay", fake_relay):
-            sg.run_guest(lambda c: ["msb", "exec", "-q", "sg-x", "--"] + c,
+        with mock.patch.object(vm, "_pty_relay", fake_relay):
+            vm.run_guest(lambda c: ["msb", "exec", "-q", "sg-x", "--"] + c,
                          ["echo", "hi"], tty=tty, exec_id=exec_id)
         return " ".join(seen["argv"])
 
@@ -978,16 +979,16 @@ class TestExecMarker(JournalCase):
         self.assertIn("${ANTHROPIC_CUSTOM_HEADERS:+", text,
                       "a caller-provided value is merged, never clobbered")
         self.assertIn("export ANTHROPIC_CUSTOM_HEADERS", text)
-        self.assertIn(f"{sg.GUEST_EXECS}/cafe1234.pid", text)
+        self.assertIn(f"{vm.GUEST_EXECS}/cafe1234.pid", text)
         self.assertIn("mkdir -p", text)
-        self.assertIn(f'trap "rm -f {sg.GUEST_EXECS}/cafe1234.pid', text,
+        self.assertIn(f'trap "rm -f {vm.GUEST_EXECS}/cafe1234.pid', text,
                       "the wrapper's own EXIT trap cleans the pidfile up")
 
     def test_tty_wrapper_carries_the_marker_too(self):
         text = self.built_argv(True, "beef5678")
         self.assertIn("X-Silkgate-Exec: beef5678", text)
-        self.assertIn(f"{sg.GUEST_EXECS}/beef5678.pid", text)
-        self.assertIn(f'trap "rm -f {sg.GUEST_EXECS}/beef5678.pid', text)
+        self.assertIn(f"{vm.GUEST_EXECS}/beef5678.pid", text)
+        self.assertIn(f'trap "rm -f {vm.GUEST_EXECS}/beef5678.pid', text)
         self.assertNotIn('exec "$@"', text,
                          "an exec would replace the shell and lose the EXIT trap")
 
@@ -1009,11 +1010,11 @@ class TestExecMarker(JournalCase):
         pidfile = execs / "cafe1234.pid"
         lines = []
         quiet = io.TextIOWrapper(io.BytesIO())           # the relay writes stdout.buffer
-        with mock.patch.object(sg, "GUEST_EXECS", str(execs)), \
+        with mock.patch.object(vm, "GUEST_EXECS", str(execs)), \
                 mock.patch.dict(os.environ,
                                 {"ANTHROPIC_CUSTOM_HEADERS": "X-Existing: keepme"}), \
                 contextlib.redirect_stdout(quiet):
-            rc = sg.run_guest(lambda argv: argv,
+            rc = vm.run_guest(lambda argv: argv,
                               ["sh", "-c", 'printf "%s\\n" "$ANTHROPIC_CUSTOM_HEADERS"; '
                                            'cat "$0"; echo', str(pidfile)],
                               tty=False, on_line=lines.append, exec_id="cafe1234")
@@ -1026,9 +1027,9 @@ class TestExecMarker(JournalCase):
         blocker = self.tmp / "blocker"
         blocker.write_text("")                            # mkdir -p under a file fails
         quiet = io.TextIOWrapper(io.BytesIO())
-        with mock.patch.object(sg, "GUEST_EXECS", str(blocker / "execs")), \
+        with mock.patch.object(vm, "GUEST_EXECS", str(blocker / "execs")), \
                 contextlib.redirect_stdout(quiet):
-            rc = sg.run_guest(lambda argv: argv, ["sh", "-c", "exit 0"],
+            rc = vm.run_guest(lambda argv: argv, ["sh", "-c", "exit 0"],
                               tty=False, exec_id="cafe1234")
         self.assertEqual(rc, 0, "the pidfile is best-effort; the command still runs")
 

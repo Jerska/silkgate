@@ -63,6 +63,7 @@ CONSOLE = pkg.console
 FOREGROUND = pkg.foreground
 MITM = pkg.mitm
 SESSIONS = pkg.sessions
+VM = pkg.vm
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -1258,7 +1259,7 @@ class InterruptSideEffectTest(_FakeToolsCase):
             BrokenPipeError()))})()
         try:
             with self.assertRaises(BrokenPipeError):
-                MOD._pty_relay([sys.executable, "-c", child], demux=True)
+                VM._pty_relay([sys.executable, "-c", child], demux=True)
         finally:
             sys.stdout = real
         deadline = time.monotonic() + 10
@@ -1302,8 +1303,8 @@ class InterruptSideEffectTest(_FakeToolsCase):
         driver = (
             "import sys\n"
             f"sys.path.insert(0, {str(clipkg.CLI_DIR)!r})\n"
-            "from silkgate_cli import core as mod\n"
-            f"sys.exit(mod.run_guest(lambda c: [sys.executable, '-c', {raw!r}],"
+            "from silkgate_cli import vm\n"
+            f"sys.exit(vm.run_guest(lambda c: [sys.executable, '-c', {raw!r}],"
             " ['x'], tty=True))\n")
         proc = subprocess.Popen([sys.executable, "-c", driver],
                                 stdin=pts, stdout=pts, stderr=subprocess.PIPE, text=True)

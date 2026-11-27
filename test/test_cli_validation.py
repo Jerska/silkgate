@@ -40,6 +40,7 @@ mt = pkg.mitm
 im = pkg.images
 br = pkg.briefing
 ss = pkg.sessions
+vm = pkg.vm
 
 
 def tearDownModule():
@@ -1651,9 +1652,9 @@ class TestHarvestWiring(CliCase):
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
                 mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
                 mock.patch.object(sg, "_provision_session", lambda *a, **k: None), \
-                mock.patch.object(sg, "tier1_fault", lambda *a: None), \
+                mock.patch.object(vm, "tier1_fault", lambda *a: None), \
                 mock.patch.object(gt, "_setup_branch_guest", lambda *a: None), \
-                mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
+                mock.patch.object(vm, "run_guest", lambda *a, **k: 0), \
                 mock.patch.object(ss, "read_meta", read_meta), \
                 mock.patch.object(gt, "_harvest_branch", harvest), \
                 mock.patch.object(sg, "_teardown_session",
@@ -2250,20 +2251,20 @@ class TestMemoryFlag(CliCase):
         """The exact msb create argv a run/up composes, captured at the call and the
         run stopped there — before any msb process."""
         seen = {}
-        real = sg.msb_create_argv
+        real = vm.msb_create_argv
 
         def spy(*a, **kw):
             seen["argv"] = real(*a, **kw)
             raise SystemExit(42)
 
         with self.no_preflight(), \
-                mock.patch.object(sg, "_msb", lambda: "msb"), \
+                mock.patch.object(vm, "_msb", lambda: "msb"), \
                 mock.patch.object(im, "ensure_image", lambda *a, **k: "img:1"), \
                 mock.patch.object(mt, "_proxy_running", lambda: True), \
                 mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
                 mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
-                mock.patch.object(sg, "msb_create_argv", spy), \
+                mock.patch.object(vm, "msb_create_argv", spy), \
                 mock.patch.object(sg, "_remove_sandbox", lambda *a, **k: True), \
                 mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
                 mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
@@ -2294,10 +2295,10 @@ class TestMemoryFlag(CliCase):
             self.assertNotIn(("-m", "1G"), pairs, argv)
 
     def test_the_builder_itself_defaults_to_no_dash_m(self):
-        with mock.patch.object(sg, "_msb", lambda: "msb"):
-            created = sg.msb_create_argv("sg-x", "img", 8090, memory="1G")
+        with mock.patch.object(vm, "_msb", lambda: "msb"):
+            created = vm.msb_create_argv("sg-x", "img", 8090, memory="1G")
             self.assertIn(("-m", "1G"), list(zip(created, created[1:])))
-            self.assertNotIn("-m", sg.msb_create_argv("sg-x", "img", 8090))
+            self.assertNotIn("-m", vm.msb_create_argv("sg-x", "img", 8090))
 
     def test_the_shape_msb_documents_survives_parsing(self):
         for size in ("512M", "1G", "8G", "16384M"):
@@ -2355,10 +2356,10 @@ class TestCpusFlag(CliCase):
             self.assertIn(("-c", "2"), pairs, argv)
 
     def test_the_builder_itself_defaults_to_no_dash_c(self):
-        with mock.patch.object(sg, "_msb", lambda: "msb"):
-            created = sg.msb_create_argv("sg-x", "img", 8090, cpus="4")
+        with mock.patch.object(vm, "_msb", lambda: "msb"):
+            created = vm.msb_create_argv("sg-x", "img", 8090, cpus="4")
             self.assertIn(("-c", "4"), list(zip(created, created[1:])))
-            self.assertNotIn("-c", sg.msb_create_argv("sg-x", "img", 8090))
+            self.assertNotIn("-c", vm.msb_create_argv("sg-x", "img", 8090))
 
     def test_a_positive_integer_survives_parsing(self):
         for count in ("1", "2", "8", "16"):

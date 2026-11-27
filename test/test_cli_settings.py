@@ -37,6 +37,7 @@ mt = pkg.mitm
 im = pkg.images
 br = pkg.briefing
 ss = pkg.sessions
+vm = pkg.vm
 
 
 def tearDownModule():
@@ -297,7 +298,7 @@ class TestProvisionStaging(SettingsCase):
             return types.SimpleNamespace(returncode=0)
 
         with mock.patch.object(mt, "_push_secrets", lambda *a, **k: None), \
-                mock.patch.object(sg, "_msb", lambda: "/fake/bin/msb"), \
+                mock.patch.object(vm, "_msb", lambda: "/fake/bin/msb"), \
                 mock.patch.object(sg.subprocess, "run", fake_run):
             sg._provision_session(name, "img:1", 8090, "", prof.load_ruleset(""),
                                   [], None, [], {"profiles": [], "command": None}, **kwargs)
