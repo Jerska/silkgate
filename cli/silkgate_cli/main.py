@@ -16,7 +16,7 @@ import re
 import signal
 import sys
 
-from . import core
+from . import core, verify
 
 
 # The two argument types that reach a generated Dockerfile or an msb argv are checked by
@@ -190,7 +190,7 @@ def main():
     p.add_argument("--negative-control", action="store_true",
                    help="also run a guest with egress open, which must fail check 3: the "
                         "proof the checks can fail")
-    p.set_defaults(fn=core.cmd_verify)
+    p.set_defaults(fn=verify.cmd_verify)
 
     p = sub.add_parser("run", help="run one command in a fresh guest, then remove it")
     guest_opts(p)

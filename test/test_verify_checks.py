@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Unit tests for the verify contract: the pure logic in cli/silkgate, and the two things in
-test/verify_guest.sh that decide what that logic is asked about.
+"""Unit tests for the verify contract: the pure logic in cli/silkgate_cli/verify.py, and the
+two things in test/verify_guest.sh that decide what that logic is asked about.
 
     python3 test/test_verify_checks.py [-v]
 
@@ -42,13 +42,15 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "test" / "verify_guest.sh"
 
 
-sg = clipkg.load("sg_verify_checks").core
+pkg = clipkg.load("sg_verify_checks")
+sg = pkg.core
+vf = pkg.verify
 TEXT = SCRIPT.read_text()
 
-ALL = frozenset(sg._VERIFY_CHECKS)
-FREE = frozenset(sg._VERIFY_TOOL_FREE)
+ALL = frozenset(vf._VERIFY_CHECKS)
+FREE = frozenset(vf._VERIFY_TOOL_FREE)
 NEEDS_TOOLS = ALL - FREE
-SUBJECTS = dict(sg._VERIFY_SUBJECTS)         # {id: the capability a guest may lack}
+SUBJECTS = dict(vf._VERIFY_SUBJECTS)         # {id: the capability a guest may lack}
 MAY_LACK = frozenset(SUBJECTS)
 
 # Each check's block: its declaration line through to the next declaration (or EOF). Shell
@@ -86,30 +88,30 @@ BLOCKS = _blocks()
 
 class ParseChecks(unittest.TestCase):
     def test_ran_skipped_and_unavailable(self):
-        self.assertEqual(sg._parse_checks("CHECKS: ran=3,7 skipped=1,2 unavailable=5,11"),
+        self.assertEqual(vf._parse_checks("CHECKS: ran=3,7 skipped=1,2 unavailable=5,11"),
                          ({3, 7}, {1, 2}, {5, 11}))
 
     def test_empty_fields(self):
         ran = ",".join(str(i) for i in sorted(ALL))
-        self.assertEqual(sg._parse_checks(f"CHECKS: ran={ran} skipped= unavailable="),
+        self.assertEqual(vf._parse_checks(f"CHECKS: ran={ran} skipped= unavailable="),
                          (set(ALL), set(), set()))
 
     def test_empty_all_three(self):
-        self.assertEqual(sg._parse_checks("CHECKS: ran= skipped= unavailable="),
+        self.assertEqual(vf._parse_checks("CHECKS: ran= skipped= unavailable="),
                          (set(), set(), set()))
 
     def test_a_line_from_before_the_unavailable_field_still_parses(self):
         # older guests do not print the third field; they simply claimed nothing unavailable
-        self.assertEqual(sg._parse_checks("CHECKS: ran=3,7 skipped=1,2"),
+        self.assertEqual(vf._parse_checks("CHECKS: ran=3,7 skipped=1,2"),
                          ({3, 7}, {1, 2}, set()))
 
     def test_order_is_immaterial(self):
         # the guest runs the two checks that reconfigure it last, so `ran` is not the run order
-        ran, _, _ = sg._parse_checks("CHECKS: ran=10,3,7 skipped=")
+        ran, _, _ = vf._parse_checks("CHECKS: ran=10,3,7 skipped=")
         self.assertEqual(ran, {3, 7, 10})
 
     def test_two_digit_ids_are_not_split(self):
-        ran, skipped, unavailable = sg._parse_checks("CHECKS: ran=1,12,15 skipped=13 "
+        ran, skipped, unavailable = vf._parse_checks("CHECKS: ran=1,12,15 skipped=13 "
                                                      "unavailable=11")
         self.assertEqual((ran, skipped, unavailable), ({1, 12, 15}, {13}, {11}))
 
@@ -173,7 +175,7 @@ class DerivedFromTheScript(unittest.TestCase):
         self.assertEqual(scored, set(ALL))
 
     def test_an_unreadable_script_leaves_no_expected_set(self):
-        self.assertEqual(sg._declared_checks(Path("/nonexistent/verify_guest.sh")),
+        self.assertEqual(vf._declared_checks(Path("/nonexistent/verify_guest.sh")),
                          (frozenset(), frozenset(), {}))
 
     def test_declarations_are_read_from_the_file_handed_in(self):
@@ -185,7 +187,7 @@ class DerivedFromTheScript(unittest.TestCase):
                             "# CHECK 4 tools: none — a space makes the tools field empty\n"
                             "# CHECK 5 tools:none subject:ipv6 — may find no subject\n"
                             "# CHECK 6 tools:none subject: — a space empties this one too\n")
-            every, free, subjects = sg._declared_checks(fake)
+            every, free, subjects = vf._declared_checks(fake)
         self.assertEqual(sorted(every), [1, 2, 3, 5, 6])
         self.assertEqual(sorted(free), [1, 3, 5, 6])
         self.assertEqual(subjects, {5: "ipv6"})
@@ -195,29 +197,29 @@ class ExpectedSets(unittest.TestCase):
     """The decision `--full` and bare runs are held to, as behavior, not as constants."""
 
     def test_full_run_of_every_check_is_clean(self):
-        self.assertIsNone(sg._verify_shortfall(len(ALL), 0, set(ALL), set(), full=True))
+        self.assertIsNone(vf._verify_shortfall(len(ALL), 0, set(ALL), set(), full=True))
 
     def test_bare_run_of_the_tool_free_checks_is_clean(self):
-        self.assertIsNone(sg._verify_shortfall(len(FREE), 0, set(FREE), set(NEEDS_TOOLS),
+        self.assertIsNone(vf._verify_shortfall(len(FREE), 0, set(FREE), set(NEEDS_TOOLS),
                                               full=False))
 
     def test_a_bare_run_missing_one_tool_free_check_names_it(self):
         one = min(FREE)
-        bad = sg._verify_shortfall(len(FREE) - 1, 0, FREE - {one}, NEEDS_TOOLS | {one},
+        bad = vf._verify_shortfall(len(FREE) - 1, 0, FREE - {one}, NEEDS_TOOLS | {one},
                                    full=False)
         self.assertIsNotNone(bad)
         self.assertIn(f"check(s) {one}", bad)
         self.assertIn("never ran", bad)
 
     def test_a_bare_run_of_only_the_tool_gated_checks_is_not_enough(self):
-        bad = sg._verify_shortfall(len(NEEDS_TOOLS), 0, set(NEEDS_TOOLS), set(FREE), full=False)
+        bad = vf._verify_shortfall(len(NEEDS_TOOLS), 0, set(NEEDS_TOOLS), set(FREE), full=False)
         self.assertIsNotNone(bad)
         for missing in FREE:
             self.assertIn(str(missing), bad)
 
     def test_full_run_missing_one_check_names_it(self):
         one = max(ALL)
-        bad = sg._verify_shortfall(len(ALL) - 1, 0, ALL - {one}, {one}, full=True)
+        bad = vf._verify_shortfall(len(ALL) - 1, 0, ALL - {one}, {one}, full=True)
         self.assertIsNotNone(bad)
         self.assertIn(f"check(s) {one}", bad)
         self.assertIn("never ran", bad)
@@ -225,19 +227,19 @@ class ExpectedSets(unittest.TestCase):
     def test_full_run_where_only_passes_were_counted_is_not_containment(self):
         # the original defect: mostly skips and a couple of passes, zero failures
         two = set(sorted(ALL)[:2])
-        bad = sg._verify_shortfall(2, 0, two, ALL - two, full=True)
+        bad = vf._verify_shortfall(2, 0, two, ALL - two, full=True)
         self.assertIsNotNone(bad)
         self.assertIn("never ran", bad)
 
     def test_a_bare_run_that_skipped_a_tool_free_check_does_not_blame_a_tool(self):
         """The wrong hint sent a reader looking for a missing package for a whole release."""
         one = min(FREE)
-        bad = sg._verify_shortfall(len(FREE) - 1, 0, FREE - {one}, {one}, full=False)
+        bad = vf._verify_shortfall(len(FREE) - 1, 0, FREE - {one}, {one}, full=False)
         self.assertIn("tools:none", bad)
         self.assertNotIn("--full installs", bad)
 
     def test_tool_free_is_a_subset_of_the_full_set(self):
-        self.assertLessEqual(sg._VERIFY_TOOL_FREE, sg._VERIFY_CHECKS)
+        self.assertLessEqual(vf._VERIFY_TOOL_FREE, vf._VERIFY_CHECKS)
 
 
 class UnavailableScoring(unittest.TestCase):
@@ -252,12 +254,12 @@ class UnavailableScoring(unittest.TestCase):
 
     def test_a_full_run_whose_declared_subjects_are_absent_is_clean(self):
         ran = ALL - MAY_LACK
-        self.assertIsNone(sg._verify_shortfall(len(ran), 0, set(ran), set(), set(MAY_LACK),
+        self.assertIsNone(vf._verify_shortfall(len(ran), 0, set(ran), set(), set(MAY_LACK),
                                                full=True))
 
     def test_a_bare_run_whose_declared_subjects_are_absent_is_clean(self):
         ran = FREE - MAY_LACK
-        self.assertIsNone(sg._verify_shortfall(len(ran), 0, set(ran), set(NEEDS_TOOLS),
+        self.assertIsNone(vf._verify_shortfall(len(ran), 0, set(ran), set(NEEDS_TOOLS),
                                                set(MAY_LACK), full=False))
 
     def test_the_linux_kvm_run_this_exists_for(self):
@@ -266,24 +268,24 @@ class UnavailableScoring(unittest.TestCase):
         self.assertEqual({5, 11} & MAY_LACK, {5, 11},
                          "checks 5 and 11 must declare a subject a guest may lack")
         ran = ALL - {5, 11}
-        self.assertIsNone(sg._verify_shortfall(len(ran), 0, set(ran), set(), {5, 11},
+        self.assertIsNone(vf._verify_shortfall(len(ran), 0, set(ran), set(), {5, 11},
                                                full=True))
 
     def test_a_check_that_declares_no_subject_cannot_be_waved_off(self):
         one = min(ALL - MAY_LACK)
-        bad = sg._verify_shortfall(len(ALL) - 1, 0, set(ALL) - {one}, set(), {one}, full=True)
+        bad = vf._verify_shortfall(len(ALL) - 1, 0, set(ALL) - {one}, set(), {one}, full=True)
         self.assertIsNotNone(bad)
         self.assertIn(f"check(s) {one}", bad)
         self.assertIn("could have run", bad)
 
     def test_a_run_that_excuses_everything_proves_nothing(self):
         # the wholesale abuse: nothing ran, nothing failed, everything "had no subject"
-        bad = sg._verify_shortfall(0, 0, set(), set(), set(ALL), full=True)
+        bad = vf._verify_shortfall(0, 0, set(), set(), set(ALL), full=True)
         self.assertIsNotNone(bad)
 
     def test_a_check_cannot_both_run_and_have_had_no_subject(self):
         one = min(MAY_LACK)
-        bad = sg._verify_shortfall(len(ALL), 0, set(ALL), set(), {one}, full=True)
+        bad = vf._verify_shortfall(len(ALL), 0, set(ALL), set(), {one}, full=True)
         self.assertIsNotNone(bad)
         self.assertIn("disagrees", bad)
 
@@ -292,54 +294,54 @@ class UnavailableScoring(unittest.TestCase):
         check skipped is still refused, however honestly the v6 checks bowed out."""
         gated = min(NEEDS_TOOLS)
         ran = ALL - MAY_LACK - {gated}
-        bad = sg._verify_shortfall(len(ran), 0, set(ran), {gated}, set(MAY_LACK), full=True)
+        bad = vf._verify_shortfall(len(ran), 0, set(ran), {gated}, set(MAY_LACK), full=True)
         self.assertIsNotNone(bad)
         self.assertIn(f"check(s) {gated}", bad)
         self.assertIn("never ran", bad)
 
     def test_a_failure_still_wins_over_an_absent_subject(self):
-        bad = sg._verify_shortfall(len(ALL) - 3, 1, set(ALL) - MAY_LACK, set(),
+        bad = vf._verify_shortfall(len(ALL) - 3, 1, set(ALL) - MAY_LACK, set(),
                                    set(MAY_LACK), full=True)
         self.assertIn("FAILED", bad)
 
     def test_a_checks_line_without_the_field_scores_exactly_as_before(self):
-        self.assertIsNone(sg._verify_shortfall(len(ALL), 0, set(ALL), set(), full=True))
+        self.assertIsNone(vf._verify_shortfall(len(ALL), 0, set(ALL), set(), full=True))
 
 
 class NoExpectedSetAtAll(unittest.TestCase):
     """If the declarations cannot be read, the run is refused rather than blessed."""
 
     def setUp(self):
-        self.saved = (sg._VERIFY_CHECKS, sg._VERIFY_TOOL_FREE)
-        sg._VERIFY_CHECKS = sg._VERIFY_TOOL_FREE = frozenset()
+        self.saved = (vf._VERIFY_CHECKS, vf._VERIFY_TOOL_FREE)
+        vf._VERIFY_CHECKS = vf._VERIFY_TOOL_FREE = frozenset()
 
     def tearDown(self):
-        sg._VERIFY_CHECKS, sg._VERIFY_TOOL_FREE = self.saved
+        vf._VERIFY_CHECKS, vf._VERIFY_TOOL_FREE = self.saved
 
     def test_a_perfect_looking_run_is_still_refused(self):
         for full in (False, True):
-            bad = sg._verify_shortfall(11, 0, set(range(1, 12)), set(), full=full)
+            bad = vf._verify_shortfall(11, 0, set(range(1, 12)), set(), full=full)
             self.assertIsNotNone(bad)
             self.assertIn("CHECK", bad)
 
     def test_a_failure_is_still_reported_as_a_failure(self):
-        self.assertIn("FAILED", sg._verify_shortfall(10, 1, set(range(1, 12)), set(), full=True))
+        self.assertIn("FAILED", vf._verify_shortfall(10, 1, set(range(1, 12)), set(), full=True))
 
 
 class Shortfall(unittest.TestCase):
     def test_any_failure_wins_over_everything(self):
-        bad = sg._verify_shortfall(len(ALL) - 1, 1, set(ALL), set(), full=True)
+        bad = vf._verify_shortfall(len(ALL) - 1, 1, set(ALL), set(), full=True)
         self.assertIsNotNone(bad)
         self.assertIn("FAILED", bad)
 
     def test_pass_count_must_match_the_ran_set(self):
-        bad = sg._verify_shortfall(len(ALL) - 1, 0, set(ALL), set(), full=True)
+        bad = vf._verify_shortfall(len(ALL) - 1, 0, set(ALL), set(), full=True)
         self.assertIsNotNone(bad)
         self.assertIn("disagrees", bad)
 
     def test_extra_checks_beyond_the_expected_set_are_fine(self):
         # a bare run where the image happened to carry every tool
-        self.assertIsNone(sg._verify_shortfall(len(ALL), 0, set(ALL), set(), full=False))
+        self.assertIsNone(vf._verify_shortfall(len(ALL), 0, set(ALL), set(), full=False))
 
 
 @unittest.skipUnless(shutil.which("bash"), "no bash on PATH")
@@ -693,7 +695,7 @@ class BookkeepingLines(unittest.TestCase):
     def test_the_checks_line_round_trips_through_the_cli(self):
         stdout, _ = self.run_tail(2, 0, ",12,3", ",6", ",5,11")
         line = next(l for l in stdout.splitlines() if l.startswith("CHECKS:"))
-        self.assertEqual(sg._parse_checks(line), ({3, 12}, {6}, {5, 11}))
+        self.assertEqual(vf._parse_checks(line), ({3, 12}, {6}, {5, 11}))
 
 
 @unittest.skipUnless(shutil.which("bash"), "no bash on PATH")

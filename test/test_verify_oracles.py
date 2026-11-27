@@ -40,7 +40,9 @@ import clipkg
 
 REPO = Path(__file__).resolve().parents[1]
 
-sg = clipkg.load("sg_verify_oracles").core
+pkg = clipkg.load("sg_verify_oracles")
+sg = pkg.core
+vf = pkg.verify
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet                                          # noqa: E402
@@ -96,7 +98,7 @@ def _squat(case, port):
 
 # The CLI's port-collision messages, by fragment: they tell a neighbor taking a port
 # between probe and bind from a real verdict. _IN_USE copies _port_in_use_error's text,
-# _CANNOT_BIND copies _oracle_bind's. Both drift if cli/silkgate's messages change.
+# _CANNOT_BIND copies _oracle_bind's. Both drift if the CLI's messages change.
 _IN_USE = "is already in use"
 _CANNOT_BIND = "cannot bind the"
 
@@ -149,7 +151,7 @@ class PortProbe(unittest.TestCase):
     """The probe every pick above trusts, against the binds the oracles actually make."""
 
     def test_a_udp_holder_on_v6_loopback_is_seen(self):
-        # sg._ArrivalObserver binds udp on ::1 too: a probe that skips that family passes
+        # vf._ArrivalObserver binds udp on ::1 too: a probe that skips that family passes
         # a port the observer then dies on — the flake this module used to have.
         holder = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
         self.addCleanup(holder.close)
@@ -163,7 +165,7 @@ class RecorderEndpoint(unittest.TestCase):
     """The Tier-2 fixture against a real HTTP client: it records, and it reflects nothing."""
 
     def setUp(self):
-        _, self.recorder = _bind_or_skip(sg._HeaderRecorder)
+        _, self.recorder = _bind_or_skip(vf._HeaderRecorder)
         self.addCleanup(self.recorder.close)
 
     def post(self, target, headers, body=b"", method="POST", host="127.0.0.1"):
@@ -212,7 +214,7 @@ class RecorderEndpoint(unittest.TestCase):
         held.bind(("127.0.0.1", 0))
         held.listen(1)
         port = held.getsockname()[1]
-        message = _die_message(sg._HeaderRecorder, port)
+        message = _die_message(vf._HeaderRecorder, port)
         self.assertIn(str(port), message)
         self.assertIn("recorder", message)
 
@@ -225,12 +227,12 @@ class RecorderEndpoint(unittest.TestCase):
         self.addCleanup(held.close)
         held.bind(("127.0.0.1", 0))
         held.listen(1)
-        message = _die_message(sg._HeaderRecorder, held.getsockname()[1])
+        message = _die_message(vf._HeaderRecorder, held.getsockname()[1])
         self.assertIn("squatter (pid 4242)", message)
 
     def test_without_lsof_the_error_names_the_command_that_would_say(self):
         with mock.patch.object(sg.shutil, "which", lambda *a, **k: None):
-            self.assertIn("lsof -nP -i:6100", sg._port_holder(6100))
+            self.assertIn("lsof -nP -i:6100", vf._port_holder(6100))
 
 
 class RecorderRule(unittest.TestCase):
@@ -241,7 +243,7 @@ class RecorderRule(unittest.TestCase):
         # Exactly what cmd_verify composes: the probe profile's rules plus the one rule the
         # recorder adds, parsed by the engine the proxy will use.
         self.rules = (sg.compose_rules(sg.resolve_profiles(["probe"], allow_verify_only=True))
-                      + sg._recorder_rules(self.recorder_port))
+                      + vf._recorder_rules(self.recorder_port))
         self.ruleset = RuleSet.parse(self.rules)
 
     def matched(self, method, path, port=None):
@@ -253,7 +255,7 @@ class RecorderRule(unittest.TestCase):
     def test_post_to_the_recorder_path_matches_and_injects(self):
         rule = self.matched("POST", "/verify/record/replace")
         self.assertIsNotNone(rule)
-        self.assertEqual(rule.inject_auth, sg._VERIFY_SECRET_NAME)
+        self.assertEqual(rule.inject_auth, vf._VERIFY_SECRET_NAME)
 
     def test_the_method_the_fixture_expects_to_be_refused_matches_nothing(self):
         self.assertIsNone(self.matched("GET", "/verify/record/method"))
@@ -272,7 +274,7 @@ class RecorderRule(unittest.TestCase):
 
     def test_no_shipped_profile_puts_a_host_loopback_service_in_reach(self):
         for rules in (REPO / "profiles").glob("*/rules.txt"):
-            self.assertNotIn(sg._RECORDER_HOST, rules.read_text(), rules)
+            self.assertNotIn(vf._RECORDER_HOST, rules.read_text(), rules)
 
 
 class RecorderVerdict(unittest.TestCase):
@@ -286,11 +288,11 @@ class RecorderVerdict(unittest.TestCase):
 
     def clean(self):
         return [self.record("replace", [("host", "localhost:9192"),
-                                        ("x-api-key", sg._VERIFY_SENTINEL)]),
+                                        ("x-api-key", vf._VERIFY_SENTINEL)]),
                 self.record("add", [("host", "localhost:9192")])]
 
     def problems(self, records):
-        found, _ = sg._recorder_problems(records, token=self.TOKEN, port=9192)
+        found, _ = vf._recorder_problems(records, token=self.TOKEN, port=9192)
         return found
 
     def assertProblem(self, records, kind, needle):
@@ -304,7 +306,7 @@ class RecorderVerdict(unittest.TestCase):
         self.assertEqual(self.problems(self.clean()), [])
 
     def test_the_summary_says_what_it_proved(self):
-        _, summary = sg._recorder_problems(self.clean(), token=self.TOKEN, port=9192)
+        _, summary = vf._recorder_problems(self.clean(), token=self.TOKEN, port=9192)
         self.assertIn("replaced", summary)
         self.assertIn("never added", summary)
 
@@ -325,7 +327,7 @@ class RecorderVerdict(unittest.TestCase):
 
     def test_a_credential_added_to_a_request_that_carried_none_is_the_headline_failure(self):
         records = self.clean()
-        records[1]["headers"].append(("x-api-key", sg._VERIFY_SENTINEL))
+        records[1]["headers"].append(("x-api-key", vf._VERIFY_SENTINEL))
         self.assertProblem(records, "observed", "ADDED a credential")
 
     def test_a_credential_that_was_not_replaced_is_a_failure_too(self):
@@ -343,7 +345,7 @@ class RecorderVerdict(unittest.TestCase):
 
     def test_two_credentials_arriving_is_not_a_replacement(self):
         records = self.clean()
-        records[0]["headers"].append(("x-api-key", sg._VERIFY_SENTINEL))
+        records[0]["headers"].append(("x-api-key", vf._VERIFY_SENTINEL))
         self.assertProblem(records, "observed", "exactly once")
 
     def test_a_missing_arrival_is_unproven_not_a_leak(self):
@@ -367,11 +369,11 @@ class ArrivalObserverTest(unittest.TestCase):
     the guest can report, since a denied sendto succeeds and no ICMP comes back."""
 
     def setUp(self):
-        _, self.observer = _bind_or_skip(sg._ArrivalObserver)
+        _, self.observer = _bind_or_skip(vf._ArrivalObserver)
         self.addCleanup(self.observer.close)
 
     def verdict(self):
-        return sg._observer_problems(self.observer.arrivals, bound=self.observer.bound(),
+        return vf._observer_problems(self.observer.arrivals, bound=self.observer.bound(),
                                      self_token=self.observer.self_token,
                                      guest_token=self.observer.guest_token,
                                      port=self.observer.port, proxy_port=8090)
@@ -455,7 +457,7 @@ class ArrivalObserverTest(unittest.TestCase):
     def test_one_deaf_family_is_enough_to_refuse(self):
         self.observer.self_test()
         arrivals = [a for a in self.observer.arrivals if a["addr"] != "::1"]
-        problems, _ = sg._observer_problems(arrivals, bound=self.observer.bound(),
+        problems, _ = vf._observer_problems(arrivals, bound=self.observer.bound(),
                                             self_token=self.observer.self_token,
                                             guest_token=self.observer.guest_token,
                                             port=self.observer.port, proxy_port=8090)
@@ -485,7 +487,7 @@ class ArrivalObserverTest(unittest.TestCase):
             self.addCleanup(held.close)
 
         port, _ = _bind_or_skip(hold, pick=low_pick)
-        message = _die_message(sg._ArrivalObserver, port)
+        message = _die_message(vf._ArrivalObserver, port)
         self.assertIn("arrival observer (udp)", message)
 
 
@@ -549,7 +551,7 @@ class GuestProbeScript(unittest.TestCase):
     def setUp(self):
         if not sg.shutil.which("bash"):
             self.skipTest("no bash here; the guest half needs its /dev/tcp built-in")
-        _, self.observer = _bind_or_skip(sg._ArrivalObserver)
+        _, self.observer = _bind_or_skip(vf._ArrivalObserver)
         self.addCleanup(self.observer.close)
         self.proxy = _StubProxy(0, self.ANSWERS)
         self.addCleanup(self.proxy.close)
@@ -559,13 +561,13 @@ class GuestProbeScript(unittest.TestCase):
         # PROXY_ALIAS is the only thing standing between this script and loopback: the guest
         # reaches the host by that name, and here the host is 127.0.0.1.
         with mock.patch.object(sg, "PROXY_ALIAS", "127.0.0.1"):
-            script = sg._oracle_guest_script(proxy_port=self.proxy.port,
+            script = vf._oracle_guest_script(proxy_port=self.proxy.port,
                                              observer_port=self.observer.port,
                                              recorder_port=self.recorder_port,
                                              token=self.observer.guest_token)
         done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 0, done.stderr)
-        return sg._oracle_report(done.stdout.splitlines()), done.stdout
+        return vf._oracle_report(done.stdout.splitlines()), done.stdout
 
     def test_it_reports_every_probe_it_attempted(self):
         report, out = self.run_script()
@@ -619,12 +621,12 @@ class GuestProbeScript(unittest.TestCase):
         self.assertEqual(report["observer-udp"], "sent")   # a denied sendto still "succeeds"
 
     def test_a_port_that_answers_nothing_is_not_read_as_a_pass(self):
-        # Something holds the proxy port and is not a proxy — the collision cli/silkgate records
+        # Something holds the proxy port and is not a proxy — the collision the CLI records
         # as having surfaced in the field. The guest gets no status line, and the host must call
         # that unproven rather than let a missing code stand in for a decision.
         self.proxy.silent = True
         report, out = self.run_script()
-        problems, _ = sg._probe_problems(report, observer_port=self.observer.port)
+        problems, _ = vf._probe_problems(report, observer_port=self.observer.port)
         self.assertEqual({k for k, _ in problems}, {"unproven"}, out)
         self.assertTrue(any("recorder-replace" in text for _, text in problems), out)
         self.assertIn("code=000", report["recorder-replace"])
@@ -644,14 +646,14 @@ class ProbeReport(unittest.TestCase):
         for key, value in list(report.items()):
             if value is None:
                 del report[key]
-        found, _ = sg._probe_problems(report, observer_port=8091)
+        found, _ = vf._probe_problems(report, observer_port=8091)
         return found
 
     def test_the_healthy_report_is_clean(self):
         self.assertEqual(self.problems(), [])
 
     def test_the_report_is_parsed_out_of_the_relayed_lines(self):
-        report = sg._oracle_report(["[PASS] 3. something", "ORACLE observer-udp sent",
+        report = vf._oracle_report(["[PASS] 3. something", "ORACLE observer-udp sent",
                                     "ORACLE recorder-add code=204 rc=0 reply=x"])
         self.assertEqual(report, {"observer-udp": "sent",
                                   "recorder-add": "code=204 rc=0 reply=x"})
@@ -701,16 +703,16 @@ def _rec(decision, host, **extra):
 
 class AuditRecords(unittest.TestCase):
     def test_json_is_read_past_mitmdumps_own_prefix_and_noise(self):
-        records = sg._audit_records(_log(_rec("deny", "evil.com")))
+        records = vf._audit_records(_log(_rec("deny", "evil.com")))
         self.assertEqual([r["host"] for r in records], ["evil.com"])
 
     def test_a_line_that_is_not_a_record_is_skipped_not_fatal(self):
         text = _log(_rec("allow", "a.com")) + "[16:04:03.000] {not json}\n{}\n"
-        self.assertEqual(len(sg._audit_records(text)), 1)
+        self.assertEqual(len(vf._audit_records(text)), 1)
 
     def test_control_lines_count_as_records_but_carry_no_host(self):
         text = _log({"decision": "control", "reason": "listening on /x"})
-        self.assertEqual(sg._audit_records(text)[0]["decision"], "control")
+        self.assertEqual(vf._audit_records(text)[0]["decision"], "control")
 
 
 class AuditOracle(unittest.TestCase):
@@ -720,8 +722,8 @@ class AuditOracle(unittest.TestCase):
         self.path = Path(tempfile.mkdtemp(prefix="silkgate-oracle-log-")) / "proxy-x.log"
 
     def problems(self, text, *, full=True, recorder_port=9192):
-        expect = sg._audit_expectations(full=full, recorder_port=recorder_port)
-        found, summary = sg._audit_problems(text, expect, log_path=self.path)
+        expect = vf._audit_expectations(full=full, recorder_port=recorder_port)
+        found, summary = vf._audit_problems(text, expect, log_path=self.path)
         return found, summary
 
     def healthy(self):
@@ -785,7 +787,7 @@ class AuditOracle(unittest.TestCase):
 
     def test_the_injected_credential_must_never_appear_in_the_trail(self):
         text = self.healthy() + _log(_rec("allow", "localhost", method="POST", port=9192,
-                                          reason=f"x-api-key: {sg._VERIFY_SENTINEL}"),
+                                          reason=f"x-api-key: {vf._VERIFY_SENTINEL}"),
                                      chatter=False)
         found, _ = self.problems(text)
         self.assertEqual([k for k, _ in found], ["observed"])
@@ -794,13 +796,13 @@ class AuditOracle(unittest.TestCase):
     def test_await_returns_as_soon_as_the_expectations_are_met(self):
         self.path.write_text(self.healthy())
         started = time.monotonic()
-        text = sg._await_audit(self.path, sg._audit_expectations(full=True, recorder_port=9192))
+        text = vf._await_audit(self.path, vf._audit_expectations(full=True, recorder_port=9192))
         self.assertIn("evil.com", text)
         self.assertLess(time.monotonic() - started, 1.0)
 
     def test_await_gives_a_late_record_time_to_land(self):
         self.path.write_text(_log(_rec("deny", "silkgate.invalid", method="GET", port=80)))
-        expect = sg._audit_expectations(full=False, recorder_port=None)
+        expect = vf._audit_expectations(full=False, recorder_port=None)
         expect.append({"decision": "allow", "host": "late.example", "why": "a late record"})
 
         def append():
@@ -811,13 +813,13 @@ class AuditOracle(unittest.TestCase):
         thread = threading.Thread(target=append)
         thread.start()
         self.addCleanup(thread.join)
-        text = sg._await_audit(self.path, expect, timeout=5)
+        text = vf._await_audit(self.path, expect, timeout=5)
         self.assertIn("late.example", text)
 
     def test_await_gives_up_and_hands_back_what_it_has(self):
         self.path.write_text(_log(_rec("deny", "silkgate.invalid", method="GET", port=80)))
         started = time.monotonic()
-        text = sg._await_audit(self.path, sg._audit_expectations(full=True), timeout=0.5)
+        text = vf._await_audit(self.path, vf._audit_expectations(full=True), timeout=0.5)
         self.assertIn("silkgate.invalid", text)
         self.assertLess(time.monotonic() - started, 3.0)
 
@@ -826,21 +828,21 @@ class AuditOracle(unittest.TestCase):
 
 class GuestArgv(unittest.TestCase):
     def argv(self, **kwargs):
-        return sg._verify_msb_argv("silkgate-verify-1-main", 8090, **kwargs)
+        return vf._verify_msb_argv("silkgate-verify-1-main", 8090, **kwargs)
 
     def pairs(self, argv):
         return list(zip(argv, argv[1:]))
 
     def test_the_guest_is_named_so_it_can_be_removed(self):
         argv = self.argv()
-        self.assertEqual(argv[1:4], ["create", sg._VERIFY_IMAGE, "--name"])
+        self.assertEqual(argv[1:4], ["create", vf._VERIFY_IMAGE, "--name"])
         self.assertEqual(argv[4], "silkgate-verify-1-main")
 
     def test_the_name_is_one_msb_accepts_and_no_session_can_produce(self):
-        name = sg._verify_guest_name("main")
+        name = vf._verify_guest_name("main")
         self.assertTrue(sg._SANDBOX_RE.fullmatch(name))
         self.assertFalse(name.startswith("sg-"))       # sandbox_name()'s prefix; never ours
-        self.assertTrue(sg._VERIFY_GUEST_RE.fullmatch(name))
+        self.assertTrue(vf._VERIFY_GUEST_RE.fullmatch(name))
         self.assertIn(str(os.getpid()), name)
 
     def test_egress_is_denied_by_default_with_exactly_one_allow_rule(self):
@@ -869,19 +871,19 @@ class GuestArgv(unittest.TestCase):
 
 class NegativeControlArgv(unittest.TestCase):
     def test_the_flip_is_the_one_thing_that_changes(self):
-        argv = sg._verify_msb_argv("silkgate-verify-1-leaky", 8090)
-        leaky = sg._leaky_argv(argv)
+        argv = vf._verify_msb_argv("silkgate-verify-1-leaky", 8090)
+        leaky = vf._leaky_argv(argv)
         self.assertEqual(len(leaky), len(argv))
         differ = [(a, b) for a, b in zip(argv, leaky) if a != b]
         self.assertEqual(differ, [("deny", "allow")])
 
     def test_a_missing_flag_refuses_rather_than_producing_a_contained_control(self):
-        message = _die_message(sg._leaky_argv, ["msb", "create", "debian"])
+        message = _die_message(vf._leaky_argv, ["msb", "create", "debian"])
         self.assertIn("--net-default-egress", message)
         self.assertIn("prove nothing", message)
 
     def test_an_unexpected_default_refuses_too(self):
-        message = _die_message(sg._leaky_argv,
+        message = _die_message(vf._leaky_argv,
                                ["msb", "create", "--net-default-egress", "allow"])
         self.assertIn("refusing to guess", message)
 
@@ -891,13 +893,13 @@ class CheckOutcomes(unittest.TestCase):
         lines = ["[OKAY] 0. bash /dev/tcp works", "[PASS] 3. direct TCP egress blocked",
                  "[FAIL] 1. allowed host via proxy", "[SKIP] 7. route-escape (no ip tool)",
                  "CHECKS: ran=1,3 skipped=7", "RESULT: 1 passed, 1 failed"]
-        self.assertEqual(sg._check_outcomes(lines), {3: "PASS", 1: "FAIL", 7: "SKIP"})
+        self.assertEqual(vf._check_outcomes(lines), {3: "PASS", 1: "FAIL", 7: "SKIP"})
 
     def test_the_last_line_for_a_check_wins(self):
-        self.assertEqual(sg._check_outcomes(["[PASS] 3. x", "[FAIL] 3. y"]), {3: "FAIL"})
+        self.assertEqual(vf._check_outcomes(["[PASS] 3. x", "[FAIL] 3. y"]), {3: "FAIL"})
 
     def test_nothing_is_invented_from_output_that_has_no_check_lines(self):
-        self.assertEqual(sg._check_outcomes(["RESULT: 7 passed, 0 failed"]), {})
+        self.assertEqual(vf._check_outcomes(["RESULT: 7 passed, 0 failed"]), {})
 
 
 class NegativeControlVerdict(unittest.TestCase):
@@ -907,27 +909,27 @@ class NegativeControlVerdict(unittest.TestCase):
 
     def test_a_leaking_guest_whose_check_3_failed_establishes_the_control(self):
         leaky = {**self.CONTAINED, 3: "FAIL"}
-        problem, summary = sg._negative_control_problem(self.CONTAINED, leaky)
+        problem, summary = vf._negative_control_problem(self.CONTAINED, leaky)
         self.assertIsNone(problem)
         self.assertIn("check 3 FAILED in the leaking guest", summary)
 
     def test_the_checks_that_passed_in_both_guests_are_named(self):
         leaky = {**self.CONTAINED, 3: "FAIL", 9: "FAIL", 10: "FAIL"}
-        _, summary = sg._negative_control_problem(self.CONTAINED, leaky)
+        _, summary = vf._negative_control_problem(self.CONTAINED, leaky)
         self.assertIn("checks 1, 2, 11 passed in both guests", summary)
 
     def test_a_check_3_that_passed_in_the_leaky_guest_proves_nothing_and_says_so(self):
-        problem, summary = sg._negative_control_problem(self.CONTAINED, self.CONTAINED)
+        problem, summary = vf._negative_control_problem(self.CONTAINED, self.CONTAINED)
         self.assertIsNone(summary)
         self.assertIn("established no leak", problem)
         self.assertIn("draws no conclusion", problem)
 
     def test_a_leaky_run_that_never_reached_check_3_is_the_same_refusal(self):
-        problem, _ = sg._negative_control_problem(self.CONTAINED, {})
+        problem, _ = vf._negative_control_problem(self.CONTAINED, {})
         self.assertIn("reported no line", problem)
 
     def test_a_skipped_check_3_is_not_a_leak_either(self):
-        problem, _ = sg._negative_control_problem(self.CONTAINED, {3: "SKIP"})
+        problem, _ = vf._negative_control_problem(self.CONTAINED, {3: "SKIP"})
         self.assertIn("reported SKIP", problem)
 
 
@@ -949,7 +951,7 @@ class LeakedGuests(unittest.TestCase):
     def reap(self):
         said = []
         with mock.patch.object(sg, "say", said.append):
-            sg._reap_leaked_verify_guests()
+            vf._reap_leaked_verify_guests()
         return "\n".join(str(m) for m in said), self.log.read_text()
 
     def test_a_leftover_whose_owner_is_gone_is_removed_and_named(self):
@@ -993,7 +995,7 @@ class OracleFraming(unittest.TestCase):
     """A leak the host saw and an oracle that could not be trusted must not read alike."""
 
     def framing(self, problems):
-        return _die_message(sg._oracle_die, problems, Path("/tmp/proxy-x.log"))
+        return _die_message(vf._oracle_die, problems, Path("/tmp/proxy-x.log"))
 
     def test_an_observed_failure_leads_with_the_boundary(self):
         text = self.framing([("observed", "a udp packet REACHED the host")])
@@ -1019,7 +1021,7 @@ class OracleWiring(unittest.TestCase):
 
     def oracles(self):
         """A bundle on a freshly proven proxy port; return (base, oracles)."""
-        base, oracles = _bind_or_skip(sg._VerifyOracles, span=3)
+        base, oracles = _bind_or_skip(vf._VerifyOracles, span=3)
         self.addCleanup(oracles.close)
         return base, oracles
 
@@ -1028,22 +1030,22 @@ class OracleWiring(unittest.TestCase):
         self.assertEqual((oracles.observer.port, oracles.recorder.port), (base + 1, base + 2))
 
     def test_the_offset_folds_below_the_proxy_port_at_the_top_of_the_range(self):
-        self.assertEqual(sg._oracle_port(8090, 1), 8091)
-        self.assertEqual(sg._oracle_port(65535, 2), 65533)
+        self.assertEqual(vf._oracle_port(8090, 1), 8091)
+        self.assertEqual(vf._oracle_port(65535, 2), 65533)
 
     def test_the_recorder_rule_is_added_to_the_ruleset_and_the_secret_to_the_environment(self):
         base, oracles = self.oracles()
         self.assertIn(f"localhost:{base + 2}/verify/record/** POST", oracles.rules())
-        self.assertEqual(os.environ[f"SILKGATE_EGRESS_SECRET_{sg._VERIFY_SECRET_NAME.upper()}"],
-                         f"x-api-key: {sg._VERIFY_SENTINEL}")
-        self.assertIn(sg._VERIFY_SENTINEL, "SENTINEL-NOT-A-REAL-KEY")   # never a real key
+        self.assertEqual(os.environ[f"SILKGATE_EGRESS_SECRET_{vf._VERIFY_SECRET_NAME.upper()}"],
+                         f"x-api-key: {vf._VERIFY_SENTINEL}")
+        self.assertIn(vf._VERIFY_SENTINEL, "SENTINEL-NOT-A-REAL-KEY")   # never a real key
 
     def test_close_frees_every_port_it_took(self):
         # A neighbor can take a just-released port before the probe reaches it — the
         # kernel reoffers fresh releases first — so one held port proves nothing. A close
         # that leaks holds its port on every base tried; a neighbor holds at most one.
         for _ in range(5):
-            base, oracles = _bind_or_skip(sg._VerifyOracles, span=3)
+            base, oracles = _bind_or_skip(vf._VerifyOracles, span=3)
             oracles.close()
             oracles.close()                            # idempotent: the finally calls it again
             if all(_port_free(base + n) for n in (1, 2)):
@@ -1051,7 +1053,7 @@ class OracleWiring(unittest.TestCase):
         self.fail(f"a port beside {base} still held after close, on 5 bases")
 
     def test_expectations_cover_the_recorders_own_decisions(self):
-        expect = sg._audit_expectations(full=False, recorder_port=9192)
+        expect = vf._audit_expectations(full=False, recorder_port=9192)
         self.assertEqual([(e["decision"], e.get("method")) for e in expect],
                          [("allow", "POST"), ("deny", "GET")])
 
@@ -1069,7 +1071,7 @@ class VerifyPortSelection(unittest.TestCase):
     def needed(self, base):
         """Every port a verify run at `base` binds: the proxy's, the observer's, the
         recorder's."""
-        return [base, sg._oracle_port(base, 1), sg._oracle_port(base, 2)]
+        return [base, vf._oracle_port(base, 1), vf._oracle_port(base, 2)]
 
     def test_the_default_scans_past_an_occupied_floor_to_a_base_with_every_port_free(self):
         # The squat is what a shared proxy on the default floor looks like. A neighbor
@@ -1078,7 +1080,7 @@ class VerifyPortSelection(unittest.TestCase):
         for _ in range(5):
             base, _ = _bind_or_skip(lambda port: _squat(self, port), span=sg.POOL_SIZE + 1)
             with mock.patch.object(sg, "DEFAULT_BASE_PORT", base):
-                chosen = sg._verify_port(None)
+                chosen = vf._verify_port(None)
             if chosen == base + 1 and all(sg._port_free(p) for p in self.needed(chosen)):
                 return
         self.fail(f"the scan landed at {chosen}, not one past the blocker at {base}, "
@@ -1086,7 +1088,7 @@ class VerifyPortSelection(unittest.TestCase):
 
     def test_an_explicit_port_is_honored_verbatim_even_when_taken(self):
         port, _ = _bind_or_skip(lambda p: _squat(self, p))
-        self.assertEqual(sg._verify_port(port), port,
+        self.assertEqual(vf._verify_port(port), port,
                          "an explicit --port moved instead of being handed to start_proxy's "
                          "die-if-taken guard")
 
@@ -1220,10 +1222,10 @@ while True:
 # claims to have run comes from the CLI's own tool-free constant, so this fixture follows the
 # check-set contract instead of pinning a second copy of it.
 def _stub_checks_script():
-    ran = sorted(sg._VERIFY_TOOL_FREE)
-    leaky = sg._NEGATIVE_CONTROL_CHECK
+    ran = sorted(vf._VERIFY_TOOL_FREE)
+    leaky = vf._NEGATIVE_CONTROL_CHECK
     passes = "\n".join(f'echo "[PASS] {i}. tool-free check {i}"' for i in ran if i != leaky)
-    skipped = sorted(sg._VERIFY_CHECKS - set(ran))
+    skipped = sorted(vf._VERIFY_CHECKS - set(ran))
     return f"""#!/usr/bin/env bash
 echo "PROXY=$HTTPS_PROXY"
 # control 0, which every real run makes: a request through the proxy for a host no ruleset
@@ -1243,7 +1245,7 @@ else
   fail=0
 fi
 {passes}
-echo "CHECKS: ran={sg._ids(ran).replace(", ", ",")} skipped={sg._ids(skipped).replace(", ", ",")}"
+echo "CHECKS: ran={vf._ids(ran).replace(", ", ",")} skipped={vf._ids(skipped).replace(", ", ",")}"
 echo "RESULT: $(({len(ran)} - fail)) passed, $fail failed"
 exit $fail
 """
@@ -1305,7 +1307,7 @@ class VerifyWiring(unittest.TestCase):
             said = []
             with mock.patch.object(sg, "say", said.append):
                 try:
-                    sg.cmd_verify(_Args(**{"port": self.port, **kwargs}))
+                    vf.cmd_verify(_Args(**{"port": self.port, **kwargs}))
                 except SystemExit:
                     text = "\n".join(str(m) for m in said)
                     if pinned or not _collided(text):
@@ -1324,12 +1326,12 @@ class VerifyWiring(unittest.TestCase):
         like from the host's side of the wire: the connect is refused and the datagram goes
         nowhere.
         """
-        real = sg._oracle_guest_script
+        real = vf._oracle_guest_script
 
         def aimed(**kwargs):
             return real(**{**kwargs, "observer_port": port})
 
-        patch = mock.patch.object(sg, "_oracle_guest_script", aimed)
+        patch = mock.patch.object(vf, "_oracle_guest_script", aimed)
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -1363,7 +1365,7 @@ class VerifyWiring(unittest.TestCase):
         self.aim_probes_at(self.dead_port())
         self.verify()
         log = self.log.read_text()
-        name = sg._verify_guest_name("main")
+        name = vf._verify_guest_name("main")
         self.assertIn(f"create debian --name {name}", log)
         self.assertIn(f"stop {name}", log)
         self.assertIn(f"rm {name}", log)
@@ -1398,7 +1400,7 @@ class VerifyWiring(unittest.TestCase):
     def test_the_guest_is_removed_even_when_the_run_is_refused(self):
         _, refused = self.verify()               # the leak path
         self.assertTrue(refused)
-        self.assertIn(f"rm {sg._verify_guest_name('main')}", self.log.read_text())
+        self.assertIn(f"rm {vf._verify_guest_name('main')}", self.log.read_text())
 
     def test_no_oracles_runs_the_checks_alone_and_says_so(self):
         said, refused = self.verify(oracles=False)
@@ -1407,14 +1409,14 @@ class VerifyWiring(unittest.TestCase):
         self.assertNotIn("recorder", said)
         # and the ruleset the proxy was given holds no host-loopback rule at all
         snapshot, = sg.LOG_DIR.glob("*.rules")
-        self.assertNotIn(sg._RECORDER_HOST, snapshot.read_text())
+        self.assertNotIn(vf._RECORDER_HOST, snapshot.read_text())
 
     def test_the_negative_control_boots_a_second_guest_and_requires_check_3_to_fail(self):
         self.aim_probes_at(self.dead_port())
         said, refused = self.verify(negative_control=True)
         self.assertFalse(refused, said)
         log = self.log.read_text()
-        leaky = sg._verify_guest_name("leaky")
+        leaky = vf._verify_guest_name("leaky")
         self.assertIn(f"--name {leaky}", log)
         self.assertIn("--net-default-egress allow", log)
         self.assertIn("check 3 FAILED in the leaking guest", said)
@@ -1474,7 +1476,7 @@ class VerifyWiring(unittest.TestCase):
 
 def _port_free(port):
     # Every bind the oracles make must be probed, or a pick passes here and dies there:
-    # sg._ArrivalObserver binds tcp and udp on both loopback addresses.
+    # vf._ArrivalObserver binds tcp and udp on both loopback addresses.
     for family, addr, kind in ((socket.AF_INET, "127.0.0.1", socket.SOCK_STREAM),
                                (socket.AF_INET6, "::1", socket.SOCK_STREAM),
                                (socket.AF_INET, "127.0.0.1", socket.SOCK_DGRAM),
