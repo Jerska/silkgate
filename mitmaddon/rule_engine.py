@@ -191,14 +191,10 @@ def _parse_ports(spec):
 # Default header policy: name -> constraint. ("any",) | ("exact", v) | ("re", compiled)
 # fullmatch semantics for "re". Values are capped to shrink the residual channel.
 _BASELINE_SPECS = {
-    # Minimal structural baseline only. `host` is the (already-allowlisted) destination, not a
-    # channel; content-type/length are needed for request bodies, and transfer-encoding is the
-    # other legal body framing — stripping it narrows nothing and un-frames the body: the proxy
-    # buffers the request either way, but a chunked upload whose header was dropped goes
-    # upstream with no framing at all (a `git push` over http.postBuffer dies exactly there).
-    # Only the one value bodies actually use is baseline; anything else stays deniable. accept,
-    # accept-encoding, accept-language, user-agent, range are NOT baseline — opt in per rule
-    # via `h:`.
+    # The minimal structural baseline. `host` is the already-allowed destination.
+    # content-type and content-length frame bodies, and so does transfer-encoding: dropping
+    # it would send a chunked upload (a `git push`) with no framing. Only `chunked` is
+    # allowed. accept, user-agent, range, and the rest are opt-in per rule, via `h:`.
     "host":              ("re", r"[A-Za-z0-9.:-]{1,253}"),
     "content-type":      ("re", r"[A-Za-z0-9.+/=; -]{1,64}"),
     "content-length":    ("re", r"\d{1,10}"),
@@ -341,13 +337,10 @@ _SECRET_BAD = [
     42,                                   # wrong type
 ]
 
-# A wildcard-only host warns rather than erroring: it is a deliberate opt-out an
-# operator may want, but one they must see. stderr reaches both the CLI operator at
-# compose time and mitmdump's log. q:*/h:* on a *named* host stay silent — they widen
-# an already-chosen destination (an accepted Tier-3 residual, and the claude profile
-# carries them on every session; warning there would train operators to ignore this
-# channel). Warned once per rule text per process: the CLI parses the same ruleset
-# more than once per command.
+# A wildcard-only host warns, not errors: an operator may want it, but must see it. q:* and
+# h:* on a named host stay silent, since they widen a chosen destination, and the claude
+# profile uses them on every session: warning there would train operators to ignore this.
+# One warning per rule text per process, since the CLI parses a ruleset several times.
 _WARNED_WILDCARD = set()
 
 

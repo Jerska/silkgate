@@ -74,10 +74,9 @@ EVENTS = _EventsFile(os.environ.get("SILKGATE_EGRESS_EVENTS_FILE"))
 class _CaptureFile:
     """Append-mode sink for LLM capture records — the deliberate contrast with _EventsFile.
 
-    A failed EVENTS write propagates and fails the flow closed, because the audit trail is
-    enforcement's own record. Capture is observability layered on top of flows the audit
-    already covers, so losing it must never cost traffic: the first failure disables the
-    sink for good and logs one control line, and `write` never raises.
+    A failed EVENTS write fails the flow closed: the audit trail is enforcement's record.
+    Capture is only observability, so losing it must never cost traffic. The first failure
+    disables the sink and logs one control line, and `write` never raises.
     """
 
     def __init__(self, path):
@@ -109,14 +108,10 @@ CAPTURE = _CaptureFile(os.environ.get("SILKGATE_EGRESS_CAPTURE_FILE"))
 def configure(updates):
     """Refuse the one mitmproxy option that would route requests around this addon.
 
-    If stream_large_bodies is ever set, mitmproxy sends any over-threshold request's headers
-    upstream *before* the request hook fires — the host match, the credential injection, the
-    header hygiene and max_body are all skipped and the request is already on the wire.
-    Nothing sets it; raising here turns that from a convention into a control: OptionsError
-    refuses startup outright, and rolls back a runtime change. body_size_limit is the
-    opposite knob — it aborts an oversized body before it is buffered — but the same number
-    caps responses too, and package downloads are legitimately huge, so requiring it would
-    deny the proxy's main use; it stays the operator's call.
+    With stream_large_bodies set, mitmproxy sends a large request upstream before the
+    request hook runs, skipping every check. OptionsError refuses that at startup, and
+    rolls it back at runtime. body_size_limit isn't required: it caps responses too, and
+    package downloads are legitimately huge.
     """
     if "stream_large_bodies" in updates and ctx.options.stream_large_bodies:
         raise exceptions.OptionsError(
@@ -134,14 +129,11 @@ _SECRET_NAME = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,63}")
 class SecretStore:
     """Named secrets ("<Header>: <value>") for inject_auth, scoped by session.
 
-    A scope is a session name, or None for the standalone single-ruleset proxy. A session's
-    secrets arrive over the control socket, already naming their scope, from the `up` that
-    provisioned it — so a session spends only the credentials its own creator could show.
-    SILKGATE_EGRESS_SECRET_* env vars are read for the None scope only: the process environment is
-    one bag shared by every session, and honouring it per session would be exactly the
-    cross-session grant this scoping exists to remove. Values never leave this object: they
-    are not logged, not returned by list, not echoed by any control op — only spent by
-    injection.
+    A scope is a session name, or None for the standalone proxy. A session's secrets come
+    over the control socket from the `up` that made it, so it spends only what its creator
+    could show. SILKGATE_EGRESS_SECRET_* env vars serve the None scope only: the process
+    environment is shared, so reading it per session would grant across sessions. Values
+    are never logged, listed, or echoed, only spent.
     """
 
     def __init__(self):
@@ -204,16 +196,11 @@ class FixedRegistry:
 class SessionRegistry:
     """Resolve a listener port to (session name, RuleSet) from SILKGATE_EGRESS_SESSIONS_DIR.
 
-    Layout: <dir>/<name>/meta.json (carries "port") and <dir>/<name>/rules.txt (the composed
-    ruleset snapshot). Both layers are re-read from disk on every resolve: sessions appear by
-    rename out of a staging directory, so their files keep whatever mtimes staging gave them,
-    and a name-and-port recycle can land inside one filesystem timestamp tick — no timestamp
-    can tell a session from the one it replaced, so none is consulted. A scan is a listdir
-    plus a small JSON read per session (tens of µs, against a proxied request's milliseconds);
-    only the rule parse is worth avoiding (~0.2ms for a composed profile, pure Python under
-    the GIL of the one proxy every session shares), and its cache is keyed on the rule text
-    itself: byte-identical text is byte-identical policy, so the key cannot serve one
-    session's rules to another. Any ambiguity fails closed (raises).
+    Layout: <dir>/<name>/meta.json (with "port") and <dir>/<name>/rules.txt. Both are
+    re-read on every resolve: a name and port can be recycled within one mtime tick, so no
+    timestamp can tell a session from its predecessor. A scan costs tens of µs. Only the
+    rule parse (~0.2 ms) is cached, keyed on the rule text itself, so it can't serve one
+    session's rules to another. Any ambiguity fails closed.
     """
 
     def __init__(self, sessions_dir):
@@ -223,13 +210,9 @@ class SessionRegistry:
     def _scan(self):
         """(port -> name, live names), read fresh; empty when the dir is unreadable.
 
-        A successful scan is also the moment per-session state is dropped: a session it no
-        longer shows is down for good, and the pool recycles both its name and its port — so
-        its secrets and cached rules go with it, or the next session called the same thing
-        starts life holding the dead one's credentials. A failed scan proves nothing about
-        which sessions are live and prunes nothing: denying every port until the directory
-        is readable again is recoverable, an emptied secret store is not — secrets arrive
-        once, at provision.
+        A successful scan drops the state of sessions it no longer shows, secrets included,
+        or a recycled name would inherit a dead session's credentials. A failed scan prunes
+        nothing: denying every port is recoverable, an emptied secret store isn't.
         """
         try:
             names = os.listdir(self._dir)
@@ -356,11 +339,9 @@ def _control_log(reason):
 
 
 async def _control_server(path):
-    # A unix socket is created with the umask's permissions, so chmod-after-bind leaves a
-    # window in which anyone on the host could connect and push a secret. Bind inside a
-    # private directory instead (mkdtemp is 0700 from creation, in the same filesystem) and
-    # rename the finished socket into place: the advertised path never exists world-writable,
-    # and the socket keeps serving under its new name because the bound inode is unchanged.
+    # chmod after bind leaves a window where anyone could connect and push a secret. So bind
+    # in a private mkdtemp dir (0700, same filesystem) and rename the socket into place: the
+    # advertised path is never world-writable, and the bound inode keeps serving.
     staging = tempfile.mkdtemp(prefix=".control-", dir=os.path.dirname(path) or ".")
     bound = os.path.join(staging, "sock")
     try:
@@ -448,16 +429,12 @@ def _clip(text, limit=128):
 def _blocked(code, text):
     """The response a blocked request gets.
 
-    The body is ASCII-armoured: guest-supplied text arrives decoded with surrogateescape, and
-    encoding one raw would raise here — inside the deny path, which mitmproxy answers by
-    logging the exception and forwarding the request unfiltered.
+    The body is ASCII-armored: guest text arrives with surrogateescape, and raw encoding
+    would raise inside the deny path, which mitmproxy answers by forwarding the request.
 
-    The X-Silkgate header marks the refusal as ours, so a cooperating guest can tell a policy
-    denial from a destination's own error — a refused CONNECT shows the guest headers but no
-    body, so the body cannot carry the mark. Every refusal this addon issues comes through
-    here, the fail-closed 500s included. The value is a constant so this stays throw-free,
-    and the mark is a diagnostic, not a boundary: a destination could imitate it, and nothing
-    may treat its presence as proof.
+    The X-Silkgate header marks every refusal as ours, the fail-closed 500s included, so a
+    guest can tell a deny from the destination's error. It's a header because a refused
+    CONNECT shows no body. It's a diagnostic, not proof: a destination could imitate it.
     """
     return http.Response.make(code, (text + "\n").encode("ascii", "backslashreplace"),
                               {"Content-Type": "text/plain", "X-Silkgate": "deny"})
@@ -481,25 +458,18 @@ def _listen_port(flow):
 def _audit(decision, flow, reason="", session=None, **extra):
     """One JSON object per line.
 
-    `host` and `port` are the destination mitmproxy dials, never the client's claim about it;
-    a claim that contradicted the destination is recorded as `claimed`, since a guest naming
-    one host and connecting to another is the interesting signal. `session` is what
-    `silkgate logs --audit` filters on. json.dumps escapes what it cannot represent, so a
-    hostile path or header cannot break the line.
+    `host` and `port` are where mitmproxy dials, never the client's claim. A contradicting
+    claim is recorded as `claimed`. json.dumps escapes anything, so a hostile path can't
+    break the line.
 
-    A request tells its story in at most two lines, joined by `id` (mitmproxy's flow id):
-    the decision when it is made, and — for an allow — a "response" record once the flow
-    concludes, carrying what actually moved. `status` on a deny is the code this addon
-    answered, and the deny line is the whole story: nothing went upstream, so there is no
-    second line. `status` on a "response" record is the destination's answer, or null if it
-    never gave one.
+    A request has at most two lines, joined by `id`: the decision, and for an allow, a
+    "response" record with what moved. A deny's `status` is ours, and it's the whole story.
+    A response's `status` is the destination's, or null.
 
-    What enforcement did on the way through rides the allow line as names, never values:
-    `injected` or `inject_skipped` (the secret's name — exclusive, by whether the guest sent
-    the header) and `stripped_query` / `stripped_headers` (sorted names that lost at least
-    one (name, value) pair). `path` is post-strip — the record describes what went upstream —
-    so a name in `stripped_query` can still appear in `path` with an allowed value:
-    q:beta=true keeps beta=true while dropping beta=false.
+    The allow line names what enforcement did, never values: `injected` or `inject_skipped`
+    (exclusive), and `stripped_query`/`stripped_headers`. `path` is what went upstream, so a
+    stripped name can still appear in it with an allowed value (q:beta=true keeps
+    beta=true, drops beta=false).
     """
     line = json.dumps({
         "ts": _ts(),
@@ -559,10 +529,9 @@ def _authority_rule(ruleset, host, port):
 
 
 # --- capture: decode LLM responses into records --------------------------------
-# Capture is observability, not enforcement: the decoder reads a copy of each chunk,
-# its records go to CAPTURE, and the wire is never modified. Every failure on this
-# path is contained fail-open — the flow, its byte counts and its audit pair are
-# worth more than the transcript.
+# Capture is observability, not enforcement: the decoder reads a copy of each chunk, and
+# the wire is never touched. Every failure here fails open: the flow and its audit records
+# are worth more than the transcript.
 
 # Each bound protects the one proxy every session shares from a degenerate or
 # hostile stream, and each names its failure mode:
@@ -595,11 +564,9 @@ _CAPTURE_JSON_MAX = 2 * 1024 * 1024  # buffered stream=false body; over = the de
                                      # so it is the one place a cap guards memory
                                      # directly
 
-# High-confidence PREFIXED token shapes only, from the gitleaks default set: every
-# pattern is anchored to a literal vendor prefix. Deliberately no entropy or generic
-# hex/base64 rules — coding transcripts are full of SHAs, digests and randomish ids,
-# and a sighting channel that cries wolf gets filtered instead of read. The host
-# cross-checks this list against gitleaks upstream.
+# Only token shapes anchored to a vendor prefix, from gitleaks' defaults. No entropy or
+# generic hex rules: transcripts are full of SHAs, and a channel that cries wolf gets
+# ignored. doc/REFRESH.md tracks the diff against gitleaks.
 _SECRET_PATTERNS = [(name, re.compile(pattern)) for name, pattern in (
     ("anthropic-api-key",       r"\bsk-ant-[A-Za-z0-9_-]{16,}"),
     ("openai-api-key",          r"\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}"),
@@ -625,22 +592,17 @@ _SECRET_PATTERNS = [(name, re.compile(pattern)) for name, pattern in (
                                 r"[A-Za-z0-9_-]{8,}"),
 )]
 
-# The guest environment deliberately holds dummy credentials the proxy swaps at the
-# boundary (guest_credential in profiles/claude/profile.conf), and agents echo their
-# env — so a dummy would light up the anthropic pattern on every transcript. Exact
-# matched-text only, never a prefix: a real key that merely starts like a dummy must
-# still be sighted.
+# Guests hold dummy credentials (guest_credential in profiles/claude/profile.conf), and
+# agents echo their env, so a dummy would flag every transcript. Exact matches only, never
+# a prefix: a real key that starts like a dummy must still be sighted.
 _SECRET_ALLOWLIST = frozenset({"sk-ant-DUMMY-replaced-by-egress-proxy",
                                "sk-ant-oat01-DUMMY-replaced-by-egress-proxy"})
 
-# Every shape above needs one of these literals somewhere in its match, so _redact
-# skips a pattern's pass after one C-speed substring test — the passes run on the
-# event loop every session shares, and twenty regex scans of a full block cost ~50 ms
-# where twenty str finds cost well under one. (Folding the shapes into one alternation
-# measures SLOWER than the passes: the alternation forfeits each pattern's literal-
-# prefix fast path.) Absence of a literal proves absence of a match; presence just
-# runs the pass that would have run anyway, so redaction semantics cannot change.
-# A pattern with no entry here runs unconditionally — the default is correctness.
+# Each shape's match contains one of these literals, so _redact skips a pattern after one
+# substring test. Twenty regex passes over a block cost ~50 ms on the shared event loop,
+# twenty str finds under 1 ms. One big alternation is slower: it loses each pattern's
+# prefix fast path. A missing literal proves no match, so redaction can't change. A pattern
+# with no entry here always runs.
 _SECRET_TRIGGERS = {
     "anthropic-api-key":       ("sk-ant-",),
     "openai-api-key":          ("T3BlbkFJ",),
@@ -690,13 +652,10 @@ class _AnthropicCapture:
     """Anthropic Messages response -> capture records. Pure: bytes in through feed(),
     dicts out, no mitmproxy and no I/O, so the whole grammar is unit-testable directly.
 
-    feed(chunk) returns the records the chunk completed; b"" is mitmproxy's
-    end-of-message marker. flush() is the abort path, for a flow that died before the
-    marker: it closes open blocks and marks the turn incomplete. summary() is what the
-    audit response record can be enriched with, whenever it is asked. Any parse
-    surprise raises out of feed — containment is the tap's job, not this class's,
-    because the tap is the only layer that knows what a dead decoder must not take
-    down with it.
+    feed(chunk) returns the records the chunk completed. b"" is mitmproxy's end marker.
+    flush() closes open blocks for a flow that died early, and marks the turn incomplete.
+    summary() feeds the audit response record. A parse surprise raises out of feed:
+    containing it is the tap's job.
     """
 
     def __init__(self, mode):
@@ -1000,17 +959,12 @@ def _capture_write(flow, state, rec):
 
 
 def responseheaders(flow: http.HTTPFlow) -> None:
-    # Forward response bytes as they arrive. mitmproxy's default buffers the whole body
-    # before sending anything, which starves streaming consumers: an SSE completion that
-    # generates longer than the client's ~60s timeout can never be delivered, and the
-    # client retries into the same wall. Enforcement is request-side only, so nothing
-    # here needs the assembled response body — and failing to stream only costs latency,
-    # which is why this is the one hook that swallows its error instead of blocking.
+    # Forward response bytes as they arrive. Buffering would stall an SSE completion past
+    # the client's ~60 s timeout, forever. Enforcement is request-side only, and a failure
+    # to stream costs only latency, so this is the one hook that swallows its error.
     #
-    # For a flow request() allowed, streaming, counting and capture are one act:
-    # mitmproxy hands the tap each chunk (and b"" at end of message) and forwards
-    # whatever it returns, so nothing here costs buffering. Flows without the marker —
-    # this addon's own deny responses, mostly — just stream.
+    # For an allowed flow, the tap streams, counts, and captures each chunk in one pass.
+    # Flows without the marker, mostly our own denies, just stream.
     try:
         state = flow.metadata.get("egress")
         if state is None:
@@ -1030,11 +984,9 @@ def responseheaders(flow: http.HTTPFlow) -> None:
                     for rec in decoder.feed(chunk):
                         _capture_write(_flow, _state, rec)
                 except Exception as e:
-                    # The decoder is dead; the flow is not. Pop it so later chunks
-                    # skip it, say why once, and keep counting. What it already
-                    # parsed — open blocks, the model, the token counts — is
-                    # flushed rather than discarded with it: the turns that die
-                    # here are the long ones, the last a dashboard can spare.
+                    # The decoder is dead, the flow isn't. Pop it, say why once, and
+                    # flush what it parsed (blocks, model, tokens): the turns that die
+                    # here are the long ones a cost view needs most.
                     _flow.metadata.pop("capture", None)
                     _capture_write(_flow, _state, {"kind": "capture_error", "reason":
                                                    f"decoder died: {e.__class__.__name__}"})
@@ -1087,15 +1039,12 @@ def responseheaders(flow: http.HTTPFlow) -> None:
 
 
 def _conclude(flow, reason=""):
-    """The "response" record for a flow request() allowed: what actually moved, and how the
-    flow ended. Pops the marker, so whichever of response()/error() runs emits exactly one
-    record — and a flow this addon denied, which mitmproxy also routes through response(),
-    has no marker and already told its whole story on the deny line.
+    """The "response" record for an allowed flow: what moved, and how it ended.
 
-    Capture teardown happens here too, each step wrapped on its own: a decoder still
-    attached means the stream never reached its own end, so its open blocks are flushed
-    as an incomplete turn, and whatever it learned (model, tokens, stop_reason) enriches
-    this record — but none of that may cost the record itself."""
+    Popping the marker means response() or error() emits exactly one record. A denied flow
+    has no marker: its deny line said everything. A decoder still attached never saw the
+    end, so it's flushed as an incomplete turn, and its model and tokens enrich this
+    record. Each capture step is wrapped, so none can cost the record itself."""
     state = flow.metadata.pop("egress", None)
     if state is None:
         return
@@ -1164,20 +1113,14 @@ def error(flow: http.HTTPFlow) -> None:
 def http_connect(flow: http.HTTPFlow) -> None:
     """CONNECT: decide the tunnel's authority before the tunnel exists.
 
-    mitmproxy dispatches CONNECT here and nowhere else — `request` never sees one — so without
-    this hook every HTTPS authority is tunnelled unevaluated and unlogged. A non-2xx response
-    set here is how the tunnel is refused: mitmproxy answers it, skips the upstream connection
-    and never switches to passthrough.
+    `request` never sees a CONNECT, so without this hook every HTTPS tunnel would open
+    unchecked and unlogged. Setting a non-2xx response here refuses the tunnel.
 
-    A CONNECT carries an authority and nothing else. Two of a rule's four dimensions do not
-    exist yet, so this matches host and port only and leaves path and method to the requests
-    decrypted out of the tunnel, which reach `request` with all four. Guessing the missing two
-    fails in both directions: a path of "/" would deny the CONNECT under a rule like
-    `api.anthropic.com/v1/messages POST` and break every HTTPS request to it, while treating
-    the authority as if the rules were path-agnostic would grant tunnels no request-level
-    match would allow. Bytes the tunnel then carries are only re-examined because mitmproxy
-    parses them; a raw passthrough would escape this hook's decision, which is what
-    `--set rawtcp=false` is for.
+    A CONNECT has only an authority, so this matches host and port, and leaves path and
+    method to the requests decrypted from the tunnel. Guessing a path would fail both ways:
+    "/" would deny `api.anthropic.com/v1/messages POST`, and ignoring paths would grant
+    tunnels no request could use. `--set rawtcp=false` stops a raw passthrough from
+    escaping this decision.
     """
     session = None
     try:
@@ -1231,26 +1174,20 @@ def request(flow: http.HTTPFlow) -> None:
             _deny(flow, str(e), session=session)
             return
 
-        # 2. The destination, normalized (null-byte / homograph / IP guard) the same way the
-        #    engine normalizes patterns. req.host and req.port are what mitmproxy will dial:
-        #    the URL for an absolute-form request line, otherwise the authority it resolved
-        #    the connection from. req.pretty_host must not be used here — it prefers the
-        #    client's Host: header, so policy would be decided about one host and the
-        #    connection made to another. Rejecting here is also what makes the engine's
-        #    IP-literal guard bite: an IP destination can match no pattern anyway.
+        # 2. The destination, normalized like the engine's patterns. req.host and
+        #    req.port are what mitmproxy dials. Never use req.pretty_host: it prefers the
+        #    client's Host header, so policy would judge one host and connect to another.
+        #    An IP destination is rejected here, since no pattern can match one.
         host = normalize_host(req.host)
         if host is None:
             _deny(flow, f"invalid host: {_clip(req.host)}", session=session)
             return
 
-        # 3. The claimed authority must agree with the destination — domain fronting, and the
-        #    guest naming an allowlisted host while dialling its own. This subsumes the SNI
-        #    check, which is only enforceable when the guest speaks TLS to the proxy: a
-        #    plaintext absolute-form request has no SNI to compare, and that is the normal
-        #    case. Hostnames only: a Host: header legitimately carries or omits the port
-        #    ("h" and "h:443" name one destination), and the port that decides policy is
-        #    req.port in step 5, the one actually dialled. No Host: header at all is not a
-        #    disagreement — the request line named the destination unambiguously.
+        # 3. The claimed authority must match the destination: this stops domain fronting,
+        #    and a guest naming an allowed host while dialing its own. It covers SNI too,
+        #    which plaintext requests lack. Hostnames only: "h" and "h:443" are one
+        #    destination, and step 5 decides on the dialed port. No Host header is no
+        #    disagreement.
         claimed = req.host_header
         if claimed and normalize_host(claimed) != host:
             _deny(flow, f"Host/destination mismatch: {_clip(claimed)} != {host}",
@@ -1296,11 +1233,8 @@ def request(flow: http.HTTPFlow) -> None:
                   session=session)
             return
 
-        # 8. The exec marker: the CLI stamps X-Silkgate-Exec on requests it issues on a
-        #    run's behalf, so capture and audit records can be joined to that run.
-        #    Popped here, unconditionally — h:* rules skip the hygiene in step 10, and
-        #    an internal id must never reach the destination. Clipped like any other
-        #    guest-supplied text; a request without the header simply records no exec.
+        # 8. The exec marker, X-Silkgate-Exec, joins records to an exec. Always popped
+        #    here, since h:* rules skip step 10's hygiene, and clipped like any guest text.
         exec_id = req.headers.pop("x-silkgate-exec", None)
         if exec_id is not None:
             exec_id = _clip(exec_id)
@@ -1343,12 +1277,9 @@ def request(flow: http.HTTPFlow) -> None:
                     removed.append(name.lower())
             stripped_headers = sorted(removed)
 
-        # 11. Capture-marked flows must come back identity-encoded: streamed chunks
-        #     arrive still content-encoded, and the tap deliberately grows no
-        #     decompressor (a zip-bomb lever), so a gzip response would bail capture
-        #     to metadata-only. Rewriting the request's Accept-Encoding is the
-        #     no-decoder fix; responseheaders still degrades fail-open if the
-        #     destination encodes anyway.
+        # 11. Capture needs an uncompressed response: the tap has no decompressor, which
+        #     would be a zip-bomb lever. So capture flows ask for identity encoding. If the
+        #     destination compresses anyway, capture falls back to metadata.
         if rule.capture:
             req.headers["accept-encoding"] = "identity"
 
