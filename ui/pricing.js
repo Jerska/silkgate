@@ -1,4 +1,4 @@
-// pricing.js — a longest-prefix table of Claude model prices and context
+// pricing.js — a table of Claude model prices and context
 // windows, with no DOM or network. THE FIGURES ARE HAND-KEPT ESTIMATES (USD per
 // MTok, cache writes at the 5-minute TTL, last reconciled 2026-11-23), so the UI
 // prefixes costs with "~". An unknown model answers null: tokens show without
@@ -35,26 +35,25 @@ const PRICES = {
   "claude-3-haiku":           [0.25,      1.25, 0.03,       0.3,         200_000],
 };
 
-// The longest prefix that matches wins, so "claude-opus-4-5-20251101" finds
-// claude-opus-4-5, never the shorter claude-opus-4 row. A prefix only matches
-// at a segment boundary: the next character must be "-" or the end — without
-// that, "claude-sonnet-4-60" would take the claude-sonnet-4-6 row.
+// A model id matches its own row, or a row plus a dated-snapshot suffix:
+// "claude-opus-4-5-20251101" finds claude-opus-4-5. Nothing else matches, so a
+// new release answers null until it has a row, instead of borrowing a sibling's
+// price. Rows are own properties only: "constructor" is not a model.
+const SNAPSHOT = /-\d{8}$/;
+
+function row(id) {
+  return Object.hasOwn(PRICES, id) ? PRICES[id] : null;
+}
+
 export function priceFor(model) {
   if (typeof model !== "string" || !model) {
     return null;
   }
-  let best = null;
-  for (const prefix of Object.keys(PRICES)) {
-    if (model.startsWith(prefix)
-        && (model.length === prefix.length || model[prefix.length] === "-")
-        && (best === null || prefix.length > best.length)) {
-      best = prefix;
-    }
-  }
-  if (best === null) {
+  const found = row(model) ?? (SNAPSHOT.test(model) ? row(model.slice(0, -9)) : null);
+  if (!found) {
     return null;
   }
-  const [input, output, cacheRead, cacheWrite, window] = PRICES[best];
+  const [input, output, cacheRead, cacheWrite, window] = found;
   return { input, output, cacheRead, cacheWrite, window };
 }
 

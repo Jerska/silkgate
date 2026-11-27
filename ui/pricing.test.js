@@ -5,23 +5,22 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { priceFor, estimateCost, contextWindow } from "./pricing.js";
 
-test("the longest matching prefix wins", () => {
-  const dated = priceFor("claude-opus-4-5-20251101");
-  const bare = priceFor("claude-opus-4-20250514");
-  assert.notEqual(dated.input, bare.input,
-                  "opus-4-5 must not fall into the shorter claude-opus-4 row");
-  assert.equal(dated.input, priceFor("claude-opus-4-5").input);
+test("a dated snapshot finds its row", () => {
+  assert.deepEqual(priceFor("claude-opus-4-5-20251101"), priceFor("claude-opus-4-5"));
+  assert.deepEqual(priceFor("claude-sonnet-4-6-20991231"), priceFor("claude-sonnet-4-6"));
+  assert.notEqual(priceFor("claude-opus-4-5-20251101").input,
+                  priceFor("claude-opus-4-20250514").input,
+                  "opus-4-5 must not fall into the claude-opus-4 row");
 });
 
-test("a prefix matches only at a segment boundary", () => {
-  assert.equal(priceFor("claude-sonnet-4-60").window, 200_000,
-               "claude-sonnet-4-60 falls to the claude-sonnet-4 row, never"
-               + " the 1M-window claude-sonnet-4-6 row");
-  assert.equal(priceFor("claude-sonnet-45"), null,
-               "a mid-segment continuation matches nothing");
-  assert.deepEqual(priceFor("claude-sonnet-4-6-20991231"),
-                   priceFor("claude-sonnet-4-6"),
-                   "a dated id still finds its exact row");
+test("an unlisted release never borrows a sibling's price", () => {
+  assert.equal(priceFor("claude-opus-6"), null, "not claude-opus-5's price");
+  assert.equal(priceFor("claude-sonnet-4-60"), null);
+  assert.equal(priceFor("claude-sonnet-45"), null);
+  assert.equal(priceFor("claude-opus-4-5-latest"), null, "only an 8-digit date suffix");
+  assert.equal(priceFor("claude-opus-4-5-2025110"), null);
+  assert.equal(priceFor("constructor"), null, "only own rows answer");
+  assert.equal(priceFor("toString-20250101"), null);
 });
 
 test("an unknown model answers null everywhere — never a guess", () => {
