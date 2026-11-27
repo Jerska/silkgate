@@ -32,6 +32,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 pkg = clipkg.load("sg_cli_journal")
 sg = pkg.core
+gt = pkg.git
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-journal-tests-"))
@@ -866,14 +867,14 @@ class TestExecJournal(JournalCase):
         meta = self.write_session("h1", branch="agent/x", base="0" * 40,
                                   git_dir="/g/.git", workspace="/w")
         err = io.StringIO()
-        with mock.patch.object(sg, "_bundle_in_guest",
+        with mock.patch.object(gt, "_bundle_in_guest",
                                lambda m: ("SILKGATE_NO_COMMITS", "")), \
                 contextlib.redirect_stderr(err):
-            self.assertTrue(sg._harvest_branch(meta))
-        with mock.patch.object(sg, "_bundle_in_guest",
+            self.assertTrue(gt._harvest_branch(meta))
+        with mock.patch.object(gt, "_bundle_in_guest",
                                lambda m: ("SILKGATE_ERROR", "timed out")), \
                 contextlib.redirect_stderr(err):
-            self.assertFalse(sg._harvest_branch(meta))
+            self.assertFalse(gt._harvest_branch(meta))
         records = sg._read_journal(sg.session_dir("h1") / "journal.jsonl")
         self.assertEqual([r["result"] for r in records], ["no_commits", "failed"])
         self.assertEqual(records[1]["detail"], "timed out")
@@ -883,10 +884,10 @@ class TestExecJournal(JournalCase):
         meta = {"name": "gone99", "branch": "agent/x", "base": "0" * 40,
                 "workspace": "/w"}                        # no session dir to journal into
         err = io.StringIO()
-        with mock.patch.object(sg, "_bundle_in_guest",
+        with mock.patch.object(gt, "_bundle_in_guest",
                                lambda m: ("SILKGATE_NO_BRANCH", "")), \
                 contextlib.redirect_stderr(err):
-            self.assertTrue(sg._harvest_branch(meta))
+            self.assertTrue(gt._harvest_branch(meta))
         self.assertIn("could not journal", err.getvalue())
 
 

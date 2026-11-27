@@ -30,6 +30,7 @@ REPO = Path(__file__).resolve().parent.parent
 pkg = clipkg.load("sg_cli_validation")
 sg = pkg.core
 vf = pkg.verify
+gt = pkg.git
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-tests-"))
@@ -1434,8 +1435,8 @@ class TestBranchGuards(GitRepoCase):
         with mock.patch.object(sys, "argv",
                                ["silkgate", "run", "--with", "git", "--branch", "nb",
                                 "-v", f"{data}:/data:rw", "--allow-git-dir", "--", "true"]), \
-                mock.patch.object(sg, "_branch_spec", lambda *a: fake_spec), \
-                mock.patch.object(sg, "_branch_workspace", spy), \
+                mock.patch.object(gt, "_branch_spec", lambda *a: fake_spec), \
+                mock.patch.object(gt, "_branch_workspace", spy), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.no_preflight(), self.assertRaises(SystemExit) as caught:
             pkg.main.main()
@@ -1451,7 +1452,7 @@ class TestBranchGuards(GitRepoCase):
 
     def test_branch_name_precheck_needs_no_git(self):
         for bad in ("-x", "a b", "a\tb"):
-            self.refuses("invalid branch name", sg._branch_spec, bad, self.git_profile(), [])
+            self.refuses("invalid branch name", gt._branch_spec, bad, self.git_profile(), [])
 
     # --- repo validation, real git --------------------------------------------
 
@@ -1459,9 +1460,9 @@ class TestBranchGuards(GitRepoCase):
     def test_branch_spec_against_a_repo(self):
         root = self._repo()
         with self._cwd(root):
-            self.refuses("invalid branch name", sg._branch_spec, "a..b", self.git_profile(), [])
-            self.refuses("already exists", sg._branch_spec, "main", self.git_profile(), [])
-            spec = sg._branch_spec("agent/x", self.git_profile(), [])
+            self.refuses("invalid branch name", gt._branch_spec, "a..b", self.git_profile(), [])
+            self.refuses("already exists", gt._branch_spec, "main", self.git_profile(), [])
+            spec = gt._branch_spec("agent/x", self.git_profile(), [])
         self.assertEqual(Path(spec["git_dir"]), (root / ".git").resolve())
         self.assertEqual(Path(spec["repo_root"]), root.resolve())
         self.assertRegex(spec["base"], r"\A[0-9a-f]{40}\Z")
@@ -1479,7 +1480,7 @@ class TestBranchGuards(GitRepoCase):
         decoy = self._repo(name="decoy")
         with mock.patch.dict(os.environ, {"GIT_DIR": str(decoy / ".git"),
                                           "GIT_WORK_TREE": str(decoy)}), self._cwd(root):
-            spec = sg._branch_spec("agent/x", self.git_profile(), [])
+            spec = gt._branch_spec("agent/x", self.git_profile(), [])
         self.assertEqual(Path(spec["git_dir"]), (root / ".git").resolve())
         self.assertEqual(Path(spec["repo_root"]), root.resolve())
         exclude = decoy / ".git" / "info" / "exclude"
@@ -1491,9 +1492,9 @@ class TestBranchGuards(GitRepoCase):
         empty = self.tmp / "empty"
         empty.mkdir()
         with self._cwd(empty):
-            self.refuses("inside a git work tree", sg._branch_spec, "x", self.git_profile(), [])
+            self.refuses("inside a git work tree", gt._branch_spec, "x", self.git_profile(), [])
         with self._cwd(self._repo(commit=False, name="unborn")):
-            message = self.refuses("cannot resolve", sg._branch_spec, "x",
+            message = self.refuses("cannot resolve", gt._branch_spec, "x",
                                    self.git_profile(), [])
         self.assertIn("'HEAD'", message)            # the unresolvable ref is named
 
@@ -1512,7 +1513,7 @@ class TestBranchGuards(GitRepoCase):
                               capture_output=True, text=True, check=True,
                               env=_git_env()).stdout.strip()
         with self._cwd(wt):
-            spec = sg._branch_spec("agent/x", self.git_profile(), [])
+            spec = gt._branch_spec("agent/x", self.git_profile(), [])
         self.assertEqual(Path(spec["git_dir"]), (root / ".git").resolve())
         self.assertEqual(spec["base"], head)
 
@@ -1520,8 +1521,8 @@ class TestBranchGuards(GitRepoCase):
         git_dir = self.tmp / "gd"
         (git_dir / "info").mkdir(parents=True)
         (git_dir / "info" / "exclude").write_text("prior\n")
-        sg._exclude_silkgate(git_dir)
-        sg._exclude_silkgate(git_dir)
+        gt._exclude_silkgate(git_dir)
+        gt._exclude_silkgate(git_dir)
         self.assertEqual((git_dir / "info" / "exclude").read_text(), "prior\n.silkgate/\n")
 
     # --- the derived workspace -------------------------------------------------
@@ -1533,24 +1534,24 @@ class TestBranchGuards(GitRepoCase):
     def test_branch_workspace_mounts(self):
         root = self.tmp / "proj"
         (root / ".git").mkdir(parents=True)
-        ws, mounts = sg._branch_workspace(self.spec_for(root), "n1")
+        ws, mounts = gt._branch_workspace(self.spec_for(root), "n1")
         self.assertEqual(Path(ws), (root / ".silkgate" / "sandboxes" / "n1").resolve())
         self.assertIn(f"{ws}:/workspace:rw", mounts)
         self.assertIn(f"{root / '.git'}:/silkgate/base.git:ro", mounts)
         self.assertFalse(any("/root/lfsstore" in m for m in mounts),
                          "no lfs mount when the repo has no .git/lfs")
         (root / ".git" / "lfs").mkdir()
-        ws2, mounts2 = sg._branch_workspace(self.spec_for(root), "n2")
+        ws2, mounts2 = gt._branch_workspace(self.spec_for(root), "n2")
         self.assertIn(f"{root / '.git' / 'lfs'}:/root/lfsstore:rw", mounts2)
 
     def test_branch_workspace_refuses_a_leftover(self):
         root = self.tmp / "proj"
         (root / ".silkgate" / "sandboxes" / "n1").mkdir(parents=True)
-        self.refuses("leftover workspace", sg._branch_workspace, self.spec_for(root), "n1")
+        self.refuses("leftover workspace", gt._branch_workspace, self.spec_for(root), "n1")
 
     def test_branch_workspace_refuses_silkgates_own_state(self):
         root = Path(sg.SILK_DIR) / "somerepo"
-        self.refuses("silkgate's own state", sg._branch_workspace, self.spec_for(root), "n1")
+        self.refuses("silkgate's own state", gt._branch_workspace, self.spec_for(root), "n1")
 
     def test_mount_guard_accepts_the_nested_sandbox_dir(self):
         # The pin for the whole layout: the repo root stays refused while the derived
@@ -1589,15 +1590,15 @@ class TestBranchGuards(GitRepoCase):
         ws = root / ".silkgate" / "sandboxes" / "n1"
         ws.mkdir(parents=True)
         base = {"name": "n1", "repo_root": str(root), "workspace": str(ws)}
-        sg._reap_derived_workspace({**base})                          # no flag
+        gt._reap_derived_workspace({**base})                          # no flag
         self.assertTrue(ws.exists())
         err = io.StringIO()
         with contextlib.redirect_stderr(err):                         # flag, wrong path
-            sg._reap_derived_workspace({**base, "workspace_derived": True,
+            gt._reap_derived_workspace({**base, "workspace_derived": True,
                                         "workspace": str(self.tmp)})
         self.assertTrue(self.tmp.exists())
         self.assertIn("not this session's derived workspace", err.getvalue())
-        sg._reap_derived_workspace({**base, "workspace_derived": True})
+        gt._reap_derived_workspace({**base, "workspace_derived": True})
         self.assertFalse(ws.exists())
 
     # --- wiring ------------------------------------------------------------------
@@ -1614,8 +1615,8 @@ class TestBranchGuards(GitRepoCase):
                 raise SystemExit(42)                # stop before any proxy/msb work
 
             with mock.patch.object(sys, "argv", ["silkgate"] + argv), \
-                    mock.patch.object(sg, "_branch_spec", lambda *a: fake_spec), \
-                    mock.patch.object(sg, "_branch_workspace", spy), \
+                    mock.patch.object(gt, "_branch_spec", lambda *a: fake_spec), \
+                    mock.patch.object(gt, "_branch_workspace", spy), \
                     self.no_preflight(), self.assertRaises(SystemExit) as caught:
                 pkg.main.main()
             self.assertEqual(caught.exception.code, 42, argv[0])
@@ -1652,8 +1653,8 @@ class TestHarvestWiring(CliCase):
         with mock.patch.object(sys, "argv", ["silkgate", "run", "--with", "git",
                                              "--branch", "nb", "--", "true"]), \
                 self.no_preflight(), \
-                mock.patch.object(sg, "_branch_spec", lambda *a: dict(self.FAKE_SPEC)), \
-                mock.patch.object(sg, "_branch_workspace", lambda spec, name: (ws, [])), \
+                mock.patch.object(gt, "_branch_spec", lambda *a: dict(self.FAKE_SPEC)), \
+                mock.patch.object(gt, "_branch_workspace", lambda spec, name: (ws, [])), \
                 mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
                 mock.patch.object(sg, "_proxy_running", lambda: True), \
                 mock.patch.object(sg, "ensure_proxy",
@@ -1661,13 +1662,13 @@ class TestHarvestWiring(CliCase):
                 mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
                 mock.patch.object(sg, "_provision_session", lambda *a, **k: None), \
                 mock.patch.object(sg, "tier1_fault", lambda *a: None), \
-                mock.patch.object(sg, "_setup_branch_guest", lambda *a: None), \
+                mock.patch.object(gt, "_setup_branch_guest", lambda *a: None), \
                 mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
                 mock.patch.object(sg, "read_meta", read_meta), \
-                mock.patch.object(sg, "_harvest_branch", harvest), \
+                mock.patch.object(gt, "_harvest_branch", harvest), \
                 mock.patch.object(sg, "_teardown_session",
                                   lambda meta: calls.append("teardown")), \
-                mock.patch.object(sg, "_reap_derived_workspace",
+                mock.patch.object(gt, "_reap_derived_workspace",
                                   lambda meta: calls.append("reap")), \
                 mock.patch.object(sg, "list_metas", lambda: []), \
                 mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
@@ -1712,10 +1713,10 @@ class TestHarvestWiring(CliCase):
         with mock.patch.object(sys, "argv", ["silkgate", "down", "d1"]), \
                 self.no_preflight(), \
                 mock.patch.object(sg, "read_meta", lambda name: dict(meta)), \
-                mock.patch.object(sg, "_harvest_branch", harvest), \
+                mock.patch.object(gt, "_harvest_branch", harvest), \
                 mock.patch.object(sg, "_teardown_session",
                                   lambda m: calls.append("teardown")), \
-                mock.patch.object(sg, "_reap_derived_workspace",
+                mock.patch.object(gt, "_reap_derived_workspace",
                                   lambda m: calls.append("reap")), \
                 mock.patch.object(sg, "list_metas", lambda: []), \
                 mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
@@ -1763,7 +1764,7 @@ class TestCheckoutSessions(GitRepoCase):
 
     def test_ref_charset_precheck_needs_no_git(self):
         for bad in ("-x", "a b", "a\tb"):
-            self.refuses("invalid ref", sg._checkout_spec, bad, self.git_profile(), [])
+            self.refuses("invalid ref", gt._checkout_spec, bad, self.git_profile(), [])
 
     def test_run_and_up_demand_host_git(self):
         # preflight must name git before any repo probe runs.
@@ -1799,10 +1800,10 @@ class TestCheckoutSessions(GitRepoCase):
                        env=_git_env())
         head = self._rev(root)
         with self._cwd(root):
-            bare = sg._checkout_spec("HEAD", self.git_profile(), [])
+            bare = gt._checkout_spec("HEAD", self.git_profile(), [])
             self.assertEqual(bare["base"], head)
             for ref in ("v1", "keep", first, first[:10]):    # tag, branch, sha, short sha
-                spec = sg._checkout_spec(ref, self.git_profile(), [])
+                spec = gt._checkout_spec(ref, self.git_profile(), [])
                 self.assertEqual(spec["base"], first, ref)
                 self.assertEqual(spec["checkout"], ref)
         self.assertEqual(Path(bare["git_dir"]), (root / ".git").resolve())
@@ -1813,7 +1814,7 @@ class TestCheckoutSessions(GitRepoCase):
     @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
     def test_a_bad_ref_dies_naming_it(self):
         with self._cwd(self._repo()):
-            message = self.refuses("cannot resolve", sg._checkout_spec, "nope",
+            message = self.refuses("cannot resolve", gt._checkout_spec, "nope",
                                    self.git_profile(), [])
         self.assertIn("'nope'", message)
 
@@ -1822,7 +1823,7 @@ class TestCheckoutSessions(GitRepoCase):
         empty = self.tmp / "empty"
         empty.mkdir()
         with self._cwd(empty):
-            self.refuses("inside a git work tree", sg._checkout_spec, "HEAD",
+            self.refuses("inside a git work tree", gt._checkout_spec, "HEAD",
                          self.git_profile(), [])
 
     @unittest.skipUnless(shutil.which("git"), "these drive a real repository")
@@ -1830,7 +1831,7 @@ class TestCheckoutSessions(GitRepoCase):
         # No host directory is created, so no .silkgate/ exclusion either.
         root = self._repo()
         with self._cwd(root):
-            sg._checkout_spec("HEAD", self.git_profile(), [])
+            gt._checkout_spec("HEAD", self.git_profile(), [])
         exclude = root / ".git" / "info" / "exclude"
         self.assertNotIn(".silkgate/",
                          exclude.read_text().splitlines() if exclude.is_file() else [])
@@ -1847,8 +1848,8 @@ class TestCheckoutSessions(GitRepoCase):
                        env=_git_env())
         head = self._rev(root)
         with self._cwd(root):
-            based = sg._branch_spec("agent/x", self.git_profile(), [], first)
-            plain = sg._branch_spec("agent/y", self.git_profile(), [])
+            based = gt._branch_spec("agent/x", self.git_profile(), [], first)
+            plain = gt._branch_spec("agent/y", self.git_profile(), [])
         self.assertEqual(based["base"], first)
         self.assertEqual(plain["base"], head)
 
@@ -1863,7 +1864,7 @@ class TestCheckoutSessions(GitRepoCase):
                             "--checkout", "abc123", "--", "true"], "abc123"),
                           (["run", "--with", "git", "--branch", "nb", "--", "true"], "HEAD")):
             with mock.patch.object(sys, "argv", ["silkgate"] + argv), \
-                    mock.patch.object(sg, "_branch_spec", spy), \
+                    mock.patch.object(gt, "_branch_spec", spy), \
                     self.no_preflight(), self.assertRaises(SystemExit) as caught:
                 pkg.main.main()
             self.assertEqual(caught.exception.code, 42, argv)
@@ -1876,16 +1877,16 @@ class TestCheckoutSessions(GitRepoCase):
         (root / ".git").mkdir(parents=True)
         spec = {"checkout": "HEAD", "git_dir": str(root / ".git"), "base": "0" * 40,
                 "repo_root": str(root)}
-        mounts = sg._checkout_workspace(spec)
+        mounts = gt._checkout_workspace(spec)
         self.assertEqual(mounts, [f"{root / '.git'}:/silkgate/base.git:ro"])
         self.assertFalse(any("/workspace" in m for m in mounts), "no /workspace mount")
         (root / ".git" / "lfs").mkdir()
         self.assertIn(f"{root / '.git' / 'lfs'}:/root/lfsstore:rw",
-                      sg._checkout_workspace(spec))
+                      gt._checkout_workspace(spec))
 
     def test_checkout_session_provisions_without_workspace(self):
         fake = {"checkout": "v1", "git_dir": "/g/.git", "base": "0" * 40, "repo_root": "/g"}
-        with mock.patch.object(sg, "_checkout_spec", lambda *a: fake):
+        with mock.patch.object(gt, "_checkout_spec", lambda *a: fake):
             seen = self.provision_capture(["run", "--with", "git", "--checkout", "v1",
                                            "--", "true"])
         self.assertEqual(seen["mounts"], ["/g/.git:/silkgate/base.git:ro"])
@@ -1921,9 +1922,9 @@ class TestCheckoutSessions(GitRepoCase):
         args = mock.Mock()
         args.name = "co8bb"
         with self.no_preflight(), \
-                mock.patch.object(sg, "_harvest_branch",
+                mock.patch.object(gt, "_harvest_branch",
                                   lambda meta: calls.append("harvest") or True), \
-                mock.patch.object(sg, "_reap_derived_workspace",
+                mock.patch.object(gt, "_reap_derived_workspace",
                                   lambda meta: calls.append("reap")), \
                 mock.patch.object(sg, "_teardown_session",
                                   lambda meta: calls.append("teardown")), \

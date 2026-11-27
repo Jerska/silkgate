@@ -60,6 +60,7 @@ CLI = REPO / "cli" / "silkgate"
 pkg = clipkg.load("sg_ui")
 MOD = pkg.core
 UI = pkg.ui_server
+GIT = pkg.git
 
 
 def event(**kw):
@@ -1052,7 +1053,7 @@ class UiDiffTest(UiServerTest):
             seen["git_dir"], seen["argv"] = git_dir, argv
             return types.SimpleNamespace(returncode=0, stdout="the host diff")
 
-        with mock.patch.object(MOD, "_git", fake_git):
+        with mock.patch.object(GIT, "_git", fake_git):
             resp, got = self.post_json(f"/api/session/{sid}/diff")
         self.assertEqual(resp.status, 200)
         self.assertEqual(got, {"mode": "host", "status": "", "diff": "the host diff",
@@ -1077,7 +1078,7 @@ class UiDiffTest(UiServerTest):
         sid, _ = self.write_archive("oldd", branch="agent/x", base=_BASE,
                                     git_dir="/g/.git", workspace="/w",
                                     branch_ingested="1" * 40)
-        with mock.patch.object(MOD, "_git", lambda *a: None):
+        with mock.patch.object(GIT, "_git", lambda *a: None):
             resp, _ = self.post_json(f"/api/session/{sid}/diff")
         self.assertEqual(resp.status, 409)
 

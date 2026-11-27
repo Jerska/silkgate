@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import core, logs
+from . import core, git, logs
 
 
 # --- ui: a local web view over the events files -------------------------------------
@@ -335,7 +335,7 @@ def _diff_in_guest(meta):
     GIT_DIR/GIT_WORK_TREE pair, a checkout session from /workspace where its clone's
     own .git lives."""
     if meta.get("branch"):
-        script, env = _DIFF_SH.format(cd=""), core._BRANCH_ENV
+        script, env = _DIFF_SH.format(cd=""), git._BRANCH_ENV
     else:
         script, env = _DIFF_SH.format(cd="cd /workspace\n"), ()
     try:
@@ -847,8 +847,8 @@ def _ui_server(port):
                 if not meta.get("branch_ingested"):
                     return self._json(
                         {"error": "never harvested — no commits reached the host"}, 409)
-                proc = core._git(meta["git_dir"], "diff",
-                                 f"{meta['base']}..refs/heads/{meta['branch']}")
+                proc = git._git(meta["git_dir"], "diff",
+                                f"{meta['base']}..refs/heads/{meta['branch']}")
                 if proc is None or proc.returncode:
                     return self._json({"error": "host git diff failed — the branch "
                                                 "may be gone from the repository"}, 409)

@@ -28,7 +28,9 @@ if shutil.which("git") is None:
     raise unittest.SkipTest("git is not installed — the ingest tests drive real repositories")
 
 
-sg = clipkg.load("sg_cli_branch_ingest").core
+pkg = clipkg.load("sg_cli_branch_ingest")
+sg = pkg.core
+gt = pkg.git
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-ingest-tests-"))
@@ -108,7 +110,7 @@ class IngestCase(unittest.TestCase):
     def ingest(self, meta, bundle, tip):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            ok = sg._ingest_bundle(meta, bundle, tip)
+            ok = gt._ingest_bundle(meta, bundle, tip)
         return ok, err.getvalue()
 
     def host_ref(self, ref):
@@ -262,9 +264,9 @@ class TestHarvestDispatch(IngestCase):
     def dispatch(self, token, detail="", **meta_extra):
         meta = self.meta(**meta_extra)
         err = io.StringIO()
-        with mock.patch.object(sg, "_bundle_in_guest", lambda m: (token, detail)), \
+        with mock.patch.object(gt, "_bundle_in_guest", lambda m: (token, detail)), \
                 contextlib.redirect_stderr(err):
-            ok = sg._harvest_branch(meta)
+            ok = gt._harvest_branch(meta)
         return ok, err.getvalue()
 
     def test_no_commits_is_a_quiet_success(self):
