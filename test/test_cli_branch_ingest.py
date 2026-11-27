@@ -28,15 +28,12 @@ if shutil.which("git") is None:
     raise unittest.SkipTest("git is not installed — the ingest tests drive real repositories")
 
 
-pkg = clipkg.load("sg_cli_branch_ingest")
+# Everything the CLI would write lives under one scratch home for the whole run.
+_SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-ingest-tests-"))
+pkg = clipkg.load("sg_cli_branch_ingest", home=_SCRATCH)
 sg = pkg.core
 gt = pkg.git
 pt = pkg.paths
-
-# Everything the CLI would write lives under one scratch tree for the whole run.
-_SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-ingest-tests-"))
-pt.SILK_DIR = _SCRATCH / "silkgate"
-pt.SESSIONS_DIR = pt.SILK_DIR / "sessions"
 
 
 def tearDownModule():

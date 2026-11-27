@@ -7,7 +7,7 @@ The projection forwards the host's Claude Code model configuration — the two k
 `model` and `effortLevel`, nothing else — into a guest, at each profile's settings_path.
 Everything here is host-side and stdlib-only: the resolver reads only the paths a test
 hands it, so no test ever reads the real home directory, and the staging tests stop at
-a faked `msb create`. State paths are repointed at a scratch directory, as in
+a faked `msb create`. The CLI loads with $HOME at a scratch directory, as in
 test_cli_validation.py: nothing here may touch a real ~/.silkgate.
 """
 import contextlib
@@ -26,20 +26,11 @@ import clipkg
 REPO = Path(__file__).resolve().parent.parent
 
 
-pkg = clipkg.load("sg_cli_settings")
+# Everything the CLI would write lives under one scratch home for the whole run.
+_SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-settings-tests-"))
+pkg = clipkg.load("sg_cli_settings", home=_SCRATCH)
 sg = pkg.core
 pt = pkg.paths
-
-# Everything the CLI would write lives under one scratch tree for the whole run.
-_SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-settings-tests-"))
-pt.SILK_DIR = _SCRATCH / "silkgate"
-pt.SESSIONS_DIR = pt.SILK_DIR / "sessions"
-pt.LOG_DIR = pt.SILK_DIR / "logs"
-pt.CA_DIR = pt.SILK_DIR / "ca"
-pt.DOCKER_CFG_DIR = pt.SILK_DIR / "docker"
-pt.PROXY_JSON = pt.SILK_DIR / "proxy.json"
-pt.PROXY_SOCK = pt.SILK_DIR / "proxy.sock"
-sg.CLAUDE_SETTINGS = _SCRATCH / "claude" / "settings.json"
 
 
 def tearDownModule():

@@ -6,9 +6,8 @@ additions and the exec marker in the relay.
 
 Stdlib only, no docker/msb/mitmproxy: the msb seams (_remove_sandbox, _run_msb_logs,
 subprocess into msb/mitmdump) are stubbed, following test_cli_branch_ingest.py. The
-module's state paths derive from $HOME at import time, so they are repointed at a
-scratch tree below — ARCHIVE_DIR included — before any test runs. Nothing here may
-touch a real ~/.silkgate: live sessions use it.
+module's state paths derive from $HOME at import time, so it loads with $HOME at a
+scratch directory. Nothing here may touch a real ~/.silkgate: live sessions use it.
 """
 import contextlib
 import hashlib
@@ -30,20 +29,12 @@ import clipkg
 REPO = Path(__file__).resolve().parent.parent
 
 
-pkg = clipkg.load("sg_cli_journal")
+# Everything the CLI would write lives under one scratch home for the whole run.
+_SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-journal-tests-"))
+pkg = clipkg.load("sg_cli_journal", home=_SCRATCH)
 sg = pkg.core
 gt = pkg.git
 pt = pkg.paths
-
-# Everything the CLI would write lives under one scratch tree for the whole run.
-_SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-journal-tests-"))
-pt.SILK_DIR = _SCRATCH / "silkgate"
-pt.SESSIONS_DIR = pt.SILK_DIR / "sessions"
-pt.ARCHIVE_DIR = pt.SILK_DIR / "archive"
-pt.LOG_DIR = pt.SILK_DIR / "logs"
-pt.CA_DIR = pt.SILK_DIR / "ca"
-pt.PROXY_JSON = pt.SILK_DIR / "proxy.json"
-pt.PROXY_SOCK = pt.SILK_DIR / "proxy.sock"
 
 for _knob in ("SILKGATE_LOG_RETAIN_DAYS", "SILKGATE_CAPTURE_RETAIN_DAYS",
               "SILKGATE_ARCHIVE_RETAIN_DAYS"):

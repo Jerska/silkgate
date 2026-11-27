@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Log-retention, standalone-proxy and audit-follow tests for cli/silkgate.
 
-Everything runs against a temp state tree — never ~/.silkgate — with the module's
-directory attributes reassigned in setUp, fake executables on PATH where a binary is
-unavoidable, and mocks elsewhere, so no docker, msb or mitmproxy is needed. The CLI
-package is loaded through clipkg, as a copy private to this module.
+Everything runs against a temp home — never ~/.silkgate — that setUp points the CLI's
+paths at (clipkg.use_home), fake executables on PATH where a binary is unavoidable, and
+mocks elsewhere, so no docker, msb or mitmproxy is needed. The CLI package is loaded
+through clipkg, as a copy private to this module.
 
     python3 test/test_cli_logs.py -v
 
@@ -140,26 +140,10 @@ class SilkgateTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="sglog-")
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        silk = self.root / "silk"
-        self._saved = {k: getattr(PATHS, k) for k in
-                       ("SILK_DIR", "LOG_DIR", "SESSIONS_DIR", "ARCHIVE_DIR",
-                        "PROXY_JSON", "PROXY_SOCK", "CA_DIR", "MITM_CA")}
-        self.addCleanup(self._restore)
-        PATHS.SILK_DIR = silk
-        PATHS.LOG_DIR = silk / "logs"
-        PATHS.SESSIONS_DIR = silk / "sessions"
-        PATHS.ARCHIVE_DIR = silk / "archive"
-        PATHS.PROXY_JSON = silk / "proxy.json"
-        PATHS.PROXY_SOCK = silk / "proxy.sock"
-        PATHS.CA_DIR = silk / "ca"
-        PATHS.MITM_CA = self.root / "mitmproxy" / "mitmproxy-ca-cert.pem"
+        clipkg.use_home(self, pkg, self.root)
         PATHS.LOG_DIR.mkdir(parents=True)
         PATHS.SESSIONS_DIR.mkdir(parents=True)
         os.environ.pop("SILKGATE_LOG_RETAIN_DAYS", None)
-
-    def _restore(self):
-        for k, v in self._saved.items():
-            setattr(PATHS, k, v)
 
     # -- helpers ---------------------------------------------------------------
 

@@ -383,18 +383,8 @@ class _FakeToolsCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="sglc-")
         self.addCleanup(self._tmp.cleanup)
         root = Path(self._tmp.name)
-        silk = root / "silk"
-        silk.mkdir()
-        self._saved = {k: getattr(PATHS, k) for k in
-                       ("SILK_DIR", "LOG_DIR", "SESSIONS_DIR", "ARCHIVE_DIR",
-                        "PROXY_JSON", "PROXY_SOCK")}
-        PATHS.SILK_DIR = silk
-        PATHS.LOG_DIR = silk / "logs"
-        PATHS.SESSIONS_DIR = silk / "sessions"
-        PATHS.ARCHIVE_DIR = silk / "archive"
-        PATHS.PROXY_JSON = silk / "proxy.json"
-        PATHS.PROXY_SOCK = silk / "proxy.sock"
-        PATHS.SESSIONS_DIR.mkdir()
+        clipkg.use_home(self, pkg, root)
+        PATHS.SESSIONS_DIR.mkdir(parents=True)
         # Fake tools first on PATH; env telling them where to record what they saw.
         fakebin = root / "bin"
         fakebin.mkdir()
@@ -413,8 +403,6 @@ class _FakeToolsCase(unittest.TestCase):
         os.environ["FAKE_MITM_ARGV"] = str(self.mitm_argv)
 
     def tearDown(self):
-        for k, v in self._saved.items():
-            setattr(PATHS, k, v)
         for k, v in self._env.items():
             if v is None:
                 os.environ.pop(k, None)

@@ -6,8 +6,8 @@
 Stdlib only, and no docker/msb/mitmproxy: every check here is about what the CLI refuses
 before it starts anything. The CLI package is loaded through clipkg, as a copy private to
 this module. Importing it has no side effects on disk, but its state paths are derived
-from $HOME at import time, so they are repointed at a scratch directory below before any
-test runs. Nothing here may touch a real ~/.silkgate: live sessions use it.
+from $HOME at import time, so it loads with $HOME at a scratch directory. Nothing here
+may touch a real ~/.silkgate: live sessions use it.
 """
 import contextlib
 import io
@@ -27,22 +27,13 @@ import clipkg
 REPO = Path(__file__).resolve().parent.parent
 
 
-pkg = clipkg.load("sg_cli_validation")
+# Everything the CLI would write lives under one scratch home for the whole run.
+_SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-tests-"))
+pkg = clipkg.load("sg_cli_validation", home=_SCRATCH)
 sg = pkg.core
 vf = pkg.verify
 gt = pkg.git
 pt = pkg.paths
-
-# Everything the CLI would write lives under one scratch tree for the whole run.
-_SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-tests-"))
-pt.SILK_DIR = _SCRATCH / "silkgate"
-pt.SESSIONS_DIR = pt.SILK_DIR / "sessions"
-pt.LOG_DIR = pt.SILK_DIR / "logs"
-pt.CA_DIR = pt.SILK_DIR / "ca"
-pt.DOCKER_CFG_DIR = pt.SILK_DIR / "docker"
-pt.PROXY_JSON = pt.SILK_DIR / "proxy.json"
-pt.PROXY_SOCK = pt.SILK_DIR / "proxy.sock"
-sg.CLAUDE_SETTINGS = _SCRATCH / "claude" / "settings.json"
 
 
 def tearDownModule():
@@ -274,17 +265,15 @@ class TestSessionNames(CliCase):
     def test_traversing_name_is_refused_before_it_reads_anything(self):
         outside = self.tmp / "planted"
         self.plant(outside, {"name": "planted", "sandbox": "sg-planted", "port": 8090})
-        pt.SESSIONS_DIR = self.tmp / "sessions"
+        self.enterContext(mock.patch.object(pt, "SESSIONS_DIR", self.tmp / "sessions"))
         pt.SESSIONS_DIR.mkdir()
-        self.addCleanup(setattr, pt, "SESSIONS_DIR", pt.SILK_DIR / "sessions")
         self.assertTrue((sg.session_dir("../planted") / "meta.json").is_file())
         for name in ["../planted", "../../etc", "/tmp/planted", "foo/../../planted", "..",
                      ".", "a b", "-x", "", "x" * 33, "sg;id"]:
             self.refuses("invalid session name", sg.read_meta, name)
 
     def test_meta_must_agree_with_its_directory(self):
-        pt.SESSIONS_DIR = self.tmp / "sessions"
-        self.addCleanup(setattr, pt, "SESSIONS_DIR", pt.SILK_DIR / "sessions")
+        self.enterContext(mock.patch.object(pt, "SESSIONS_DIR", self.tmp / "sessions"))
         self.plant(pt.SESSIONS_DIR / "good", {"name": "good", "sandbox": "sg-good", "port": 8090})
         self.assertEqual(sg.read_meta("good")["sandbox"], "sg-good")
         self.assertIsNone(sg.read_meta("absent"))
@@ -294,8 +283,7 @@ class TestSessionNames(CliCase):
         self.refuses("refusing it", sg.read_meta, "flag")
 
     def test_list_metas_skips_what_silkgate_did_not_create(self):
-        pt.SESSIONS_DIR = self.tmp / "sessions"
-        self.addCleanup(setattr, pt, "SESSIONS_DIR", pt.SILK_DIR / "sessions")
+        self.enterContext(mock.patch.object(pt, "SESSIONS_DIR", self.tmp / "sessions"))
         self.plant(pt.SESSIONS_DIR / "good", {"name": "good", "sandbox": "sg-good", "port": 8090})
         self.plant(pt.SESSIONS_DIR / ".tmp-staging", {"name": "staging", "sandbox": "sg-x"})
         self.plant(pt.SESSIONS_DIR / "not a session", {"name": "elsewhere", "sandbox": "sg-y"})
@@ -379,9 +367,8 @@ class TestMountGuards(CliCase):
                          [f"{path}:/workspace:rw"], allow_git_dir=True)
 
     def test_host_state_and_home_are_refused_in_both_modes(self):
-        pt.SILK_DIR = self.tmp / "state" / "silkgate"
+        self.enterContext(mock.patch.object(pt, "SILK_DIR", self.tmp / "state" / "silkgate"))
         pt.SILK_DIR.mkdir(parents=True)
-        self.addCleanup(setattr, pt, "SILK_DIR", _SCRATCH / "silkgate")
         for path in [str(pt.SILK_DIR),                      # silkgate's own state
                      str(pt.SILK_DIR.parent),               # a directory containing it
                      str(Path.home()),
@@ -508,9 +495,7 @@ class TestProfileRequires(CliCase):
             (pdir / name).mkdir(parents=True)
             if conf:
                 (pdir / name / "profile.conf").write_text(conf)
-        self._profile_dir = pt.PROFILE_DIR
-        pt.PROFILE_DIR = pdir
-        self.addCleanup(setattr, pt, "PROFILE_DIR", self._profile_dir)
+        self.enterContext(mock.patch.object(pt, "PROFILE_DIR", pdir))
 
     def test_missing_requirement_is_refused_and_named(self):
         message = self.refuses("requires helper", sg.resolve_profiles, ["needy"])
@@ -540,9 +525,7 @@ class ArgProfileCase(CliCase):
             (pdir / name).mkdir(parents=True)
             for fname, content in files.items():
                 (pdir / name / fname).write_text(content)
-        previous = pt.PROFILE_DIR
-        pt.PROFILE_DIR = pdir
-        self.addCleanup(setattr, pt, "PROFILE_DIR", previous)
+        self.enterContext(mock.patch.object(pt, "PROFILE_DIR", pdir))
         return pdir
 
 

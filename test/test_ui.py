@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """`silkgate ui` tests: the events-file tailer, the history reader and the HTTP API.
 
-Everything runs against a temp state tree — never ~/.silkgate — with the module's
-directory attributes reassigned in setUp (UI_DIR included, so the static routes serve a
-fixture directory: the real ui/ assets are not this module's contract). The CLI package
-is loaded through clipkg, as a copy private to this module; no mitmproxy is needed. The
+Everything runs against a temp home — never ~/.silkgate — that setUp points the CLI's
+paths at, with UI_DIR beside it (so the static routes serve a fixture directory: the
+real ui/ assets are not this module's contract). The CLI package is loaded through
+clipkg, as a copy private to this module; no mitmproxy is needed. The
 HTTP tests bind ("127.0.0.1", 0) and drive the server through http.client; the SSE tests
 speak the protocol over a raw socket with a deadline, because http.client has no notion
 of a response that never ends.
@@ -120,15 +120,8 @@ class UiTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="sgui-")
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        silk = self.root / "silk"
-        for module, name, path in ((PATHS, "SILK_DIR", silk),
-                                   (PATHS, "LOG_DIR", silk / "logs"),
-                                   (PATHS, "SESSIONS_DIR", silk / "sessions"),
-                                   (PATHS, "ARCHIVE_DIR", silk / "archive"),
-                                   (PATHS, "PROXY_JSON", silk / "proxy.json"),
-                                   (PATHS, "PROXY_SOCK", silk / "proxy.sock"),
-                                   (UI, "UI_DIR", self.root / "ui")):
-            self.enterContext(mock.patch.object(module, name, path))
+        clipkg.use_home(self, pkg, self.root)
+        self.enterContext(mock.patch.object(UI, "UI_DIR", self.root / "ui"))
         PATHS.LOG_DIR.mkdir(parents=True)
         PATHS.SESSIONS_DIR.mkdir(parents=True)
         UI.UI_DIR.mkdir()
@@ -385,8 +378,9 @@ class UiHttpTest(UiServerTest):
             self.assertSecured(resp)
 
     def test_unrouted_and_traversal_paths_404(self):
+        PATHS.PROXY_JSON.write_text("{}")                   # a real target for the traversal
         for path in ("/nope", "/index.html", "/../proxy.json", "/./app.js",
-                     "/app.js/../../silk/proxy.json"):
+                     "/app.js/../../.silkgate/proxy.json"):
             resp, _ = self.request(path)
             self.assertEqual(resp.status, 404, path)
             self.assertSecured(resp)
@@ -599,9 +593,10 @@ class UiWave2StaticTest(UiServerTest):
             self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
 
     def test_traversal_and_test_files_stay_unserved(self):
+        PATHS.PROXY_JSON.write_text("{}")                   # a real target for the traversal
         (UI.UI_DIR / "store.test.js").write_text("export {};\n")
         (UI.UI_DIR / "fixtures.test.js").write_text("export {};\n")
-        for path in ("/views/../store.js", "/views/../../silk/proxy.json",
+        for path in ("/views/../store.js", "/views/../../.silkgate/proxy.json",
                      "/store.test.js", "/fixtures.test.js", "/views/",
                      "/views/nope.js"):
             resp, _ = self.request(path)
