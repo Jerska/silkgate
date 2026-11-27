@@ -5864,7 +5864,7 @@ def main():
     p = sub.add_parser("run", help="run one command in a fresh guest, then remove it")
     guest_opts(p)
     brief_opt(p, "this run's")
-    p.add_argument("--tty", action=argparse.BooleanOptionalAction,
+    p.add_argument("-t", "--tty", action=argparse.BooleanOptionalAction,
                    help="give the command a terminal (default: if stdin is one). "
                         "--no-tty keeps stdout and stderr apart.")
     p.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD ...",

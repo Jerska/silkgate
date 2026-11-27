@@ -173,12 +173,12 @@ Details: [doc/GIT.md](doc/GIT.md).
 
 ## More flags
 
-**`run` and `up` take these too. `exec` takes `-e` and `--tty`.**
+**`run` takes all of these, and `up` all but `-t`. `exec` takes `-e` and `-t`.**
 
 | Flag | Does |
 |---|---|
 | `-e NAME=VALUE` | sets an env var in the guest. The journal keeps the name only. Proxy variables (`HTTPS_PROXY`, `NO_PROXY`, …) are refused. Secrets belong in `SILKGATE_EGRESS_SECRET_*`. |
-| `--tty`, `--no-tty` | gives the command a terminal, or not. The default follows your stdin. `exec` also takes `-t`. |
+| `-t`, `--tty`, `--no-tty` | gives the command a terminal, or not. The default follows your stdin. |
 | `--image REF` | runs that image as-is: nothing is built, and rules still come from `--with`. It needs `sh` and `mkfifo`, and must trust `~/.silkgate/ca/egress-ca.pem` for HTTPS. |
 | `--base IMAGE` | builds the profiles on another base than `debian:bookworm-slim`. Not with `--image`. |
 | `--port N` | where the proxy's 16-port pool starts, if this command starts the proxy (default 8090) |
