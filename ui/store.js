@@ -1,14 +1,10 @@
-// store.js — the meaning of the audit trail, with nothing attached: no DOM, no
-// network. app.js owns the wiring; this owns folding records into rows, deciding
-// which rows a filter admits, and turning values into cell text. Everything here
-// returns data — rendering goes through textContent on the other side, so a
-// hostile value in a record stays inert.
+// store.js — the meaning of the audit trail, with no DOM or network: records
+// fold into rows, filters admit rows, values become cell text. It returns data
+// only, and rendering uses textContent, so hostile values stay inert.
 //
-// A request tells its story in at most two records joined by `id`: the decision
-// when it is made, and — for an allow — a "response" once the flow concludes.
-// A deny is terminal: nothing went upstream, so no second record can follow it.
-// A CONNECT allow never concludes either — the tunnel outlives the flow — so it
-// renders as "tunnel", not as a "pending" that would never resolve.
+// A request has at most two records, joined by `id`: the decision, and for an
+// allow, a "response". A deny is terminal. A CONNECT allow never concludes, so
+// it renders as "tunnel", not a "pending" that never resolves.
 
 export function newStore(cap = 5000) {
   // tallies: session → {denies, requests, lastTs}, kept by fold() as rows land.
@@ -62,11 +58,9 @@ function baseRow(rec) {
   };
 }
 
-// Fold one record into the store. Returns the row's id when something changed,
-// null when the record was a duplicate (history/stream overlap dedupes on
-// (id, decision)), unfoldable, or shadowed by a terminal deny. Insertion order
-// of `rows` is arrival order, which is what the cap evicts by: evicted ids land
-// in store.evicted for the caller to drain, and their dedupe keys go with them.
+// Fold one record in. Returns the row's id when something changed, else null
+// (a duplicate on (id, decision), unfoldable, or after a deny). The cap evicts in
+// arrival order. Evicted ids go to store.evicted for the caller to drain.
 export function fold(store, rec) {
   if (!rec || typeof rec !== "object" || typeof rec.id !== "string" || !rec.id) {
     return null;
@@ -163,12 +157,9 @@ export function fold(store, rec) {
   return rec.id;
 }
 
-// The filter's session value doubles as a sentinel: "null" selects unattributed
-// rows (the /api/events vocabulary, and what old bookmarks carry). But "null" is
-// also a legal session name, so in filter space that real name is spelled
-// "(null)" — parentheses cannot appear in a name (letters, digits, '-', '_'
-// only), so the two never collide. These two functions are the only crossing
-// points between names and filter values; every other name is itself.
+// In filters, "null" selects unattributed rows, as in /api/events. A session
+// literally named "null" is spelled "(null)", which no real name can be. These
+// two functions are the only crossing between names and filter values.
 export function sessionToFilter(name) {
   return name === "null" ? "(null)" : name;
 }
@@ -177,11 +168,9 @@ export function filterToSession(value) {
   return value === "(null)" ? "null" : value;
 }
 
-// Whether a row survives the filters, mirroring the server's /api/events
-// semantics: `session` compares exactly — with "null" selecting unattributed
-// rows and "(null)" a session named null (see sessionToFilter) — `decision`
-// exactly, `method` case-folded, `host` as a case-folded substring, and
-// `since` (epoch ms) excludes a row whose ts cannot be placed in time.
+// Whether a row passes the filters, as /api/events does: `session` and
+// `decision` exact, `method` case-folded, `host` a case-folded substring, and
+// `since` (epoch ms) drops rows whose ts can't be parsed.
 export function rowPasses(row, f) {
   if (f.session) {
     if (f.session === "null") {

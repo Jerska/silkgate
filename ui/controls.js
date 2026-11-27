@@ -1,11 +1,8 @@
-// controls.js — the control plane's buttons, shared by the overview cards and
-// the session detail: freeze/resume, then down, in escalation order, each
-// titled with its blast radius; kill (per exec) uses the same machinery beside
-// the exec selector. Every POST here fires on an explicit click and never
-// automatically — the server's CSRF guard checks the Origin header that
-// same-origin fetch already sends, so the click itself is the whole ceremony.
-// A failed POST always surfaces the server's {"error"} text — never a silent
-// no-op — and a success shows optimistically until the sessions poll confirms.
+// controls.js — the control buttons, shared by the overview cards and the
+// session detail: freeze/resume, then down, each titled with its blast radius,
+// plus kill per exec. Each POST fires on an explicit click only. The server's
+// CSRF guard checks the Origin same-origin fetch sends. A failure shows the
+// server's {"error"} text, and a success shows until the next poll confirms.
 
 import { el } from "./render.js";
 

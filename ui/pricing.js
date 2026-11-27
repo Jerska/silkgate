@@ -1,11 +1,8 @@
 // pricing.js — a longest-prefix table of Claude model prices and context
-// windows, with nothing attached: no DOM, no network. THE FIGURES ARE ESTIMATES
-// MAINTAINED BY HAND (per-MTok USD, cache-write at the 5-minute TTL; last
-// reconciled 2026-11-23 against public price lists) — the UI renders every cost
-// with a leading "~", and this table is the first place to check when a number
-// looks off. A model id that matches no prefix answers null everywhere: the UI
-// then shows tokens with no cost and hides the context gauge. Never guess a
-// price — a wrong "$0.02" reads as a fact, a "—" reads as what it is.
+// windows, with no DOM or network. THE FIGURES ARE HAND-KEPT ESTIMATES (USD per
+// MTok, cache writes at the 5-minute TTL, last reconciled 2026-11-23), so the UI
+// prefixes costs with "~". An unknown model answers null: tokens show without
+// cost. Never guess a price: a wrong "$0.02" reads as fact, a "—" doesn't.
 
 //                            $/MTok in   out   cache-read  cache-write  context
 const PRICES = {

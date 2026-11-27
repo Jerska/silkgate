@@ -1,14 +1,10 @@
-// views/calls.js — the audit table as a mountable view: the pre-shell app's
-// table, filters, follow mode and "(unattributed)" handling, extracted whole
-// rather than rewritten. Two homes share this component: #/traffic mounts it
-// with filters living in the route (a filtered view stays a shareable URL),
-// and the session detail's calls tab mounts it with `fixedSession` pinning the
-// session filter and keeping the rest as local state — a tab is not a place,
-// so its knobs do not belong in the hash.
+// views/calls.js — the audit table: filters, follow mode, and "(unattributed)".
+// #/traffic mounts it with filters in the route, so a view is a shareable URL.
+// The session's calls tab mounts it with `fixedSession`, and keeps the other
+// filters local, since a tab isn't a place.
 //
-// The app owns the store, the flush clock and the polls; this view owns the
-// <tr> per row id and which of them a filter admits. All record data reaches
-// the DOM as textContent.
+// The app owns the store, flush clock, and polls. This owns the <tr> per row.
+// Record data reaches the DOM as textContent.
 
 import { rowPasses, sessionToFilter, statusText, fmtTime, fmtBytes, fmtDur,
          badges } from "../store.js";

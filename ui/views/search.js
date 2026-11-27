@@ -1,10 +1,7 @@
-// views/search.js — global search results as one flat list grouped by source,
-// each hit linking to its session's detail. The query lives in the hash
-// (#/search?q=…), so a search is a shareable URL; the top-bar box just
-// navigates here. Fetches once per query — refining the query refetches —
-// and every state (too short, empty, no hits, endpoint missing) says so in
-// words via the .state-msg pattern. Result records are trail data and reach
-// the DOM only as textContent.
+// views/search.js — search results grouped by source, each linking to its
+// session. The query lives in the hash (#/search?q=…), so a search is a URL.
+// One fetch per query. Every empty state says why, via .state-msg. Results
+// reach the DOM as textContent.
 
 import { el } from "../render.js";
 import { fmtTime } from "../store.js";

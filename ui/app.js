@@ -1,13 +1,10 @@
 // app.js — the wiring: fetch and EventSource on one side, one mounted view on
-// the other. Boot is /api/sessions → /api/events → EventSource("/api/stream?
-// cursor=…"), with the cursor handed over from history so the two views seam
-// without a gap; the overlap a record can land in is deduped by store.js on
-// (id, decision). The hash routes between views (router.js is the grammar);
-// each view implements {mount, unmount, onFlush, onRoute, rebuild} and exactly
-// one is mounted at a time. Folds land in dirty sets and reach the view on one
-// shared flush clock — a package install emits hundreds of records/s, and
-// per-event DOM writes lock the tab. All record data reaches the DOM as
-// textContent.
+// the other. Boot: /api/sessions, then /api/events, then the stream from the
+// history's cursor, so there's no gap. store.js dedupes the overlap on
+// (id, decision). One view is mounted at a time (router.js picks it), with
+// {mount, unmount, onFlush, onRoute, rebuild}. Updates batch on one flush
+// clock: an install emits hundreds of records/s, and per-event DOM writes lock
+// the tab. Record data reaches the DOM as textContent only.
 
 import { newStore, fold } from "./store.js";
 import { newCapture, foldCapture } from "./capture.js";
@@ -108,12 +105,9 @@ async function reloadEvents() {
   return hist.cursor;
 }
 
-// The badge answers for BOTH streams: "live" only when everything that should
-// be open is open, a suffix when capture has no backend yet, "reconnecting…"
-// the moment either trail drops — a gap in either is a gap in the picture.
-// A failed history fetch is a gap too: the stream's onopen must not dress a
-// table with no past as healthy, so the badge keeps naming it until a retry
-// lands.
+// The badge covers BOTH streams: "live" only when all are open, "reconnecting…"
+// when either drops, and a suffix when capture has no backend. A failed history
+// fetch is a gap too, so the badge names it until a retry succeeds.
 let eventsUp = null;             // null until the first open
 let captureUp = null;
 let historyDegraded = false;     // reloadEvents failed; a retry is pending
@@ -170,11 +164,9 @@ function openStream(cursor) {
     }
     foldEvent(rec);
   };
-  // A reset means the tail adopted a different position (proxy restart, stale
-  // cursor, truncation): refetch history and rebuild. The stream itself stays
-  // open — dedupe on (id, decision) makes the refetch/stream overlap harmless.
-  // A dropped connection needs no code at all: EventSource reconnects on its
-  // own and resends the last frame id as Last-Event-ID.
+  // A reset (proxy restart, stale cursor, truncation): refetch history and
+  // rebuild, with the stream left open, since dedupe absorbs the overlap. A
+  // dropped connection needs nothing: EventSource resends Last-Event-ID.
   stream.addEventListener("reset", async () => {
     try {
       await reloadEvents();

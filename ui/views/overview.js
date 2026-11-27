@@ -1,11 +1,9 @@
-// views/overview.js — one card per session, sorted by how much attention it
-// needs. Triage is a pure function over what the folds already know (tallies,
-// capture, session metas), so the interesting part is testable without a DOM.
+// views/overview.js — one card per session, sorted by the attention it needs.
+// Triage is a pure function of the folds, so it tests without a DOM.
 //
-// Update discipline, in order of cost: the grid REBUILDS only when the set of
-// sessions changes; a dirty card gets its text nodes rewritten; the 1 s ticker
-// only re-derives idle labels (and the dot/order when the passage of time
-// alone changed a state). Cards never rebuild on a tick.
+// The grid rebuilds only when the set of sessions changes. A dirty card
+// rewrites its text nodes. The 1 s ticker only updates idle labels, and the dot
+// and order when time alone changed a state.
 
 import { el, statusDot, meterBar, sparkline, fmtTokens, fmtCost } from "../render.js";
 import { fmtCpuPct, fmtMiB } from "../metrics.js";
@@ -74,11 +72,9 @@ function archiveStamp(row) {
   return m ? Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`) : null;
 }
 
-// Row models for the archives section, newest end first. Archived sessions are
-// display-only (no controls, no triage), so the model is pure data and pins
-// down without a DOM. `branches` is always an array: the API field is a string
-// today, but a row renders zero, one, or many chips unchanged if it becomes a
-// list.
+// Row models for the archives section, newest first. Archived sessions are
+// display-only, so this is pure data. `branches` is always an array, whatever
+// shape the API field has.
 export function archiveRows(archived) {
   const rows = [];
   for (const r of archived ?? []) {

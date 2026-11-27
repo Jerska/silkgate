@@ -1,29 +1,20 @@
-// capture.js — the meaning of the LLM-capture trail, with nothing attached: no
-// DOM, no network. Capture records replay freely — history and stream overlap,
-// resets refetch, reconnects resend — so every fold is idempotent by
-// replacement: turns are keyed by flow id (a repeated turn_start rewrites the
-// start fields), blocks are last-write-wins on (id, index), and turn_end closes
-// a turn by replacing its end fields, never by accumulating. Replaying a
-// sequence lands the state exactly where it already was.
+// capture.js — the meaning of the LLM-capture trail, with no DOM or network.
+// Records replay freely (overlap, resets, reconnects), so every fold replaces,
+// never accumulates: turns key on flow id, blocks are last-write-wins on
+// (id, index), and turn_end replaces the end fields. A replay changes nothing.
 //
-// Sub-state is keyed by (session, exec). A record without an exec belongs to
-// the "unattributed" bucket for its session — never guessed into a neighbor.
+// State is keyed by (session, exec). A record without an exec goes to its
+// session's "unattributed" bucket, never into a neighbor.
 //
-// Four caps bound memory, and they shed different things:
-//   turnCap   — turns per bucket. An evicted turn folds the tokens it reported
-//               into closedTotals exactly once (an evicted OPEN turn folds what
-//               it had; its later turn_end is a no-op — the id is remembered so
-//               replays cannot resurrect it or double-count).
-//   textCap   — held text/tool-input chars per bucket. Shedding text drops
-//               payloads from the oldest blocks but never touches a token
-//               number: token meters must not drift when text falls off.
-//   bucketCap — (session, exec) buckets kept, across all sessions. A new pair
-//               past the cap evicts the stalest bucket whole — a wall display
-//               left up for weeks must not accumulate dead pairs forever.
-//   modelCap  — closedTotals entries per bucket. Distinct model strings arrive
-//               on somebody else's schedule; past the cap, evicted turns with
-//               a new model pool under "(other)" — sums stay exact, only the
-//               per-model split coarsens.
+// Four caps bound memory:
+//   turnCap   — turns per bucket. An evicted turn folds its tokens into
+//               closedTotals once, and its id is remembered, so a replay can't
+//               resurrect or double-count it.
+//   textCap   — text chars per bucket. Shedding drops the oldest payloads, never
+//               a token count.
+//   bucketCap — (session, exec) buckets overall. Past it, the stalest goes.
+//   modelCap  — closedTotals entries per bucket. Past it, new models pool under
+//               "(other)": sums stay exact, the per-model split coarsens.
 
 const ERROR_CAP = 50;            // capture_error entries kept per bucket
 const SIGHTING_CAP = 100;        // secret_sighting entries kept per bucket
@@ -264,11 +255,9 @@ function addTokens(out, model, input, output, cacheRead, cacheWrite) {
   m.cacheWrite += cacheWrite;
 }
 
-// Totals for one session's entry in cap.sessions — live turns plus everything
-// eviction folded into closedTotals, across every exec bucket. byModel exists
-// because cost is priced per model: a session that mixed models cannot be
-// priced from a single sum. lastContext is the newest turn's prompt+output
-// footprint, for the context-window gauge.
+// One session's totals: live turns plus closedTotals, across exec buckets.
+// byModel exists because cost is priced per model. lastContext is the newest
+// turn's prompt plus output, for the context gauge.
 export function sessionTotals(S) {
   const out = { turns: 0, openTurns: 0,
                 input: 0, output: 0, cacheRead: 0, cacheWrite: 0,

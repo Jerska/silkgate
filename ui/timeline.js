@@ -1,12 +1,8 @@
-// timeline.js — the merged activity timeline, with nothing attached: no DOM,
-// no network. One session's story comes from four trails that never agreed on
-// a format — capture turns, audit denies, egress responses, journal events —
-// and this module folds them into one time-ordered column of plain items. The
-// session view renders items; everything here returns data.
+// timeline.js — one session's activity, with no DOM or network: capture turns,
+// denies, responses, and journal events merged into one time-ordered list.
 //
-// Ordering is by parsed timestamp; an unparsable stamp sorts to the front
-// rather than vanishing. Ties keep build order: turns, sightings, denies,
-// responses, journal — stable sort makes that deterministic.
+// An unparsable timestamp sorts first, never vanishes. Ties keep build order:
+// turns, sightings, denies, responses, journal.
 
 export const DENY_TAG_WINDOW_MS = 10_000;
 

@@ -1,13 +1,11 @@
-// router.js — the hash is the app's whole navigation state, and this module is
-// its grammar: parse a hash into a route, build a hash from a route, and map the
-// pre-route era's bare filter hashes onto today's #/traffic. Pure on purpose —
-// no DOM, no location — so every corner of the grammar is testable in node.
+// router.js — the hash is the app's whole navigation state, and this is its
+// grammar: hash to route, route to hash, and bare filter hashes to #/traffic.
+// Pure, with no DOM or location, so it tests in node.
 //
 // Routes:
 //   #/                          the overview grid
-//   #/traffic?session=&…        the calls table; param names predate the router
-//                               (they were the whole hash once) and keep their
-//                               exact semantics, so old bookmarks survive
+//   #/traffic?session=&…        the calls table (its params also work as a bare
+//                               hash, #session=…, which redirects here)
 //   #/session/<ident>?tab=…     one session's detail; tab defaults to activity
 //   #/search?q=…                global search across audit/capture/journal
 
@@ -19,11 +17,8 @@ function strip(hash) {
   return typeof hash === "string" && hash.startsWith("#") ? hash.slice(1) : hash || "";
 }
 
-// Parse a raw location.hash into a route object. Anything unrecognized lands on
-// the overview rather than a dead view: a stale bookmark should show the app,
-// not an error. Legacy hashes also fall through to overview here — the caller
-// runs legacyRedirect first, and by the time parseRoute sees the hash it is
-// either routed or junk.
+// Parse location.hash into a route. Anything unrecognized lands on the
+// overview, not an error. The caller runs legacyRedirect first.
 export function parseRoute(hash) {
   const h = strip(hash);
   if (!h.startsWith("/")) {
@@ -96,13 +91,10 @@ export function buildRoute(route) {
   return "#/";
 }
 
-// The pre-route app kept its filters as a bare query in the hash
-// (#session=demo&decision=deny). Any non-empty hash that does not start with
-// "/" is one of those: answer the #/traffic hash it should become, or null when
-// the hash is empty or already routed. Only the six filter names carry over —
-// nothing else ever lived in the old hash, and forwarding junk would just
-// enshrine it in the new URL. The caller redirects via location.replace, so the
-// old form never enters history.
+// A bare filter hash (#session=demo&decision=deny) is any non-empty hash not
+// starting with "/". Answer its #/traffic form, or null. Only the six filter
+// names carry over. The caller uses location.replace, so the bare form never
+// enters browser history.
 export function legacyRedirect(hash) {
   const h = strip(hash);
   if (!h || h.startsWith("/")) {

@@ -1,9 +1,7 @@
-// render.js — the small vocabulary every view builds its DOM from. Everything
-// record-derived enters the document as a text node or an attribute value, never
-// as markup: LLM output and guest traffic are attacker-influenced, and this file
-// is where that rule is enforced once instead of in every view. No module-level
-// DOM access — the formatters and classifiers at the bottom are pure, so node
-// can import this file for tests without a document.
+// render.js — the vocabulary every view builds its DOM from. Record data
+// enters as a text node or attribute, never markup: LLM output and guest
+// traffic are attacker-influenced, and this file enforces that once. No
+// module-level DOM access, so node can import it for tests.
 
 import { fmtTime } from "./store.js";
 
@@ -131,11 +129,9 @@ export function sparkIndexAt(count, width, x, pad = 2) {
 // speaks HTML — and everything set on them here is a computed number.
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-// With `unit` (and optionally `times`, an array parallel to `values`, plus
-// `fmt`, a value formatter) the spark gains an axis tag and a hover readout —
-// "12.3% @ 14:02:11.500" for the point under the cursor. Values are finite
-// numbers by the filter above and stamps go through fmtTime; both reach the
-// DOM as textContent, and nothing record-derived enters the SVG.
+// With `unit` (plus optional `times` and `fmt`), the spark gets an axis tag and a
+// hover readout, "12.3% @ 14:02:11.500". Both reach the DOM as textContent, and
+// nothing record-derived enters the SVG.
 export function sparkline(values, { width = 120, height = 24, unit = null,
                                     times = null, fmt = null } = {}) {
   const svg = document.createElementNS(SVG_NS, "svg");

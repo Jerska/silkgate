@@ -1,17 +1,13 @@
-// views/session.js — one session up close: a header that triages like the
-// overview card (plus the freeze/resume/down bar), then tabs. `activity` is
-// the capture feed, merged on demand with denies, responses and journal
-// events into one timeline; `calls` pins the calls component to this session;
-// `diff`, `config`, `brief`, `output` and `metrics` each read one endpoint
-// and degrade to a concrete message while its backend is missing.
+// views/session.js — one session: a header like the overview card, with the
+// control bar, then tabs. `activity` is the capture feed, optionally merged
+// with denies, responses, and journal events. `calls` is the calls table for
+// this session. `diff`, `config`, `brief`, `output`, and `metrics` each read one
+// endpoint, and say so when it's missing.
 //
-// The feed renders whole blocks — capture emits blocks complete, so there is
-// no token-by-token churn — and re-renders only items whose fold `rev` moved,
-// which is what keeps an open <details> open while other items stream past.
-// LLM output, guest stdout and diffs are attacker-influenced text and reach
-// the DOM only as text nodes; a tool call renders as a line naming the call
-// and its salient argument, expandable to the verbatim payload and the full
-// input JSON in <pre> blocks.
+// The feed renders whole blocks, and re-renders only items whose `rev` moved,
+// so an open <details> stays open. LLM output, guest stdout, and diffs reach the
+// DOM as text nodes only. A tool call renders as one line, expandable to its
+// payload and input JSON.
 
 import { el, statusDot, renderDiff, sparkline, fmtTokens } from "../render.js";
 import { fmtBytes, fmtDur, fmtTime } from "../store.js";
@@ -24,12 +20,9 @@ import { newCallsView } from "./calls.js";
 
 const TABS = ["activity", "calls", "diff", "config", "brief", "output", "metrics"];
 
-// Which brief the brief tab shows, per the frozen per-exec contract: `briefs`
-// maps exec id → brief, with the session default under "default" and the live
-// guest-writable fallback under "workspace". The selected exec's entry wins,
-// else default, else workspace; null for an empty map. Keys are record data,
-// so only own enumerable entries answer — an exec named "constructor" must
-// not surface Object.prototype. Pure for the tests.
+// The brief the brief tab shows: the selected exec's, else "default", else
+// "workspace" (guest-writable), else null. Keys are record data, so only own
+// entries count: an exec named "constructor" can't reach Object.prototype.
 export function selectBrief(briefs, selectedExec) {
   if (!briefs || typeof briefs !== "object") return null;
   const entry = (key) => {
@@ -64,12 +57,9 @@ const PAYLOAD = new Map([
   ["bash", "command"], ["write", "content"], ["task", "prompt"],
   ["agent", "prompt"], ["notebookedit", "new_source"]]);
 
-// One tool_use block → its activity line, the verbatim payload for tools
-// whose bulk lives in one string field, the full input JSON, and whether the
-// details renders expanded. Every call with any input expands to the full
-// JSON. A payload tool shows its payload <pre> first, visible without a
-// click up to 8 payload lines, with the JSON one click deeper. Pure for the
-// tests.
+// One tool_use block → its activity line, its verbatim payload (for tools whose
+// bulk is one string field), its input JSON, and whether it renders expanded.
+// A payload shows first, open up to 8 lines, with the JSON one click deeper.
 export function toolCallView(block) {
   const name = block.tool_name ?? "?";
   const tool = String(block.tool_name ?? "").toLowerCase();
@@ -97,12 +87,9 @@ export function toolCallView(block) {
   return { line: `${name}(${shown})${mark}`, payload, json, open };
 }
 
-// A turn's error as readable text. Capture stores the turn_end error field
-// verbatim: an object `{type, message}` with either half a string or null.
-// That known shape joins its string halves with ": "; a plain string returns
-// as it is; any other shape prints as JSON — verbatim beats a guess for a
-// shape this view does not know. Pure for the tests; the result reaches the
-// DOM only as a text node, since the message is upstream-influenced.
+// A turn's error as text. `{type, message}` joins its string halves with ": ",
+// a string stays as is, and any other shape prints as JSON: verbatim beats a
+// guess. It reaches the DOM as a text node.
 export function errorText(err) {
   if (typeof err === "string") return err;
   if (err !== null && typeof err === "object" && !Array.isArray(err)
@@ -114,15 +101,10 @@ export function errorText(err) {
   return JSON.stringify(err);
 }
 
-// The meta behind a session view, looked up fresh each call: live metas answer
-// by name, archived metas by the sid the overview links with, then by name.
-// The name fallback covers a session downed while its detail view is open
-// under its name: the live list drops the name, and no archived sid equals
-// it, but the newest archived row with that name is the session on screen —
-// the list arrives newest-first, so the first match is it. Archived-ness is
-// placement (the archived list) or an explicit state — the same derivation the
-// overview grid uses, so the detail header can never disagree with the card.
-// Pure so the lookup and the archived verdict pin down in node.
+// The meta behind a session view, looked up fresh: live by name, archived by
+// sid, then archived by name. That last one covers a session downed while its
+// view is open: the newest archived row with that name is the one on screen.
+// Archived-ness is derived as on the overview, so header and card agree.
 export function findMeta(sessions, ident, session) {
   for (const m of sessions?.sessions ?? []) {
     if (m?.name === session) {

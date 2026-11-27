@@ -1,13 +1,9 @@
-// metrics.js — the client-side sample history behind the sparklines, with
-// nothing attached: no DOM, no network. app.js pushes each /api/metrics
-// payload here; the overview cards and the metrics tab read the rings back as
-// plain number arrays. Thirty samples per session is the whole memory — at the
-// 2 s poll that is one minute of shape, which is what a sparkline is for.
+// metrics.js — the sample history behind the sparklines, with no DOM or
+// network. app.js pushes each /api/metrics payload, and views read the rings as
+// number arrays. 30 samples per session, a minute at the 2 s poll.
 //
-// The payload's `sampled` stamp dedupes: the host samples on its own ttl, so
-// two polls can return the same measurement and a repeated push must not bend
-// the line. A missing number lands as null — a gap in the series, never a
-// zero — and sparkPoints drops nulls on the way to geometry.
+// The `sampled` stamp dedupes repeated measurements. A missing number is null,
+// a gap, never a zero.
 
 import { fmtBytes } from "./store.js";
 
