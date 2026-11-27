@@ -66,12 +66,10 @@ def die(msg, code=1):
 
 
 def say(msg):
-    # RS opens every line silkgate speaks as itself, because it is the one byte relayed
-    # guest output cannot carry: _relay spends a leading one on routing and _plain strips
-    # the rest, so a `silkgate:` line without it is a guest's imitation. Terminals draw
-    # nothing for RS, so to a human the style stays bare `silkgate: …`; a reader that
-    # needs attribution checks the byte. (Under -t on a real terminal the guest writes to
-    # the screen directly and no mark can hold — see run_guest.)
+    # RS opens every line silkgate speaks as itself: it's the one byte relayed guest output
+    # can't carry (_relay spends a leading one on routing, _plain strips the rest). So a
+    # `silkgate:` line without it is a guest's imitation. Terminals draw nothing for RS.
+    # Under --tty the guest writes to the screen directly, and no mark holds.
     mark = _ERR_TAG.decode()
     try:
         print(mark + f"silkgate: {msg}".replace("\n", "\n" + mark), file=sys.stderr)
@@ -81,11 +79,9 @@ def say(msg):
         pass
 
 
-# Every binary the toolchain can require, with the remedy its absence should name. This
-# table owns the binary→hint mapping: preflight() reports from it up front and which()
-# reads it at the moment of use, so the two checks cannot name different remedies. (Call
-# sites from before the table still pass which() a hint; for a binary the table knows,
-# the table wins.)
+# Every binary the toolchain can need, with its install hint. preflight() and which() both
+# read this table, so they can't name different remedies. A hint passed to which() loses
+# to the table for a binary the table knows.
 _TOOL_HINTS = {
     "docker": "images are built with docker, then loaded into msb",
     "msb": "curl -fsSL https://install.microsandbox.dev | sh",
@@ -106,11 +102,9 @@ def which(binary, hint=None):
 def preflight(*binaries):
     """Die naming every absent tool at once, before a command does any work.
 
-    which() is lazy and per-tool, so a user missing several tools would learn each
-    install command only by failing a run — this is where a multi-tool command reports
-    the whole shortfall together. Cost is one PATH lookup per binary, never a
-    subprocess; and the question is only "is the toolchain here" — whether containment
-    actually holds is `silkgate verify`'s question, not this one's.
+    which() checks one tool when it's needed, so a user missing several would learn them
+    one failed run at a time. This reports them together, for one PATH lookup each.
+    Whether containment holds is `silkgate verify`'s question.
     """
     missing = [b for b in dict.fromkeys(binaries) if shutil.which(b) is None]
     if not missing:
@@ -135,11 +129,10 @@ def tail(path, lines=10):
 # may reach once running (rules.txt, enforced by the proxy). Both come from the same
 # `--with` list, so an image can't end up with a tool whose egress nobody allowed.
 
-# A version and an image reference both reach the generated Dockerfile verbatim — the version
-# as shell text inside `RUN VERSION="<v>" sh setup.sh`, the base as a `FROM` line — and
-# `docker build` runs as root on the host, with the host's network, outside the proxy. That is
-# the one place a silkgate command line escapes silkgate, so both are charset-checked where
-# they are parsed: the error names the flag instead of arriving as a strange build failure.
+# A version and a base image reach the generated Dockerfile verbatim: the version as shell
+# text in `RUN VERSION="<v>" sh setup.sh`, the base as `FROM`. `docker build` runs as root on
+# the host, outside the proxy, so both are charset-checked at parse time, where the error can
+# name the flag.
 _VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
 _IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}")
 
@@ -438,21 +431,15 @@ def check_secrets(ruleset):
 
 # --- host processes ----------------------------------------------------------
 
-# Where proxy listeners bind. Guests reach the proxy as host.microsandbox.internal, a
-# gateway address owned by the VMM process itself — no host interface holds it — and the
-# VMM delivers guest->host traffic over loopback: a 127.0.0.1 listener sees a guest
-# connection arrive with a loopback peer address (observed on macOS/HVF, msb 0.5.4). So
-# loopback serves every guest while keeping the pool ports — each one an allowlist plus
-# header-triggered credential injection — off the LAN, which mitmdump's default bind
-# ('', every interface) would expose.
+# Where proxy listeners bind. Guests reach host.microsandbox.internal, an address the VMM
+# owns, and the VMM delivers that traffic over loopback (observed on macOS/HVF). So loopback
+# serves every guest and keeps the pool ports, each an allowlist with credential injection,
+# off the LAN. mitmdump's default bind would expose them on every interface.
 #
-# BOTH loopback families, because the guest's /etc/hosts maps the alias to an IPv6 address
-# as well and getaddrinfo hands that one out first: a v4-only listener leaves a modern curl
-# connecting to [::1] on the host, where the VMM completes the handshake locally and the
-# request then dies on a reset — a failure that looks like the proxy denying it rather than
-# a proxy that was never reached. On a platform whose microsandbox routes guests through a
-# real bridge/tap address instead, name that interface (comma-separated for several):
-#     SILKGATE_PROXY_BIND=<address>[,<address>] silkgate up ...
+# Both loopback families: the guest's /etc/hosts also maps the alias to IPv6, and
+# getaddrinfo prefers it. With a v4-only listener, curl's [::1] connection dies on a reset
+# that looks like a proxy deny. If your microsandbox routes guests through a real bridge
+# address, name it: SILKGATE_PROXY_BIND=<address>[,<address>] silkgate up ...
 PROXY_BINDS = tuple(a.strip() for a in
                     os.environ.get("SILKGATE_PROXY_BIND", "127.0.0.1,::1").split(",")
                     if a.strip())
@@ -461,9 +448,8 @@ PROXY_BINDS = tuple(a.strip() for a in
 def _modes(port):
     """`--mode` arguments placing one regular-proxy listener per bind address on `port`.
 
-    A mode spec carries its own listen address, which is the only way to bind more than
-    one. Its grammar splits host from port at the last colon, so an IPv6 literal goes in
-    bare — brackets would be read as part of the hostname and fail to resolve.
+    One mode per address is the only way to bind several. The spec splits host from port
+    at the last colon, so an IPv6 literal goes in bare: brackets would fail to resolve.
     """
     args = []
     for addr in PROXY_BINDS:
@@ -490,12 +476,9 @@ def _probe_addr(port):
 
 
 def _port_free(port):
-    """Whether `port` can still be bound on every bind address — asked by binding, the
-    exact claim mitmdump is about to make. This runs before a proxy is spawned because
-    the readiness probe cannot ask it: a connect says only that someone answers, and a
-    proxy already squatting the port answers in the milliseconds before a fresh mitmdump
-    gets anywhere near its own bind (SO_REUSEADDR so a closed connection's TIME_WAIT
-    does not read as a squatter)."""
+    """Whether `port` can be bound on every bind address, asked by binding, as mitmdump
+    will. The readiness probe can't answer this: a squatter answers a connect before a
+    fresh mitmdump even binds. SO_REUSEADDR keeps a TIME_WAIT from reading as a squatter."""
     for host in PROXY_BINDS:
         try:
             with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as s:
@@ -507,11 +490,9 @@ def _port_free(port):
 
 
 def _port_in_use_error(port):
-    """Why `port` cannot be taken, naming the holder when identity can be read for it.
-    The shared proxy is that one holder — whoever answers its control socket is named
-    by the kernel — and the usual one: orphaned, it keeps all sixteen pool ports. The
-    name is worth more than any downstream symptom; unnamed, this collision surfaced
-    as session-mode 403s inside a verify guest, three layers from the cause."""
+    """Why `port` can't be taken, naming the holder when it's the shared proxy (it answers
+    its control socket). That's the usual holder: an orphaned proxy keeps all sixteen pool
+    ports. Unnamed, the collision surfaces as 403s inside a verify guest, far from its cause."""
     ident = _proxy_ident()
     pool = (read_proxy() or {}).get("ports") or []
     if ident is not None and (not pool or port in pool):
@@ -524,12 +505,9 @@ def _port_in_use_error(port):
 def _find_free_pool(base_port):
     """The lowest free POOL_SIZE-wide port range at or above base_port.
 
-    Walks forward one port at a time, skipping past each occupied port, so a
-    single-port occupant such as an orphaned verify or proxy process shifts the
-    pool to base_port+1 rather than all the way to base_port+POOL_SIZE. Scans a
-    window of 5*POOL_SIZE ports starting at base_port, clamped so no probe goes
-    past 65535 (bind() raises OverflowError above that, which _port_free does
-    not read as busy); dies naming every blocker if no range is found."""
+    Steps one port at a time, so a single occupied port shifts the pool by one, not by
+    POOL_SIZE. Scans 5*POOL_SIZE ports, never past 65535, where bind() raises instead of
+    reading as busy. Dies naming every blocker if no range is free."""
     if base_port + POOL_SIZE - 1 > 65535:
         die(f"base port {base_port} leaves no room for a {POOL_SIZE}-port pool "
             f"({base_port}..{base_port + POOL_SIZE - 1} runs past port 65535)")
@@ -557,13 +535,11 @@ _BIND_FAILURE = b"address already in use"
 
 
 def _wait_proxy_ready(proc, ports, log_path):
-    """Block until the mitmdump just spawned answers on every advertised address, and
-    die — stopping it — when it cannot. Both of its output streams point at the log
-    file, so its bind errors go nowhere else: the loop reads the log and fails the
-    moment the EADDRINUSE appears, with the log's tail, rather than as a bare timeout
-    fifteen seconds later; a child that exits instead is caught by poll() the same
-    way. The ports are only probed, never treated as identity — the caller checked
-    them free before the spawn, which is what lets a listener stand for our own."""
+    """Block until the new mitmdump answers on every address, or stop it and die.
+
+    Its output goes only to the log, so the loop watches the log and fails on the first
+    EADDRINUSE, with the log's tail, not after a 15 s timeout. poll() catches a child that
+    exits. The caller checked the ports free before the spawn, so a listener is ours."""
     deadline = time.monotonic() + PROXY_READY_TIMEOUT
     addr = _probe_addr(ports[0])
     while True:
@@ -587,13 +563,11 @@ def _wait_proxy_ready(proc, ports, log_path):
         time.sleep(0.2)
 
 
-# Retention for ~/.silkgate/logs. Every proxy start writes a fresh proxy-<stamp>.log —
-# the single-ruleset paths a .rules snapshot beside it — and nothing else ever removes
-# one. The audit trail is what post-incident review leans on, so unbounded growth and
-# silent deletion are both wrong; pruning therefore favours keeping: a file is removed
-# only when it is BOTH older than the retention age AND beyond the newest LOG_RETAIN_COUNT
-# of its kind, every removal is announced, and SILKGATE_LOG_RETAIN_DAYS=0 keeps everything
-# (archive elsewhere if the trail must outlive the machine).
+# Retention for ~/.silkgate/logs. Each proxy start writes a new proxy-<stamp>.log, plus a
+# .rules snapshot on the single-ruleset paths. The audit trail backs incident review, so
+# pruning favors keeping: a file goes only when it's BOTH older than the retention age AND
+# beyond the newest LOG_RETAIN_COUNT of its kind. Every removal is announced, and
+# SILKGATE_LOG_RETAIN_DAYS=0 keeps everything.
 LOG_RETAIN_DAYS = 30
 LOG_RETAIN_COUNT = 20
 # Capture files hold conversation content — bulkier and more sensitive than audit
@@ -635,12 +609,10 @@ def _prune_kind(pattern, cutoff, live):
 def _prune_logs():
     """Apply the retention policy above; runs where log files are created.
 
-    The log a live proxy is writing is safe twice over: proxy.json names it (checked
-    here), and being written keeps its mtime inside the retention age — so even a
-    foreground proxy another silkgate process started, which has no proxy.json, cannot
-    lose its log while it runs. Two age knobs, one per sensitivity — the audit kinds on
-    LOG_RETAIN_DAYS, capture files on CAPTURE_RETAIN_DAYS — and a knob at 0 (or less)
-    turns retention off for its own kinds alone."""
+    A live proxy's log is safe twice: proxy.json names it, and writes keep its mtime fresh,
+    which also covers a foreground proxy with no proxy.json. Audit kinds age on
+    LOG_RETAIN_DAYS, capture files on CAPTURE_RETAIN_DAYS. A knob at 0 or less turns off
+    retention for its own kinds only."""
     _proxy_meta = read_proxy() or {}
     live = {Path(v) for k in ("log", "events", "capture") if (v := _proxy_meta.get(k))}
     pruned = 0
@@ -663,11 +635,10 @@ def _prune_logs():
 def start_proxy(rules_text, port):
     """Start a single-ruleset mitmdump in the background; return (proc, audit log path).
 
-    The port is checked free before the spawn and the child watched after it — see
-    _port_free and _wait_proxy_ready — because a bare connect cannot tell this proxy
-    from a squatter: an orphaned shared proxy on the port once answered the probe here
-    while the mitmdump it vouched for died unread in its log, and the verify guest ran
-    against the wrong proxy's ruleset."""
+    The port is checked free before the spawn, and the child watched after it
+    (_port_free, _wait_proxy_ready), because a bare connect can't tell this proxy from a
+    squatter. An orphaned proxy would answer while ours died, and a verify guest would run
+    under the wrong ruleset."""
     mitmdump = which("mitmdump", "pip install mitmproxy")
     if not _port_free(port):
         die(_port_in_use_error(port))
@@ -708,11 +679,9 @@ def stop(proc):
 class _guarded_terminal:
     """Restore this terminal's settings afterwards, whatever the child did to them.
 
-    A child handed a real terminal may put it in raw mode — msb does, for its own progress
-    rendering — and a child that dies, or exits without restoring, leaves the shell with no
-    echo or no output post-processing, which then outlives the command and mangles everything
-    printed after it until `stty sane`. Cheap insurance: snapshot before, put it back after.
-    Does nothing when stdout is not a terminal, which is every captured or piped run.
+    A child may put the terminal in raw mode (msb does), and one that dies without restoring
+    it leaves the shell mangled until `stty sane`. So: snapshot before, restore after. Does
+    nothing when stdout isn't a terminal.
     """
 
     def __enter__(self):
@@ -734,12 +703,10 @@ class _guarded_terminal:
 
 
 def wait_foreground(proc):
-    """The child owns the terminal: Ctrl-C reaches it directly (same process group), so
-    the parent must survive SIGINT to clean up afterwards. A Python-level handler is not
-    inherited across exec, so the child's own SIGINT behavior is untouched. A child that
-    dies by a signal is reported the way a shell would report it — 128 plus the signal
-    number, 130 for Ctrl-C — because the negative code proc.wait() returns would reach
-    sys.exit, which reads it as a status byte and mangles it."""
+    """Wait for a child that owns the terminal. Ctrl-C reaches it directly, so the parent
+    survives SIGINT to clean up. A Python handler isn't inherited across exec, so the child's
+    SIGINT behavior is untouched. A signal death returns 128 plus the signal, as a shell
+    would, since sys.exit mangles proc.wait()'s negative code."""
     previous = signal.signal(signal.SIGINT, lambda *a: None)
     try:
         rc = proc.wait()
@@ -751,16 +718,12 @@ def wait_foreground(proc):
 class _deferred_interrupts:
     """Hold SIGINT/SIGTERM/SIGHUP while an unwind runs, restoring them after.
 
-    A second Ctrl-C landing mid-teardown would abort it halfway — a session
-    half-removed, which is worse than either fully up or fully gone. So the stop
-    signals are noted, acknowledged once on stderr, and dropped: by the time one
-    lands here, the unwind is already doing what the signal asks for. Deferral
-    without an escape hatch is safe only because everything under it is bounded —
-    the msb calls in _remove_sandbox carry a timeout and run outside the terminal's
-    process group (so the Ctrl-C being deferred cannot kill the very child doing
-    the removing), and stop_proxy escalates to SIGKILL after 5s. The note is written
-    with os.write because print into a buffer the interrupted line was mid-flush on
-    raises rather than reenters."""
+    A second Ctrl-C mid-teardown would leave a session half-removed, worse than up or
+    gone. So stop signals are acknowledged once on stderr and dropped: the unwind already
+    does what they ask. That's safe only because everything under it is bounded: the msb
+    calls in _remove_sandbox time out and run outside the terminal's process group, and
+    stop_proxy escalates to SIGKILL after 5 s. The note uses os.write, because print into a
+    buffer mid-flush raises."""
 
     _SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
@@ -806,14 +769,12 @@ def msb_argv(image, cmd, port, *, pull_never=True, mounts=()):
 def ensure_ca():
     """Return a guest-safe copy of the CA *certificate*, generating the CA on first use.
 
-    ~/.mitmproxy also holds mitmproxy-ca.pem — the private key, which is the whole reason
-    the proxy can be trusted — so nothing here ever hands out that directory. Callers get
-    a directory containing the public cert alone, safe to mount or copy into an image.
+    ~/.mitmproxy also holds the private key, so that directory is never handed out.
+    Callers get a directory with the public cert alone.
 
-    Generation opens no socket: mitmdump writes the CA into confdir during startup, so
-    `--no-server` plus an addon that shuts the master down once startup completes is a
-    one-shot that leaves the CA behind without ever listening — a listener here would be
-    a bare proxy with no addon and no rules, open for as long as the wait takes.
+    Generation opens no socket: `mitmdump --no-server`, with an addon that exits once
+    startup is done, writes the CA and never listens. A listener here would be a proxy
+    with no rules.
     """
     if not MITM_CA.is_file():
         mitmdump = which("mitmdump", "pip install mitmproxy")
@@ -848,17 +809,13 @@ def ensure_ca():
 _DOCKER_PLATFORMS = {"arm64": "linux/arm64", "aarch64": "linux/arm64",
                      "x86_64": "linux/amd64", "amd64": "linux/amd64"}
 
-# What silkgate itself needs of any guest: the CA it terminates TLS with, in the system
-# trust store and in the env vars runtimes read; a shell and mkfifo/mktemp for the live
-# output relay (coreutils, already in the base); and /workspace as the working directory.
+# What silkgate needs of any guest: its CA in the trust store and in the env vars runtimes
+# read, a shell plus mkfifo/mktemp for the output relay, and /workspace.
 #
-# Which file each variable points at is not interchangeable. NODE_EXTRA_CA_CERTS is additive,
-# so it names the CA alone. The others *replace* the default root store for the stacks that
-# read them (OpenSSL and everything on it, rustls, Go), so they name the system bundle that
-# `update-ca-certificates` just regenerated — Debian's roots **and** ours. Pointing those at
-# the bare CA instead is trust the guest does not need and a build that cannot run: these
-# variables are set for every later layer, and a profile's setup.sh installs from the real
-# internet over the host's network, outside the proxy, where nothing presents our CA.
+# NODE_EXTRA_CA_CERTS adds to the defaults, so it names our CA alone. The others replace
+# the root store (OpenSSL, rustls, Go), so they name the regenerated system bundle: Debian's
+# roots and ours. The bare CA would break every later layer's setup.sh, which downloads
+# from the real internet, outside the proxy.
 _BASE_LAYER = """FROM {base}
 RUN apt-get update \\
     && apt-get install -y --no-install-recommends ca-certificates \\
@@ -888,11 +845,9 @@ def _image_profiles(profiles):
 def image_ref(profiles, base=BASE_IMAGE):
     """`silkgate/<slug>:<hash12>` — slug to read, hash to be exact.
 
-    The hash covers the base, the _BASE_LAYER template, and, per profile in order, its
-    name, resolved version, declared packages, and the bytes of its setup/rules/env —
-    rules as the template bytes on disk, so the hash and the slug exclude any arg.
-    Editing any of those is a different image, so a stale cache hit can't happen;
-    reordering is a different image too, since layers stack.
+    The hash covers the base, _BASE_LAYER, and per profile, in order: its name, version,
+    packages, and the bytes of setup.sh, rules.txt (as templates, so args don't count),
+    and env. Any edit or reorder makes a new image, so a cache hit is never stale.
     """
     profiles = _image_profiles(profiles)
     h = hashlib.sha256(base.encode())
@@ -943,12 +898,10 @@ def write_build_context(directory, profiles, base):
 def docker_env():
     """Env for our docker calls, with a config that has no credential helper.
 
-    Everything we build comes from public images, so credentials are never needed — but a
-    `credsStore` in the user's config makes the CLI shell out to that helper anyway, and on
-    macOS a helper reading its app's data trips the "would like to access data from other
-    apps" prompt on every build. Point DOCKER_CONFIG at our own directory instead; CLI
-    plugins are discovered relative to it, so link theirs in or buildx disappears. An
-    explicit DOCKER_CONFIG in the environment is left alone — that's a deliberate choice.
+    Builds use public images only, but a `credsStore` in the user's config still calls its
+    helper, which on macOS prompts for access on every build. So DOCKER_CONFIG points at our
+    own directory, with the user's CLI plugins linked in, or buildx disappears. An explicit
+    DOCKER_CONFIG is left alone.
     """
     if os.environ.get("DOCKER_CONFIG"):
         return None
@@ -1006,18 +959,16 @@ def ensure_image(profiles, image, *, base=BASE_IMAGE):
 
 
 # --- what the guest is told about itself --------------------------------------
-# Generated per session, not written by hand: silkgate already knows the profiles, the
-# ruleset and the mount, and a hand-kept file would drift from them immediately. This is
-# a courtesy to a cooperating agent — it saves turns wasted on things the sandbox forbids
-# — and never a control: an adversarial guest ignores it, so nothing may rely on it.
+# Generated per session from the profiles, ruleset, and mounts, so it can't drift. It saves a
+# cooperating agent wasted turns. It's never a control: a hostile guest ignores it.
 
 def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, checkout=None,
                     brief=False):
-    """The markdown a guest is handed about its own sandbox. `mounts` is the validated
-    -v list as (host, guest, mode) triples; the active mode — branch, checkout, or the
-    mode of a mount at /workspace — keys the workspace sentence, and every other mount
-    is listed with its own. `brief` says a --brief file landed at GUEST_BRIEF, so the
-    guest is pointed at it before anything else."""
+    """The markdown a guest gets about its own sandbox.
+
+    `mounts` is the validated -v list as (host, guest, mode). The workspace text follows
+    the active mode: branch, checkout, or a /workspace mount's mode. `brief` means a brief
+    landed at GUEST_BRIEF, so the guest is pointed at it first."""
     lines = [
         "# Where you are: a silkgate sandbox",
         "",
@@ -1237,12 +1188,9 @@ def _new_sid(name):
     return f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{name}-{uuid4().hex[:6]}"
 
 
-# How much argv text one journal record may hold. The journal is the one archive
-# member with no cap of its own, and argv is its unbounded field (the operator's
-# whole prompt), so the record is bounded here the way the addon's _clip bounds
-# guest header text: cut at the limit with a "..." tail. A few KiB keeps any real
-# prompt's head readable while a supervisor loop of huge prompts costs megabytes,
-# never gigabytes.
+# How much argv text one journal record holds. argv carries the whole prompt, and the
+# journal has no other cap, so it's cut here with a "..." tail. A few KiB keeps a prompt's
+# head readable, and a loop of huge prompts costs megabytes, never gigabytes.
 _JOURNAL_ARGV_LIMIT = 8192
 
 
@@ -1263,15 +1211,12 @@ def _clip_argv(argv):
 def _journal(name, event, **fields):
     """Append one event record to a session's journal (journal.jsonl in its dir).
 
-    Observability is fail-open where enforcement stays fail-closed: the journal, the
-    output snapshot and the archive rename warn via say() and continue, because a
-    teardown must never be blocked by bookkeeping — so this never raises. Each record
-    is one JSON line landed with a single os.write on an O_APPEND descriptor, so
-    concurrent execs interleave whole records, never bytes.
+    Bookkeeping fails open, so this warns and never raises: a teardown must never block on
+    it. Each record is one os.write on an O_APPEND descriptor, so concurrent execs
+    interleave whole records, never bytes.
 
-    Privacy: an exec's argv contains the operator's prompt — recording it is the
-    feature, and _clip_argv bounds it so it cannot also be a growth path. Environment
-    variables appear as names only, never values.
+    argv holds the operator's prompt, on purpose, bounded by _clip_argv. Env vars appear
+    as names only.
     """
     _journal_into(session_dir(name), event, **fields)
 
@@ -1312,12 +1257,9 @@ def _end_exec(name, exec_id, rc):
 
 
 def _bracketed_exec(name, exec_id, run):
-    """run() under the exec_end guarantee: the bracket closes even when the run is
-    interrupted. The rc journaled for an interrupt is the shell convention where one
-    is known (Ctrl-C's KeyboardInterrupt is 130; a signal-driven SystemExit already
-    carries 128+signo) and null otherwise — null reads as "ended, status unknown",
-    distinct from an exec_start with no exec_end at all, which marks a crash of this
-    process."""
+    """run(), with an exec_end journaled even when it's interrupted. An interrupt records
+    the shell's rc (130 for Ctrl-C, 128+signo for a signal), or null when unknown. A
+    missing exec_end means this process crashed."""
     rc = None
     try:
         rc = run()
@@ -1391,11 +1333,10 @@ def _check_meta_fields(meta):
 def read_meta(name):
     """One session's meta.json, or None when there is no such session.
 
-    Every command that takes a session name reaches the registry through here, so this is
-    where the name is checked. Unchecked it is a path component of session_dir(), so a name
-    carrying '..' or a leading '/' reads a meta.json from outside the registry — and what
-    that file says then becomes msb argv ("sandbox") and an rmtree target ("name"). A meta
-    that disagrees with the directory it was found in is refused rather than used.
+    Every command that takes a session name comes through here, so this checks it. The
+    name is a path component, so '..' would read a meta.json from outside the registry,
+    and its fields become msb argv and an rmtree target. A meta that disagrees with its
+    directory is refused.
     """
     _validate_name(name)
     meta = _read_json(session_dir(name) / "meta.json")
@@ -1425,10 +1366,9 @@ def list_metas():
 def read_archived_meta(sid):
     """One archived session's meta.json, or None when no archive holds that sid.
 
-    The archive is read with read_meta's suspicion: the sid is a path component of
-    ARCHIVE_DIR, the meta must name the sid of the directory it was found in, and every
-    field check read_meta applies holds here too — the UI's diff puts archived meta
-    fields into git argv, so a planted one gets the same refusal a planted live one does."""
+    Read with read_meta's checks: the sid is a path component, the meta must name its own
+    directory's sid, and every field is checked, because the UI's diff puts archived meta
+    fields into git argv."""
     if not _SID_RE.fullmatch(sid or ""):
         die(f"invalid archive sid {sid!r}")
     meta = _read_json(ARCHIVE_DIR / sid / "meta.json")
@@ -1504,10 +1444,9 @@ def _peer_pid(sock):
 def _proxy_ident():
     """The pid of the live shared proxy, or None if nothing is — identity, not liveness.
 
-    Only the process bound to our control socket path can answer a ping there, and the
-    kernel names the peer of that connection; proxy.json is just a record that can
-    outlive (or misname) the process it describes. Returns 0 for a proxy that answered
-    but whose pid the kernel could not report."""
+    Only the process bound to our control socket can answer a ping, and the kernel names
+    that peer. proxy.json can outlive or misname its process. Returns 0 for a proxy that
+    answered but whose pid the kernel couldn't report."""
     if not PROXY_SOCK.exists():
         return None
     try:
@@ -1556,16 +1495,11 @@ def _clear_proxy_files():
 def start_shared_proxy(base_port, ports=None):
     """Start the detached multi-session mitmdump; write proxy.json; return its meta.
 
-    With no `ports` given, the first free POOL_SIZE-wide range at or above base_port
-    is used (see _find_free_pool), so a single-port occupant such as an orphaned
-    verify or proxy listener shifts the pool forward without needing a manual kill or
-    --port override. `ports` is the pool a restart must reuse verbatim because
-    sessions still pin it (see _pinned_pool, which checked every one free under the
-    same lock). Either way every chosen port is checked free before the spawn —
-    mitmdump binds them all or exits — and readiness then means every one of them
-    answering, with the child and its log watched throughout (see start_proxy for why
-    a bare connect proves the wrong thing). proxy.json appears only once that holds,
-    so no reader ever meets the record of a proxy that never came up."""
+    Without `ports`, the pool is the first free range at or above base_port
+    (_find_free_pool). `ports` is a pool a restart must reuse, because sessions pin it
+    (_pinned_pool). Either way, every port is checked free before the spawn, and ready
+    means all of them answer, with the child and its log watched (see start_proxy).
+    proxy.json appears only then, so it never records a proxy that didn't come up."""
     mitmdump = which("mitmdump", "pip install mitmproxy")
     if ports is None:
         ports = _find_free_pool(base_port)
@@ -1615,14 +1549,11 @@ def ensure_proxy(base_port):
 def _pinned_pool(meta):
     """The exact port pool a proxy restart must reuse, or None when it may float.
 
-    A guest freezes its proxy port at provision time — the proxy URL in its env and
-    the Tier-1 net-rule both name that one port — so a pool that lands anywhere else
-    strands every surviving session on a port nothing answers, and whoever binds the
-    stranded port afterwards receives that guest's traffic. While any session meta or
-    live port claim survives, a restart therefore reuses the recorded pool verbatim,
-    dying on any port of it now occupied; _find_free_pool scans only when nothing
-    survives. Caller holds _proxy_lock and calls this before the stale proxy record
-    is cleared — the record is where the pool is read from."""
+    A guest's proxy port is fixed at creation, in its env and its Tier 1 rule. A moved
+    pool would strand it, and whoever binds the old port later gets its traffic. So while
+    any session or port claim survives, a restart reuses the recorded pool exactly, and
+    dies if a port is taken. The caller holds _proxy_lock and calls this before the old
+    proxy record, where the pool is read from, is cleared."""
     owners = {}
     for m in list_metas():
         if m.get("port"):
@@ -1696,12 +1627,10 @@ def stop_proxy(meta):
         _clear_proxy_files()
 
 
-# A pool port is claimed the moment it is picked, by an O_EXCL marker file in here — not
-# by the session's meta.json, which appears only when _provision_session renames the
-# staged dir into place, long after the port was chosen. The claim is what makes "the
-# port is spoof-proof session identity" hold under concurrency; metas alone are a TOCTOU
-# where two `up`s pick the same port and the addon polices one guest with the other's
-# ruleset. The dot prefix keeps the addon's registry from reading claims as sessions.
+# A pool port is claimed when it's picked, by an O_EXCL marker here, long before the
+# session's meta.json exists. Without the claim, two concurrent `up`s could pick one port,
+# and the addon would police one guest with the other's ruleset. The dot prefix keeps the
+# addon from reading claims as sessions.
 
 def _port_claims_dir():
     return SESSIONS_DIR / ".ports"
@@ -1783,11 +1712,9 @@ def pick_port(proxy, name):
                 _claim_path(p).unlink(missing_ok=True)   # leftover; reaped under the lock
                 if not _claim_port(p, name):
                     continue
-            # `down <last>` may have stopped the proxy between our caller's ensure_proxy
-            # and the claim above. The claim is visible to stop_proxy from here on, so
-            # one re-check under the same lock closes that window for good. The claim
-            # also pins the restarted pool (see _pinned_pool), but p is checked against
-            # the fresh record rather than trusting that invariant at a distance.
+            # A `down <last>` may have stopped the proxy since ensure_proxy. stop_proxy sees
+            # the claim from here on, so one re-check under the lock closes that window. p
+            # is checked against the fresh record, not trusted to _pinned_pool.
             if not _proxy_running():
                 fresh = _ensure_proxy_locked(proxy["base_port"])
                 if p not in (fresh.get("ports") or ()):
@@ -1846,11 +1773,9 @@ def _wait_control_sock(timeout, pid=None):
 def _push_secrets(ruleset, session):
     """Push every inject_auth secret we hold in the env, scoped to `session`.
 
-    The proxy keeps one store per session, so this environment is the only place its
-    secrets can come from.  A secret that is absent or malformed is warned about and
-    skipped rather than dying: the session comes up, and the guest's CONTEXT.md lists
-    the credential status so an operator (or the agent itself) can act on the warning
-    instead of discovering missing credentials mid-task.
+    The proxy keeps one store per session, so this environment is its only source. A
+    missing or malformed secret warns and is skipped: the session still comes up, and the
+    guest context reports the credential's status.
     """
     names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
     for n in names:
@@ -1870,13 +1795,11 @@ def _push_secrets(ruleset, session):
 def _guest_credential_env(profiles):
     """The dummy credential each profile plants in its guest, as `KEY=VALUE` env pairs.
 
-    The proxy replaces only a header the guest already sends, so the guest must send the
-    header the host secret names. A profile's `guest_credential = <secret>` names that
-    secret, and each `guest_credential.<header>` line gives the env pair whose client sends
-    <header>. The host secret's header picks the line. An absent, malformed, or unlisted
-    secret falls back to the first line, so the guest still sends a header the proxy can
-    deny with the real reason in the audit record. Only the header's name decides: no part
-    of the secret's value reaches the guest.
+    The proxy only replaces a header the guest sends, so the guest needs the dummy whose
+    client sends the header the host secret names. `guest_credential = <secret>` names the
+    secret, and each `guest_credential.<header>` line gives that header's dummy. A missing,
+    malformed, or unlisted secret falls back to the first line, so the proxy can still deny
+    with the real reason. Only the header's name decides, never the value.
     """
     env = []
     for p in profiles:
@@ -1928,32 +1851,24 @@ def msb_exec_argv(sandbox, cmd, *, tty=False, env=()):
 
 
 # --- Tier-1 probe -------------------------------------------------------------
-# Everything here rests on one external assumption: that msb's --net-default-egress /
-# --net-rule flags still mean what they meant when this design was verified. That grammar
-# is pre-1.0 and unpinned, and nothing else checks it at runtime — an msb that parses the
-# flags but enforces less would leave every session wide open while silkgate reports
-# success. So no session is handed over until a probe inside the just-created guest has
-# shown the deny is real. It is a canary against a silently-lax msb, not a boundary: a
-# hostile --image controls the shell that prints the verdict, but the image is the caller's
-# choice, and at probe time the guest has run nothing else.
+# Tier 1 rests on msb's --net-default-egress and --net-rule flags meaning what they did when
+# verified. msb is pre-1.0, and an msb that parses the flags but enforces less would leave
+# every session open while silkgate reports success. So no session is handed over until a
+# probe inside the new guest shows the deny is real. It's a canary, not a boundary: a hostile
+# --image controls the shell that prints the verdict, but the caller chose that image.
 
 def tier1_probe_cmd(port):
     """The in-guest probe command: two bounded connects, one verdict token on stdout.
 
-    Both connects use bash's /dev/tcp (every silkgate-built image has bash and coreutils
-    from the debian base; verify_guest.sh leans on the same pair) and neither involves
-    DNS — an IP literal and an /etc/hosts alias — so `timeout` bounds the only slow path,
-    a dropped SYN:
+    Both use bash's /dev/tcp, with no DNS (an IP literal and an /etc/hosts alias), so
+    `timeout` bounds the one slow path, a dropped SYN:
 
-      - TIER1_PROBE_TARGET must NOT connect. It is a live public service, so if the
-        host-side deny is missing the connect plainly succeeds -> TIER1_LEAK. A refusal
-        and a drop both count as denied.
-      - the session's own proxy port MUST connect, else TIER1_NOPROXY. This is what makes
-        the first result meaningful — the same machinery reaching the proxy shows the
-        failure above was a denial, not a broken probe — and the guest is promised a
-        working proxy, so a session that fails this was never usable anyway.
+      - TIER1_PROBE_TARGET, a live public service, must NOT connect, else TIER1_LEAK. A
+        refusal and a drop both count as denied.
+      - The session's proxy port MUST connect, else TIER1_NOPROXY. That proves the first
+        failure was a deny, not a broken probe, and the guest needs a working proxy anyway.
 
-    An image lacking bash or timeout reports TIER1_UNTESTABLE:<tool> instead of guessing.
+    An image without bash or timeout reports TIER1_UNTESTABLE:<tool>.
     """
     host, _, target_port = TIER1_PROBE_TARGET.partition(":")
     return ["sh", "-c",
@@ -1968,10 +1883,9 @@ def tier1_probe_cmd(port):
 def tier1_verdict(stdout, port, *, error=None):
     """Map one probe run to None (hand the session over) or the refusal message.
 
-    Only an explicit TIER1_OK from a clean run hands the session over. Everything else —
-    a leak, an unreachable proxy, a missing tool, an msb exec that failed or printed
-    something unrecognizable — refuses: the caller may be an agent that will never read
-    a warning, so "could not test" must not be allowed to look like "tested and held".
+    Only an explicit TIER1_OK from a clean run passes. Anything else refuses: the caller
+    may be an agent that never reads warnings, so "couldn't test" must never look like
+    "tested and held".
     """
     if error:
         return (f"could not run the Tier-1 probe ({error}); containment is unproven, and "
@@ -2009,20 +1923,12 @@ def tier1_fault(sandbox, port):
     of containment is the exact failure mode this exists to close.
     """
     argv = msb_exec_argv(sandbox, tier1_probe_cmd(port))
-    # stdin is closed: msb exec streams the caller's stdin to the guest and waits for
-    # EOF, the probe reads nothing, and a detached caller (a background shell, a cron
-    # job) hands over a pipe that never closes — the exec would sit out both timeouts
-    # below while the guest is healthy.
-    # In-guest waits are bounded at 1s each; 15s covers msb exec itself stalling. One
-    # stall has a known benign cause: msb 0.5.4's relay can silently swallow the FIRST
-    # exec after a sandbox create — it hands the new client slot 0 and the id range of
-    # create's own just-disconnected readiness client and never answers, so the exec CLI
-    # blocks forever while the guest is healthy (core.ready in ~170ms; waiting before the
-    # exec does not avoid it). Only that first client ever loses the race — a fresh exec
-    # client into a warm sandbox has not been seen to lose it — so a single retry with a
-    # new exec process recovers exactly the swallowed-request case. A second timeout, a
-    # nonzero exit, or a bad verdict token are answers, not swallowed requests, and are
-    # not retried.
+    # stdin is closed: msb exec waits for stdin EOF, and a detached caller's pipe never
+    # closes, so the exec would time out on a healthy guest.
+    # In-guest waits cap at 1 s each. 15 s covers msb exec itself stalling, which has one
+    # known benign cause: msb 0.5.4 can swallow the FIRST exec after a create, and never
+    # answer. Only that first exec loses, so one retry with a new exec process recovers it.
+    # A second timeout, a nonzero exit, or a bad verdict is an answer, and isn't retried.
     try:
         proc = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=15)
@@ -2079,15 +1985,13 @@ _OUT_TAG = b"\x1f"          # US: a stdout line
 _EXPORT_CONTEXT = ('[ -f %s ] && SILKGATE_CONTEXT=$(cat %s) && export SILKGATE_CONTEXT; '
                    % (GUEST_CONTEXT, GUEST_CONTEXT))
 
-# What a journaled exec leaves behind in the guest, prepended to the wrapper shell.
-# The header rides ANTHROPIC_CUSTOM_HEADERS — the SDK's escape hatch for extra request
-# headers — so the proxy can attribute an agent's API traffic to this exec; a value the
-# caller already set keeps its lines and the marker lands appended on a new one, never
-# clobbering. The pidfile is what the kill endpoint signals the process group by, and
-# the wrapper's own EXIT trap removes it — guest-side, so a persistent session's execs
-# dir never accumulates and the host pays no extra msb call; a missing pidfile then
-# means "already ended" to the kill endpoint. Both are best-effort: a guest that cannot
-# take them still runs its command, so the whole snippet swallows its own errors.
+# What a journaled exec sets up in the guest, before the wrapper shell:
+# - an X-Silkgate-Exec header in ANTHROPIC_CUSTOM_HEADERS, the SDK's hook for extra
+#   headers, so the proxy can attribute API traffic to this exec. A caller's existing
+#   value keeps its lines, and the marker goes on a new one.
+# - a pidfile, which the kill endpoint signals. The wrapper's EXIT trap removes it, so a
+#   missing pidfile means "already ended".
+# Both are best-effort: the snippet swallows its own errors, and the command still runs.
 def _exec_marker_sh(exec_id):
     if not exec_id:
         return ""
@@ -2109,12 +2013,10 @@ _RELAY_SH = (_EXPORT_CONTEXT
 def run_guest(build_argv, cmd, *, tty, on_line=None, exec_id=None):
     """Run a guest command and return its exit code.
 
-    Default (`--no-tty`): the command runs non-interactively with pipes for stdout/stderr,
-    and its output still arrives live, split across our own two streams — see _RELAY_SH.
-    With `-t` the command gets a real terminal instead, for a TUI — and with the terminal
-    the screen: nothing sits between it and the reader, so it can draw anything there,
-    including a line styled like say()'s. The voice mark only means something where the
-    guest's bytes pass through this process.
+    Without a TTY, the command gets pipes, and its output still arrives live, on our own
+    two streams (_RELAY_SH). With `tty`, it gets a real terminal for a TUI, and draws on the
+    screen directly, so it can imitate say(). The voice mark only holds where guest bytes
+    pass through this process.
 
     `exec_id` threads the exec marker into whichever wrapper shell runs (see
     _exec_marker_sh); None runs unmarked, as silkgate's own setup execs do.
@@ -2146,17 +2048,13 @@ def run_guest(build_argv, cmd, *, tty, on_line=None, exec_id=None):
 def _pty_relay(argv, *, demux, on_line=None):
     """Run argv with a PTY for its stdio and copy what it writes to our own streams.
 
-    `demux` splits the tagged lines back out (and drops terminal control bytes, insurance
-    against a program that colors regardless of not being on a terminal); without it the
-    bytes pass through for a TUI driven from a pipe — untouched but for RS, which no
-    terminal draws and say()'s mark relies on no guest getting into a capture.
+    `demux` splits the tagged lines back out and drops terminal control bytes. Without it,
+    bytes pass through for a TUI, except RS, which say()'s mark relies on.
 
-    SIGINT is ignored for the child's whole lifetime — wait_foreground's contract,
-    stretched to cover the relay loop: a Ctrl-C reaches the child through the terminal's
-    process group, and the parent stays to relay its dying output, reap it, and hand its
-    exit status back so the caller can clean up. A child still running on the way out —
-    an exit forced by SIGTERM, or a reader that closed our stdout mid-relay — is stopped
-    rather than orphaned against a sandbox its caller is about to remove.
+    SIGINT is ignored while the child runs, as in wait_foreground: Ctrl-C reaches the child
+    through the terminal, and the parent stays to relay its last output and return its
+    status. A child still running on the way out (SIGTERM, or our stdout closed) is
+    stopped, never orphaned against a sandbox about to be removed.
     """
     previous = signal.signal(signal.SIGINT, lambda *a: None)
     ptm, pts = os.openpty()
@@ -2198,12 +2096,9 @@ def _pty_relay(argv, *, demux, on_line=None):
 def _relay(line, *, newline, on_line=None):
     """Write one relayed line to our stdout, or to stderr if the wrapper tagged it so.
 
-    Only the leading byte routes; RS or US anywhere else is guest content and _plain
-    drops it. Untagged lines — msb's own noise, a wrapper that died before its loops
-    started — go to stdout, the stream that carries no claim of being silkgate's.
-
-    `on_line` sees the same cleaned text a reader does, so a caller that must parse the
-    stream reads what it shows rather than a second, differently-buffered copy of it.
+    Only the leading byte routes. RS or US anywhere else is guest content, and _plain
+    drops it. Untagged lines (msb's noise, a wrapper that died early) go to stdout, which
+    claims nothing. `on_line` sees the same cleaned text a reader does.
     """
     tag = line[:1]
     stream = sys.stderr.buffer if tag == _ERR_TAG else sys.stdout.buffer
@@ -2232,12 +2127,10 @@ def _find_git_dir(root):
     return None
 
 
-# Guest paths silkgate itself populates: the context file, scripts and the base.git mount
-# live under /silkgate, the LFS store is mounted at /root/lfsstore, and a branch session
-# clones into /root/gitdir. A -v mount at or under any of them would shadow or expose them;
-# one *above* them is as bad — it nests virtiofs over silkgate's mounts, and a branch
-# session's gitdir on a host directory hands the clone's hooks and config to that host
-# path. So the refusal runs in both directions.
+# Guest paths silkgate populates: /silkgate (context, scripts, base.git), /root/lfsstore, and
+# /root/gitdir (a branch session's clone). A -v at or under one would shadow it. One above
+# it is as bad: it nests virtiofs, and would put a branch clone's hooks on a host directory.
+# So the refusal runs both ways.
 _RESERVED_DSTS = ("/silkgate", "/root/lfsstore", "/root/gitdir")
 
 
@@ -2321,11 +2214,9 @@ def _mount_pair(src, dst, mode, *, allow_git_dir=False):
 def _mount_args(specs, *, allow_git_dir=False):
     """Every -v flag validated -> [(host, guest, mode)], in flag order.
 
-    The cross-mount guards live here: two mounts at one DST would be a silent
-    last-mount-wins inside the VMM, and one DST nested under another is nested virtiofs,
-    whose behavior is unverified — both are refused rather than trusted. --allow-git-dir
-    with nothing read-write to apply to is refused too: a flag accepted and ignored reads
-    as honoured.
+    Refused here: two mounts at one DST (the VMM silently keeps the last), a DST nested
+    under another (unverified nested virtiofs), and --allow-git-dir with no rw mount,
+    since a flag accepted and ignored reads as honored.
     """
     mounts = []
     for spec in specs or ():
@@ -2350,13 +2241,11 @@ def _mount_args(specs, *, allow_git_dir=False):
 def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, meta_extra,
                        context=None, context_paths=(), settings=None, settings_paths=(),
                        memory=None, cpus=None, brief=None):
-    """Stage the session dir then rename it into the registry, so its appearance is atomic:
-    the addon rescans on the sessions-dir mtime and must never see (and cache) a half-written
-    session. Boot the guest after. On failure, undo only what is ours: the staging dir, the
-    renamed dir if the rename was ours (never a racing winner's), the port claim, and — once
-    create ran — whatever sandbox msb half-registered; then the shared proxy, when the
-    failure leaves nothing needing it (_maybe_stop_proxy defers to other sessions and
-    live claims)."""
+    """Stage the session dir, rename it into the registry, then boot the guest.
+
+    The rename makes the session appear atomically, so the addon never caches a half-written
+    one. On failure, undo only what's ours: the staging dir, the renamed dir if we renamed
+    it, the port claim, any half-created sandbox, and the proxy if nothing else needs it."""
     sdir = session_dir(name)
     if sdir.exists():
         die(f"session already exists: {sdir}")
@@ -2420,12 +2309,11 @@ _MSB_TIMEOUT = 30
 
 
 def _remove_sandbox(sandbox):
-    """Best-effort `msb stop` then `msb rm`; True iff the sandbox is verifiably gone.
-    An rm failure is forgiven only when `msb list` no longer shows the name — rm also
-    fails for a sandbox that never registered, which is just as gone. The msb children
-    run in their own sessions: this is cleanup, and the terminal's Ctrl-C — aimed at
-    whatever silkgate was doing, and deferred by the callers here — must not kill the
-    removal mid-flight instead."""
+    """Best-effort `msb stop` then `msb rm`. True only if the sandbox is verifiably gone.
+
+    An rm failure counts as gone when `msb list` no longer shows the name, as for a sandbox
+    that never registered. The msb children run in their own sessions, so a Ctrl-C can't
+    kill the removal halfway."""
     msb = shutil.which("msb")
     if not msb or not sandbox:
         return False
@@ -2447,12 +2335,10 @@ def _remove_sandbox(sandbox):
     return not any(line.split()[:1] == [sandbox] for line in listed.stdout.splitlines()[1:])
 
 
-# What a session's archive keeps of the guest's captured output: the last stretch of
-# it, bounded twice — lines asked of msb (a request msb honors or not) and bytes
-# written (enforced: sliced before the write) — so a chatty guest cannot balloon its
-# own archive. The defaults hold a full agent session's transcript, and
-# ARCHIVE_RETAIN_COUNT snapshots still cost at most ~400 MiB. Each env knob takes a
-# positive integer; anything else keeps the default — a cap at 0 would be no cap.
+# How much guest output an archive keeps: the tail, bounded in lines (asked of msb) and in
+# bytes (enforced before the write), so a chatty guest can't balloon it. The defaults hold a
+# full agent transcript, and ARCHIVE_RETAIN_COUNT snapshots cost at most ~400 MiB. Each knob
+# takes a positive integer. Anything else keeps the default.
 _SNAPSHOT_TAIL_LINES = 20000     # SILKGATE_SNAPSHOT_TAIL_LINES
 _SNAPSHOT_MAX_BYTES = 8 << 20    # SILKGATE_SNAPSHOT_MAX_BYTES
 
@@ -2578,14 +2464,13 @@ def _maybe_stop_proxy():
 
 
 # --- checkout/branch sessions: a clone in the guest, from the host repo ---------
-# The guest clones from a read-only mount of the host repo's gitdir. --checkout stops there:
-# the clone lives at /workspace in the guest's own rootfs, detached at the resolved REF, and
-# dies with the VM — nothing returns to the host. --branch layers the deliverable on top: it
-# works a named branch in a host-derived workspace and hands commits back as a bundle the host
-# fetches under fsck and promotes fast-forward-only. A branch workspace mount holds zero git
-# metadata (GIT_DIR is rootfs-side), so there is nothing on the mount for a guest to rewrite;
-# the one writable piece of host git state is `.git/lfs` — content-addressed, SHA-verified on
-# read, so a hostile guest costs availability (a re-download), never integrity.
+# The guest clones from a read-only mount of the host repo's gitdir.
+# - --checkout: the clone lives in the guest's rootfs, detached at REF, and dies with the VM.
+# - --branch: a named branch in a host-derived workspace. Commits return as a bundle the host
+#   fetches under fsck and fast-forwards. The workspace mount holds no git metadata, so a
+#   guest has nothing there to rewrite.
+# The one writable piece of host git state is `.git/lfs`, which is SHA-checked on read: a
+# hostile guest can force a re-download, never swap content.
 
 _BRANCH_ENV = ("GIT_DIR=/root/gitdir/.git", "GIT_WORK_TREE=/workspace")
 _GIT_TIMEOUT = 120                 # host git during harvest: bounded, per the deferral contract
@@ -2641,10 +2526,9 @@ def _check_mount_flags(args):
 def _checkout_repo(flag, ref, profiles, env):
     """The validation --checkout and --branch share -> (git_dir, repo_root, base sha).
 
-    Everything here dies before any host process starts: the guest needs git in the image,
-    the enclosing repo must exist, and REF must name a commit to base the checkout on. The
-    -e refusal covers both modes — an inherited GIT_DIR/GIT_WORK_TREE would point every
-    guest git call away from the checkout this session exists to provide.
+    Dies before any host process starts unless: git is in the image, a repo encloses the
+    cwd, and REF names a commit. `-e GIT_DIR` or `GIT_WORK_TREE` is refused in both modes:
+    it would point every guest git call away from the checkout.
     """
     if not any(p.name == "git" for p in profiles):
         die(f"{flag} needs git in the guest — add --with git")
@@ -2680,10 +2564,9 @@ def _checkout_spec(ref, profiles, env):
 def _branch_spec(branch, profiles, env, ref="HEAD"):
     """Validate --branch against the enclosing repo; the meta extras a branch session records.
 
-    The repo and base-commit half is _checkout_repo's, shared with --checkout; `ref` is the
-    branch base (--checkout REF beside --branch names it, HEAD otherwise). The branch parts
-    die before any host process starts too: the name must be a legal single-level ref, and
-    the branch is this session's deliverable — an existing one is refused, never moved.
+    _checkout_repo checks the repo and base. `ref` is the branch base (--checkout REF, or
+    HEAD). The name must be a legal ref, and an existing branch is refused, never moved:
+    the branch is the deliverable.
     """
     if branch.startswith("-") or any(c.isspace() or ord(c) < 0x20 for c in branch):
         die(f"invalid branch name {branch!r}")
@@ -2780,11 +2663,10 @@ def _setup_branch_guest(sandbox, branch, base, session):
         die("guest git setup failed — session torn down")
 
 
-# Runs once per plain-checkout session, between the Tier-1 gate and the handover. /workspace
-# is not a mount here, so this is a normal clone with .git inside it — no GIT_DIR/GIT_WORK_TREE
-# env pair anywhere. Identity is set so local commits do not fail; the detached HEAD makes
-# "no deliverable branch" structural rather than advisory. lfs.storage is set before the
-# checkout so the smudge of an LFS-tracked tree reads the mounted store.
+# Runs once per --checkout session, after the Tier 1 probe. /workspace isn't a mount here, so
+# it's a normal clone with .git inside. An identity lets local commits work. The detached
+# HEAD makes "no deliverable branch" structural. lfs.storage is set before the checkout, so
+# LFS smudge reads the mounted store.
 _CHECKOUT_SETUP_SH = """\
 set -eu
 base=$1; session=$2
@@ -2848,10 +2730,9 @@ def _bundle_in_guest(meta):
 def _ingest_bundle(meta, bundle, tip):
     """Fetch the guest's bundle under fsck and fast-forward the branch, or say why not.
 
-    The promote is one compare-and-swap: old value = what the last harvest ingested, or
-    must-not-exist on the first. That single step refuses a host branch someone else moved
-    and a guest that rewrote already-harvested history — the branch only ever fast-forwards,
-    and refused commits stay reachable at the staging ref."""
+    The promote is one compare-and-swap against what the last harvest ingested (or
+    must-not-exist, the first time). It refuses a branch someone else moved and rewritten
+    history. Refused commits stay at the staging ref."""
     name, branch, git_dir = meta["name"], meta["branch"], meta["git_dir"]
     staging = f"refs/silkgate/{name}/{branch}"
     kept = f"the bundle stays at {bundle}; the workspace is kept"
@@ -3030,11 +2911,8 @@ def cmd_doctor(args):
 def cmd_proxy(args):
     """One ruleset, one port, in the foreground — for guests silkgate doesn't manage.
 
-    Binds PROXY_BINDS like the other two proxy entry points: loopback, both families,
-    by default — each listener is an allowlist plus header-triggered credential
-    injection, which no LAN peer was ever meant to reach. A guest on another machine
-    needs a host interface it can route to; name it (and nothing wider) with
-    SILKGATE_PROXY_BIND=<address> — see the note above PROXY_BINDS.
+    Binds PROXY_BINDS, loopback by default, like every proxy entry point. For a guest on
+    another machine, name one routable interface with SILKGATE_PROXY_BIND=<address>.
     """
     profiles = resolve_profiles(args.with_ or [])
     rules_text = compose_rules(profiles, args.rule or [])
@@ -3233,13 +3111,10 @@ def _exec_brief_fields(name, sandbox, exec_id, flag_path):
     """Resolve, store and land one exec's brief; the fields its exec_start record
     carries, or {} when no brief applies.
 
-    The exec's own --brief wins (source "flag"); the session default (up --brief,
-    brief.md in the session dir) covers an exec without one (source "default"),
-    re-landed every time so an earlier exec's flag brief cannot shadow it. The
-    resolved bytes are stored at briefs/<exec_id>.md beside the journal record that
-    names them, and GUEST_BRIEF always shows the newest exec's brief. Failures die
-    here, host-side, before the exec runs: a command sent without the brief it was
-    promised would report success over the wrong ask."""
+    The exec's own --brief wins (source "flag"). Otherwise, the session default from
+    `up --brief` applies (source "default"), copied in again so an older brief can't
+    linger. The bytes are stored at briefs/<exec_id>.md. A failure dies host-side before
+    the exec: a command without its brief would succeed at the wrong task."""
     data, source = _read_brief(flag_path), "flag"
     if data is None:
         try:
@@ -3260,12 +3135,11 @@ def _exec_brief_fields(name, sandbox, exec_id, flag_path):
 
 
 def _observability_meta(args, rules_text, brief):
-    """Recording-only meta fields: the rest of the ask, kept for the journal, the
-    archive and the UI — never an enforcement input. env_names holds names alone,
-    because values can be secrets. base_ref is the operator's own spelling of the base,
-    display only, beside the resolved sha "base" already pins. rules_sha256 ties the
-    session to the exact ruleset text it ran under. `brief` here is the session
-    default (up's --brief); a per-exec brief is journaled on its exec instead."""
+    """Meta fields for the record only (journal, archive, UI), never for enforcement.
+
+    env_names holds names, never values. base_ref is the base as typed, for display.
+    rules_sha256 ties the session to its exact ruleset. `brief` is up's default brief:
+    per-exec briefs go on their exec records."""
     meta = {"env_names": sorted({p.partition("=")[0] for p in args.env}),
             "allow_git_dir": bool(args.allow_git_dir),
             "rules_sha256": hashlib.sha256(rules_text.encode()).hexdigest()}
@@ -3294,12 +3168,10 @@ def _context_for(args, profiles, ruleset, mounts, *, persistent):
 
 
 # --- the settings projection: the host's model configuration, forwarded ---------
-# Claude Code reads settings files at three ranks, lowest first: ~/.claude/settings.json
-# (user), <project>/.claude/settings.json (project), <project>/.claude/settings.local.json
-# (local) — and an env var (an "env" block entry in any of them) outranks every direct key
-# in every file. The projection resolves the host's answer once, host-side, and hands the
-# guest that answer alone, so an agent inside defaults to the same model and reasoning
-# effort as the host.
+# Claude Code reads three settings files, lowest rank first: user (~/.claude/settings.json),
+# project (.claude/settings.json), local (.claude/settings.local.json). An "env" block entry
+# in any of them beats every direct key. The host resolves its answer once, and the guest
+# gets only that, so it defaults to the host's model and effort.
 
 # The host's user-rank settings file. The project and local files come from the host
 # directory that becomes /workspace.
@@ -3334,11 +3206,9 @@ def _read_settings(path):
 def _resolve_settings(workspace, user_settings):
     """At most {model, effortLevel}: the answer the host's own Claude Code would reach.
 
-    Both inputs are paths the caller hands in — `workspace` is the host directory that
-    becomes /workspace (None when no host directory does), `user_settings` the host's
-    user-rank file — so tests never read the real home directory. Per key the first
-    match wins, ranks read highest first: env-block values (local, project, user), then
-    direct keys in the same order.
+    `workspace` is the host directory mounted at /workspace (or None), and `user_settings`
+    the user-rank file, both passed in so tests never read the real home. Per key, the
+    first match wins: env-block values (local, project, user), then direct keys, same order.
     """
     files = []                                   # highest rank first
     if workspace:
@@ -3369,9 +3239,7 @@ def _settings_for(args, profiles, workspace):
     """(settings JSON text, where to put it in the guest) — or (None, ()) with
     --no-settings, with no profile naming a settings_path, or with neither key resolved.
 
-    Fail closed: nothing is staged and nothing is copied unless a profile consumes it
-    (`settings_path` in profile.conf, the settings twin of context_path) AND at least
-    one of the two keys resolves on the host.
+    Nothing is staged unless a profile has a `settings_path` AND a key resolves on the host.
     """
     if args.no_settings:
         return None, ()
@@ -3439,12 +3307,9 @@ def cmd_up(args):
         elif spec:
             _setup_checkout_guest(sandbox_name(name), spec["base"], name)
     except BaseException:
-        # A session `up` never handed over is unwound whole, interrupt included:
-        # nothing of the user's is in the guest yet — work accrues only once
-        # exec/attach run, after `up` returns, and a derived workspace holds nothing
-        # but the fresh checkout — while a session left behind would hide that the
-        # command failed. The unwind defers the stop signals so a second Ctrl-C
-        # cannot leave it half-removed.
+        # A session `up` never handed over is removed whole, interrupt included: nothing
+        # of the user's is in it yet, and one left behind would hide the failure. Stop
+        # signals are deferred, so a second Ctrl-C can't leave it half-removed.
         with _deferred_interrupts():
             if provisioned:
                 # A session never handed over leaves nothing worth archiving.
@@ -3501,13 +3366,11 @@ def cmd_attach(args):
 
 
 def _down_session(meta):
-    """The one way a handed-over session ends — cmd_down and the UI's down endpoint
-    both run this. Harvest first: the guest's gitdir dies with the VM, and a retried
-    down harvests again — new commits fast-forward the branch; nothing new is a quiet
-    no-op. True iff a failed harvest kept the workspace. The removal holds the stop
-    signals: a Ctrl-C partway through would leave the session half-removed, the one
-    state worse than up or gone (off the main thread the deferral is a no-op — no
-    signal lands there)."""
+    """End a handed-over session: cmd_down and the UI's down both run this.
+
+    Harvest first, since the guest's gitdir dies with the VM. A retried down harvests
+    again, a no-op without new commits. Returns True if a failed harvest kept the
+    workspace. Stop signals are deferred during removal (a no-op off the main thread)."""
     with _deferred_interrupts():
         keep = bool(meta.get("branch")) and not _harvest_branch(meta)
         _teardown_session(meta)
@@ -3671,12 +3534,10 @@ def _logs_guest(args, meta):
             die(f"cannot read guest logs for {args.name!r}: {err}")
         _emit(lines)
         return
-    # Follow: seed `printed` to the whole current log's length so history never reprints,
-    # then each poll re-fetches from a FIXED start (the whole log, an append-only string)
-    # and emits only the suffix past `printed`. --tail/--since shape the first view only:
-    # --tail is a pure offset into `full`; --since needs msb's clock, so we ask msb how
-    # many recent lines it counts and offset by that (fetching `full` first keeps it from
-    # dropping/duplicating anything appended between the two calls).
+    # Follow: `printed` starts at the current log's length, and each poll re-fetches the
+    # whole append-only log and prints the suffix. --tail and --since shape the first view
+    # only. --since needs msb's clock, so msb counts the recent lines, after `full` is
+    # fetched, so nothing appended between the calls is lost or doubled.
     full, err = _run_msb_logs(sandbox)
     if err is not None:
         die(f"cannot read guest logs for {args.name!r}: {err}")
@@ -3846,13 +3707,10 @@ def cmd_secret_ls(args):
 
 
 # --- ui: a local web view over the events files -------------------------------------
-# `silkgate ui` serves ui/ and three JSON endpoints on 127.0.0.1 — the host's browser
-# and nothing else: the trail has no auth, a guest's Tier-1 rules allow only its own
-# proxy port, and the LAN never sees a loopback bind. The server holds no state about
-# the trail itself: history is a filtered read of the retained events-*.jsonl files,
-# the live view is a byte-offset tail of the one the proxy is writing, and the
-# allow/response join happens client-side on `id` — which is what lets a dropped
-# stream resume from a plain Last-Event-ID instead of a server-side session.
+# `silkgate ui` serves ui/ and its JSON endpoints on 127.0.0.1, with no auth: no guest can
+# reach a host port beyond its own proxy port. The server keeps no trail state: history is
+# a filtered read of the events files, live is a byte-offset tail, and the client joins
+# allow and response on `id`. So a dropped stream resumes from a plain Last-Event-ID.
 
 UI_DIR = REPO / "ui"
 DEFAULT_UI_PORT = 8642       # clear of the proxy pool (8090..8105) and common dev ports
@@ -3895,11 +3753,9 @@ def _events_files(pattern="events-*.jsonl"):
 def _event_passes(rec, filters):
     """Whether one parsed record survives the /api/events filters.
 
-    `session` compares exactly, with "null" selecting unattributed records (a deny on
-    an unclaimed pool port carries session: null); `host` is a case-folded substring,
-    mirroring the UI's filter box; `method` compares case-folded; `since`/`until` are
-    offset-aware datetimes, and a record whose `ts` cannot be parsed — or is naive —
-    fails a time filter rather than slipping past it."""
+    `session` is exact, and "null" selects unattributed records. `host` is a case-folded
+    substring, `method` case-folded. `since`/`until` are aware datetimes, and a record
+    whose `ts` is unparsable or naive fails a time filter, never slips past it."""
     since, until = filters.get("since"), filters.get("until")
     if since is not None or until is not None:
         try:
@@ -3955,23 +3811,18 @@ def _events_history(filters, limit, pattern="events-*.jsonl"):
 class _EventsTailer:
     """Byte-offset tail of the live events file, one poll at a time.
 
-    The handler owns the socket, the sleep and the serialization; this owns which file
-    is live and how far into it the client has read, which is what makes the stream
-    testable without a server. `poll` takes the current proxy.json each pass — the
-    caller re-reads it, following _logs_audit — and answers ("reset"|"record",
-    payload, cursor) tuples. A cursor is "<events-file name>:<offset past the line>",
-    doubling as the SSE frame id, so a reconnecting client resumes mid-file.
+    This tracks which file is live and how far the client has read, so the stream tests
+    without a server. `poll` takes the current proxy.json and yields ("reset"|"record",
+    payload, cursor). A cursor, "<file>:<offset>", doubles as the SSE id.
 
-    Resets: a proxy restart swaps the events path → adopt the new file from 0 (it just
-    started, so replaying it is cheap and complete); in-place truncation → same file
-    from 0; a start cursor naming anything but the live file → the live file's EOF,
-    since the client refetches history on reset and history covers the gap. No proxy
-    at all yields nothing — the caller keeps polling and heartbeating, so a `down`
-    followed by an `up` flows into the same open stream.
+    | Event | Resumes at |
+    |---|---|
+    | the proxy restarted (new events path) | the new file, from 0 |
+    | the file was truncated | the same file, from 0 |
+    | a cursor names another file | the live file's EOF. The client refetches history. |
+    | no proxy | nothing yet, and a later `up` flows into the same stream |
 
-    `meta_key` names which proxy.json entry holds the live file — "events" for the
-    audit trail, "capture" for the capture trail — and is the whole difference
-    between the two streams."""
+    `meta_key` picks the proxy.json entry: "events" or "capture"."""
 
     def __init__(self, cursor=None, meta_key="events"):
         self._path = None                        # nothing live seen yet
@@ -4061,11 +3912,9 @@ _DIFF_BUSY = set()               # idents with a diff in flight: one guest git a
 def _resolve_ident(ident):
     """(meta, state, session dir) for a live name or an archived sid, or three Nones.
 
-    The ident is validated before it is ever a path component: a live name must pass
-    read_meta's bar, an archived sid read_archived_meta's. Both die() on a planted
-    meta — in a server thread that refusal becomes a plain not-found answer instead
-    of killing the thread. A name that also parses as a sid (possible for short
-    session names) resolves live-first: live names are the operator's handles."""
+    The ident is checked before it's a path: by read_meta for a name, read_archived_meta
+    for a sid. Their die() on a planted meta becomes a not-found here, not a dead thread.
+    A name that also parses as a sid resolves live first."""
     if _NAME_RE.fullmatch(ident or ""):
         try:
             meta = read_meta(ident)
@@ -4098,17 +3947,13 @@ def _brief_entry(path, source):
 
 
 def _session_briefs(meta, state, sdir):
-    """The briefs map for /api/session: one entry per exec that had a brief (keyed
-    by exec_id, from briefs/<exec_id>.md), the session default under "default", and
-    the workspace fallback under "workspace". Empty when there is no brief anywhere.
+    """The briefs map for /api/session: per exec_id, plus "default" and "workspace".
 
-    Per-exec sources — "flag" for an exec's own --brief, "default" for the session
-    default it inherited — come from the journal's exec_start records; an exec whose
-    record was lost reads as "flag". Reserved keys cannot collide: an exec_id is
-    eight hex characters. The fallback stays a fallback: <workspace>/BRIEF.md
-    appears only for a live session with no operator-authored brief at all, and
-    stays untrusted — guest-writable, so the source label is the warning, a symlink
-    is never followed, and the workspace path passed _check_meta_fields on read."""
+    Each exec's source ("flag" or "default") comes from its exec_start record, and a lost
+    record reads as "flag". exec_ids are 8 hex chars, so the two reserved keys can't
+    collide. "workspace" (<workspace>/BRIEF.md) appears only for a live session with no
+    operator brief. It's guest-writable, so its label is the warning, and symlinks aren't
+    followed."""
     sources = {}
     for rec in _read_journal(sdir / "journal.jsonl"):
         if rec.get("event") == "exec_start" and rec.get("brief_source"):
@@ -4167,13 +4012,9 @@ def _session_output(meta, state, sdir, tail):
 _DIFF_TIMEOUT = 30
 _DIFF_MAX_BYTES = 2 << 20
 
-# One in-guest pass for /api/session/<ident>/diff: what changed since the base, both
-# staged-or-not (status) and as a patch (diff against $1). The split marker keeps the
-# two apart in one exec round-trip. Both gits run --no-pager (GIT_PAGER=cat as the
-# second lock on any config-forced pager): a pager here blocks the exec against
-# _DIFF_TIMEOUT and draws its chrome — `--More--`, `(END)` — on the guest console,
-# which `msb logs` and the session's output snapshot read. This endpoint's output
-# must reach the host on the exec channel alone, never the console.
+# One in-guest pass for /api/session/<ident>/diff: status, then a patch against $1, split
+# by a marker. Both gits run with --no-pager and GIT_PAGER=cat: a pager would block until
+# _DIFF_TIMEOUT and draw `(END)` on the guest console, which the output snapshot reads.
 _DIFF_SH = """\
 set -eu
 GIT_PAGER=cat; export GIT_PAGER
@@ -4240,18 +4081,13 @@ def _run_msb_metrics():
 
 
 def _metrics_snapshot():
-    """The /api/metrics payload, behind a 2 s TTL cache under one lock: N open tabs
-    cost one msb subprocess per TTL, not one each — the lock makes the racers wait
-    on the one runner and then read its answer. An empty registry skips the
-    subprocess outright, and a failed run is cached like a good one, so a hung msb
-    is not re-poked every poll.
+    """The /api/metrics payload, behind a 2 s TTL cache under one lock, so N tabs cost one
+    msb call per TTL. An empty registry skips msb, and a failure is cached like a success,
+    so a hung msb isn't re-poked every poll.
 
-    Each row is msb's own entry keyed to the session, with one honest rename: msb's
-    memory gauge is the VMM process's host-side RSS — real memory the sandbox costs,
-    not guest usage, and legitimately above the guest cap at times — so it is served
-    as `memory_rss_bytes`, a name no consumer can mistake for a fraction of the cap.
-    `memory_limit_bytes` stays its own independent field for the UI to render or
-    not; the endpoint never frames the two as a ratio."""
+    Each row is msb's entry, with one rename: msb's memory gauge is the VMM's host-side RSS,
+    not guest usage, and can exceed the guest cap. So it's `memory_rss_bytes`, never framed
+    as a ratio of `memory_limit_bytes`."""
     with _METRICS_LOCK:
         now = time.monotonic()
         if (_METRICS_CACHE["at"] is not None
@@ -4304,9 +4140,8 @@ def _search_trail(query, session, limit):
     JSONL lines, newest file first and newest line first within a file, early-exited
     at `limit` results and at a scanned-bytes ceiling.
 
-    Growth trigger: this is a bounded linear scan, good for the trails one operator
-    accumulates. When the ceiling starts truncating routine queries, the next step
-    is an SQLite index over these same files — not a query language on the scan."""
+    A bounded linear scan fits one operator's trails. If the ceiling starts truncating
+    routine queries, add an SQLite index over the same files."""
     needle = query.casefold()
     results, scanned = [], 0
     for path, source in _search_files():
@@ -4418,18 +4253,14 @@ def _kill_in_guest(meta, exec_id):
 def _ui_server(port):
     """The bound, threaded HTTP server behind `silkgate ui`; the caller runs it.
 
-    Threads, because one open SSE stream on a plain HTTPServer would block every other
-    request; daemon threads, so main()'s os._exit(130) on Ctrl-C reaps the open
-    streams. Every response carries nosniff + a self-only CSP: the UI must not be able
-    to send the trail anywhere, even if a record smuggles markup.
+    Threaded, because one open SSE stream would block a plain HTTPServer. Daemon threads,
+    so Ctrl-C's os._exit reaps open streams. Every response sends nosniff and a self-only
+    CSP: even a record that smuggles markup can't send the trail anywhere.
 
-    Security model: no auth, by decision — the 127.0.0.1 bind is the boundary, since
-    only processes on this host can connect, and the guests' Tier-1 rules keep them
-    off every host port. The server must never bind beyond loopback; remote use is an
-    SSH tunnel to it, and a future --bind flag requires token auth first. Inside that
-    boundary the remaining callers are the host's own browsers, so every request is
-    held to a loopback Host header (a DNS-rebound page carries its own hostname) and
-    any Origin present must be loopback too (a cross-site page always sends its own).
+    No auth, by design: the 127.0.0.1 bind is the boundary, and Tier 1 keeps guests off
+    every host port. Never bind beyond loopback. Remote use is an SSH tunnel, and a future
+    --bind needs token auth first. Against the host's own browsers, every request needs a
+    loopback Host (a DNS-rebound page sends its own) and a loopback Origin, if present.
     """
     # Local imports: only this command needs an HTTP server, and every `silkgate exec`
     # would otherwise pay for importing one.
@@ -4461,13 +4292,11 @@ def _ui_server(port):
             self._reply(code, "application/json", json.dumps(obj).encode())
 
         def _guarded(self):
-            """Whether this request came from this host's own browser pointed at this
-            server. The Host header must name loopback — a DNS-rebound page reaches
-            127.0.0.1 with its own hostname in Host, so it fails here — and an Origin,
-            when a browser sends one, must be loopback too. Browsers always send
-            Origin on cross-origin POSTs, so a hostile page's POST can never look
-            first-party: that is the defense for everything below that spawns
-            `msb exec` or tears a session down."""
+            """Whether this request came from this host's browser, pointed at this server.
+
+            Host must be loopback, which a DNS-rebound page fails. A present Origin must be
+            loopback too, and browsers always send it on cross-origin POSTs. That guards
+            every endpoint that runs `msb exec` or tears a session down."""
             loopback = ("127.0.0.1", "localhost", "::1")
             try:
                 host = urllib.parse.urlsplit("//" + (self.headers.get("Host") or ""))
@@ -4819,11 +4648,9 @@ def cmd_ui(args):
 
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
 # the https probes can complete. The CA is mounted in, since nothing is baked here.
-# -q sets apt's quiet level explicitly rather than leaving it to apt's own tty detection,
-# which asks about the *guest's* stdout, not ours: with a terminal there it draws a progress
-# meter that repaints with \r and pads with spaces, and none of that survives being read line
-# by line on this side. One -q drops the meter and keeps the Get:/Fetched lines, which are the
-# part worth reading when a probe tool fails to install.
+# -q is explicit because apt's tty detection asks about the guest's stdout, and a terminal
+# there gets a \r-repainting meter that's unreadable line by line. One -q drops the meter
+# and keeps the Get:/Fetched lines, which explain a failed install.
 FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
               "apt-get -q update && "
               "apt-get -q -o Dpkg::Use-Pty=0 install -y --no-install-recommends"
@@ -4832,13 +4659,11 @@ FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
               "update-ca-certificates && ")
 
 
-# verify_guest.sh scores numbered checks and reports which of them ran. A check that did not
-# run proves nothing, so the set that ran is asserted rather than a count of passes — nine
-# SKIPs and two PASSes is not containment.
+# verify_guest.sh reports which checks ran. A check that didn't run proves nothing, so the
+# set that ran is asserted, not a count of passes.
 #
-# Which checks exist, and which of them a BARE guest must produce, are read off the script
-# rather than restated here. Every check there opens with a declaration line naming what it
-# needs installed:
+# The checks, and which ones a bare guest must run, are read from the script. Each check
+# opens with a line naming what it needs installed:
 #
 #     # CHECK 7 tools:ip — root routes around the boundary
 #     # CHECK 3 tools:none — direct TCP/443 to a raw IP
@@ -4848,16 +4673,12 @@ FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
 # moves it out of the bare set by itself. Check 7, for example, needs `ip`, which only
 # `--full` installs.
 #
-# A `subject:<capability>` field on the same line declares the one other thing a check may
-# report: UNAVAILABLE, for a guest that observably lacks what the check would probe (a v6
-# check on a platform with no v6 path has no subject, which is neither a pass nor a skip).
-# The permission is derived here for the same reason the tool sets are: _verify_shortfall
-# refuses an unavailable claim from any check whose declaration names no subject, so a
-# verdict that means "nothing to test" can never creep in as an output string alone.
+# A `subject:<capability>` field lets a check report UNAVAILABLE, when the guest lacks what
+# it would probe (a v6 check with no v6 path). _verify_shortfall refuses UNAVAILABLE from a
+# check that declares no subject, so "nothing to test" can't slip in as a bare string.
 #
-# If the script cannot be read at all, the sets come out empty and _verify_shortfall refuses
-# the run rather than blessing whatever the guest reported. Nothing else in this CLI needs
-# them, so an unrelated command still works.
+# If the script can't be read, the sets are empty and _verify_shortfall refuses the run.
+# Other commands don't need them, and still work.
 _VERIFY_SCRIPT = REPO / "test" / "verify_guest.sh"
 _CHECK_DECL = re.compile(r"^#\s*CHECK\s+(\d+)\s+tools:(\S+)(?:\s+subject:(\S+))?", re.M)
 
@@ -4930,18 +4751,14 @@ def _verify_shortfall(passed, failed, ran, skipped, unavailable=frozenset(), *, 
 
 
 # --- verify: evidence outside the guest ---------------------------------------------------
-# Everything above renders verify's verdict from two lines the GUEST printed, and checks 1/2
-# prove only that *a* proxy answered on that port: a guest running arbitrary code can print
-# both lines, and a guest that reached some other listener passes them honestly. What follows
-# is the host's own record of the same run — the audit log this run's proxy wrote, a listener
-# that either receives a packet or does not, and an HTTP endpoint that records the header that
-# actually arrived. None of the three can be produced from inside the guest.
+# Everything above trusts two lines the GUEST printed, and a hostile guest can print them.
+# The oracles are the host's own record of the same run, which no guest can produce: the
+# run's audit log, a listener that does or doesn't receive a packet, and an endpoint that
+# records the header that arrived.
 #
-# Each oracle reports problems as (kind, text): "observed" means the host saw something that
-# must not happen (a packet arrived, a credential was added, a refused method got through) and
-# "unproven" means the evidence that should corroborate the guest's verdict is missing. The two
-# read differently on purpose — a failed check is a boundary result, while a silent audit log
-# is a broken oracle, and pointing a reader at the boundary for the second wastes the trip.
+# Each oracle reports (kind, text). "observed": the host saw something forbidden (a packet,
+# an added credential). "unproven": corroborating evidence is missing. A failed check is a
+# boundary result, a silent audit log is a broken oracle, so they read differently.
 
 _VERIFY_IMAGE = "debian"                  # the guest verify boots; bare, so probes stay honest
 
@@ -4959,22 +4776,18 @@ _VERIFY_AUTH_HEADER = "x-api-key"         # the header the guest sends and the s
 _RECORDER_HOST = "localhost"
 _RECORDER_PATH = "/verify/record"
 
-# The two hosts the guest's proxy-path checks reach, named here so a missing audit record can
-# say which guest line it was supposed to corroborate. The first is the probe profile's own
-# allowance (profiles/probe/rules.txt) and check 1's target; the second is check 2's. They live
-# in test/verify_guest.sh, which this file does not own — a run whose script changed them fails
-# the audit assertion naming the host it expected, which is a one-line fix here.
+# The hosts checks 1 and 2 reach (check 1's is profiles/probe/rules.txt's), so a missing
+# audit record can name its check. They mirror test/verify_guest.sh: if it changes them,
+# the audit assertion fails naming the expected host.
 _VERIFY_ALLOWED_HOST = "registry.npmjs.org"
 _VERIFY_UNLISTED_HOST = "evil.com"
 # What control 0 asks the proxy for: a host no ruleset allows, so it is refused from the proxy's
 # own memory. The record it produces is the only host-side evidence a *bare* run leaves.
 _VERIFY_CONTROL_HOST = "silkgate.invalid"
 
-# Verify guests are named so an interrupted run can be cleaned up afterwards: `msb run` left
-# the sandbox registered when its client died, and two were found alive from earlier runs. The
-# pid in the name is what makes a leftover identifiable as one — a name whose pid is gone had
-# no owner left to remove it. The prefix cannot collide with a session's sandbox, which
-# sandbox_name() always prefixes `sg-`.
+# Verify guests are named, so an interrupted run's guest can be removed later. The pid in the
+# name marks a leftover: if that pid is gone, nobody owns it. The prefix can't collide with
+# session sandboxes, which start with `sg-`.
 _VERIFY_GUEST_RE = re.compile(r"silkgate-verify-(\d+)-(?:main|leaky)\Z")
 
 
@@ -4985,12 +4798,10 @@ def _verify_guest_name(kind):
 def _verify_msb_argv(sandbox, port, *, mounts=()):
     """`msb create` argv for a named verify guest whose only egress is one proxy port.
 
-    Named, and therefore removable — which is why this is a `create` + `exec` + `rm` guest
-    rather than the one-shot `msb run` verify used to take: `stop()` on an `msb run` kills the
-    client and leaves the sandbox it created running, holding a Tier-1 rule and a port
-    allowance that collides with the next run's proxy. The flag shape is msb_argv's, so the
-    policy under test is the one every session gets, and this is the only place that emits it —
-    the negative control derives its own from this one, through _leaky_argv.
+    A named `create` + `exec` + `rm` guest, because stopping an `msb run` client leaves its
+    sandbox running, with a port allowance the next run collides with. The flags are
+    msb_argv's, so verify tests the policy every session gets. _leaky_argv derives the
+    negative control from this.
     """
     argv = [_msb(), "create", _VERIFY_IMAGE, "--name", sandbox]
     for m in mounts:
@@ -5037,9 +4848,8 @@ def _create_verify_guest(sandbox, port, *, mounts=(), leaky=False, why=""):
 def _drop_verify_guest(sandbox, guests):
     """Remove one verify guest now, keeping it in `guests` if it is not verifiably gone.
 
-    _remove_sandbox is the sessions' treatment — stop, then rm, forgiving a failed rm only
-    when `msb list` no longer shows the name — and a guest that survives it is not a tidiness
-    problem: it holds a Tier-1 rule and a port allowance the next verify collides with.
+    Uses _remove_sandbox, as sessions do. A guest that survives isn't just untidy: its port
+    allowance collides with the next verify.
     """
     if _remove_sandbox(sandbox):
         guests.discard(sandbox)
@@ -5099,10 +4909,9 @@ def _port_holder(port):
 def _oracle_bind(port, socktype, what):
     """Bind `port` on every address the proxy listens on, or die naming the holder.
 
-    The same addresses (PROXY_BINDS), because that is where guest->host traffic lands:
-    microsandbox delivers it over loopback, and the guest's /etc/hosts hands out the v6 alias
-    address first — an oracle bound to one family could be silent because the guest chose the
-    other one, which is the failure mode that looks exactly like containment.
+    PROXY_BINDS, because guest traffic lands there, and the guest tries the v6 alias first.
+    An oracle on one family could stay silent because the guest used the other, which would
+    look exactly like containment.
     """
     socks = []
     for addr in PROXY_BINDS or ("127.0.0.1",):
@@ -5124,16 +4933,13 @@ def _oracle_bind(port, socktype, what):
 class _ArrivalObserver:
     """A host listener — TCP and UDP — on a port the guest's Tier-1 rule does not allow.
 
-    Nothing else in silkgate ever sees a packet reach the host: every containment verdict is
-    the guest reporting that it heard nothing, and for UDP the guest cannot even do that (a
-    sendto to a denied destination succeeds and no ICMP comes back). This is the other end of
-    the wire. The port stays out of the allow rule, so the policy shape is a real session's —
-    an arrival here is the rule being wider than `tcp:<proxy port>`, not an artefact of asking.
+    Every other verdict is the guest saying it heard nothing, and for UDP it can't even
+    tell (a denied sendto succeeds silently). This is the wire's other end. The port stays
+    out of the allow rule, so an arrival means the rule is wider than `tcp:<proxy port>`.
 
-    Nothing is read while the guest runs: a pending connection waits in the accept backlog and
-    a datagram in the socket buffer until drain() takes them, so the evidence needs neither a
-    thread nor good timing. Silence is allowed to mean something only after self_test() has
-    shown these very sockets receiving their own token, on every address and both protocols.
+    Nothing is read during the run: connections wait in the backlog, datagrams in the
+    buffer, until drain(). Silence counts only after self_test() shows these sockets
+    receive their own token, on every address and protocol.
     """
 
     def __init__(self, port):
@@ -5247,10 +5053,9 @@ def _observer_problems(arrivals, *, bound, self_token, guest_token, port, proxy_
 def _recorder_rules(port):
     """The one verify-only rule that puts the recording endpoint in the guest's reach.
 
-    Deliberately narrow, and deliberately in no shipped profile: it is the "host loopback
-    service in reach" hazard, scoped to one port, one path prefix and one method, composed here
-    and nowhere else. POST only, so the same fixture settles method enforcement; no `q:` and no
-    `h:`, so query and header stripping stay live; no max_body, so the default (no body) holds.
+    It's the "host loopback service in reach" hazard, so it's narrow and in no profile: one
+    port, one path, POST only (which also tests method enforcement). No `q:`, `h:`, or
+    max_body, so stripping and the no-body default stay live.
     """
     return (f"# --- verify only: the host-side Tier-2 recorder, port {port} ---\n"
             f"{_RECORDER_HOST}:{port}{_RECORDER_PATH}/** POST "
@@ -5260,14 +5065,10 @@ def _recorder_rules(port):
 class _HeaderRecorder:
     """A host-loopback HTTP endpoint that RECORDS what arrived and reflects nothing.
 
-    This is what makes "full code execution in the guest cannot steal the API key" testable
-    against the real proxy instead of a stub: the guest sends a request carrying a dummy
-    credential, the host holds a sentinel, and the header the endpoint receives says which one
-    went upstream. Recording rather than reflecting is what keeps that sound — the answer is
-    204 and nothing else, so the assertion happens here and the guest learns nothing. That is
-    also why this is not the reflector the docs warn against: the warning protects a real
-    credential from a destination nobody controls, and this destination is a socket on the
-    host, allowlisted for one port and one path, for one run.
+    It tests "guest code execution can't steal the key" against the real proxy: the guest
+    sends a dummy credential, the host holds a sentinel, and the header that arrives says
+    which went upstream. It answers 204 and nothing else, so the guest learns nothing. It's
+    not the reflector the docs warn about: it holds a sentinel, not a real key, for one run.
     """
 
     def __init__(self, port):
@@ -5341,11 +5142,9 @@ def _clip_oracle(text, limit=200):
 def _recorder_problems(records, *, token, port):
     """(problems, summary) for what the recording endpoint received.
 
-    Two sentinels moving in opposite directions decide it. The guest's token must appear in
-    nothing that arrived — it is in the query, in the dummy credential and in an extra header,
-    so one absent string covers query stripping, header hygiene and the value the guest tried
-    to send. The host's sentinel must be the value of the auth header on the request that sent
-    one, and must be absent from the request that did not.
+    Two sentinels decide it. The guest's token, sent in the query, the dummy credential, and
+    an extra header, must appear in nothing that arrived. The host's sentinel must be the
+    auth header's value on the request that sent one, and absent from the one that didn't.
     """
     by_path = {}
     for rec in records:
@@ -5403,16 +5202,13 @@ def _recorder_problems(records, *, token, port):
 def _oracle_guest_script(*, proxy_port, observer_port, recorder_port, token):
     """The probes the guest runs for the host-side oracles: tool-free bash, one line each.
 
-    Tool-free on purpose — /dev/tcp, /dev/udp and printf, nothing installed, no CA trust — so
-    these run on the bare image the default `verify` uses and the recorder is exercised over
-    plain absolute-form HTTP through the proxy, which is the path the addon's `request` hook
-    decides. Every literal is baked in here, so the script quotes nothing dynamic.
+    Only /dev/tcp, /dev/udp, and printf, so they run on the bare image, over plain HTTP
+    through the proxy. Every literal is baked in, so nothing dynamic is quoted.
 
-    The observer probes go to a host port Tier 1 denies: a refusal is the guest's own evidence
-    (the errno, which the script keeps rather than discarding), and the observer's silence is
-    the host's. The three recorder requests carry the guest's token where the ruleset must
-    strip it, a dummy credential where the host's sentinel must replace it, no credential
-    where none may be added, and a method the rule forbids.
+    The observer probes hit a port Tier 1 denies: the guest's errno is its evidence, the
+    observer's silence the host's. The recorder requests carry the token where it must be
+    stripped, a dummy where the sentinel must replace it, no credential where none may be
+    added, and a forbidden method.
     """
     alias, req = PROXY_ALIAS, f"http://{_RECORDER_HOST}:{recorder_port}{_RECORDER_PATH}"
     host_hdr = f"Host: {_RECORDER_HOST}:{recorder_port}"
@@ -5469,10 +5265,9 @@ def _oracle_report(lines):
 def _probe_problems(report, *, observer_port):
     """(problems, summary) for what the guest says its probes did.
 
-    The observer's silence is only evidence once the guest confirms it sent: a UDP send that
-    never left is silence for the wrong reason. A TCP refusal is the expected outcome and is
-    itself evidence — it carries the errno that separates a boundary decision from a guest
-    whose stack had no route — so `blocked` there is a pass, while a missing line is not.
+    The observer's silence counts only once the guest confirms it sent. A TCP refusal is the
+    expected result, and its errno separates a boundary decision from a missing route. So
+    `blocked` passes, and a missing line doesn't.
     """
     problems, notes = [], []
     for proto in ("tcp", "udp"):
@@ -5517,10 +5312,8 @@ def _probe_problems(report, *, observer_port):
 def _audit_records(text):
     """The addon's JSON audit records out of a proxy log, in order.
 
-    mitmdump stamps every line with its own `[HH:MM:SS.mmm] ` prefix and prints connection
-    chatter of its own, so drop everything before the first brace and require a parse — the
-    same reading `logs --audit` does, without the session filter (verify runs one ruleset,
-    where the addon records no session).
+    Drops mitmdump's timestamp prefix and its own chatter: everything before the first brace,
+    and any line that doesn't parse. Like `logs --audit`, without the session filter.
     """
     records = []
     for line in text.splitlines():
@@ -5653,13 +5446,10 @@ _NEGATIVE_CONTROL_CHECK = 3        # direct TCP to a live public service: what `
 def _negative_control_problem(contained, leaky):
     """(problem or None, summary) for the same script run in a guest that really leaks.
 
-    The entry condition is one named check failing there, not a count: a future msb that
-    accepted `--net-default-egress allow` and enforced deny anyway would leave every check
-    passing in both guests, and reading that as "the checks work" is the exact inversion this
-    control exists to prevent. So a leaky guest whose check 3 still passes proves nothing and
-    says so. Beyond that, checks that passed in both guests are named rather than judged —
-    the proxy-path ones are supposed to pass in both, and which of the rest can be explained
-    is a reader's call, not this function's.
+    Check 3 must fail there, by name, not by count: an msb that accepted `allow` and still
+    enforced deny would pass every check in both guests, which must not read as "the checks
+    work". Checks that passed in both guests are listed, not judged: the proxy-path ones
+    should.
     """
     got = leaky.get(_NEGATIVE_CONTROL_CHECK, "no line")
     if got != "FAIL":
@@ -5680,10 +5470,9 @@ def _negative_control_problem(contained, leaky):
 class _VerifyOracles:
     """The host-side half of one verify run: ports bound here, evidence read here.
 
-    Built before the proxy starts, because the recorder's port has to be in the ruleset the
-    proxy is handed and every port must be proven free before a mitmdump is spawned. Closed
-    before the negative control's leaking guest boots: that guest may legitimately reach host
-    loopback, and an arrival nobody asked for is precisely what the observer reports.
+    Built before the proxy, whose ruleset needs the recorder's port, and whose ports must be
+    free first. Closed before the leaky guest boots, which may legitimately reach the
+    observer.
     """
 
     def __init__(self, proxy_port):
@@ -5751,11 +5540,9 @@ class _VerifyOracles:
 def _oracle_die(problems, log_path):
     """Refuse the run, with the loudest framing the problems justify.
 
-    An "observed" problem is the host having seen containment or enforcement fail, which
-    outranks everything the guest said; an "unproven" one is the oracle itself not being
-    trustworthy, which must not be reported as a boundary failure — that would send a reader
-    to msb's flags when the fault is in the audit path, the ruleset or which proxy the guest
-    reached.
+    "observed" means the host saw enforcement fail, which outranks what the guest said.
+    "unproven" means an oracle can't be trusted, and must not read as a boundary failure:
+    the fault is in the audit path, the ruleset, or which proxy the guest reached.
     """
     observed = [text for kind, text in problems if kind == "observed"]
     unproven = [text for kind, text in problems if kind == "unproven"]
@@ -5776,14 +5563,10 @@ def _oracle_die(problems, log_path):
 
 
 def _verify_port(port):
-    """The proxy port one verify run listens on: the operator's --port verbatim when given
-    (start_proxy still dies if it is taken — an explicit port that collides must fail
-    loudly, not silently move), else the base of the first free POOL_SIZE-wide range at
-    or above DEFAULT_BASE_PORT. Verify binds three ports — the proxy's plus the two
-    oracle ports beside it (_oracle_port, offsets 1 and 2) — and the pool scan proves
-    POOL_SIZE consecutive ports free at the base it returns, which covers all three; it
-    also walks past a shared proxy holding the default pool, so verify never contends
-    with live sessions for 8090."""
+    """The proxy port for one verify run: --port as given (a taken one fails, never moves),
+    else the base of the first free POOL_SIZE range. Verify needs three ports, the proxy's
+    and the two oracles' after it, and the pool scan proves them free. It also skips past a
+    shared proxy's pool, so verify never contends with live sessions."""
     return port if port is not None else _find_free_pool(DEFAULT_BASE_PORT)[0]
 
 
@@ -5802,14 +5585,9 @@ def cmd_verify(args):
         mounts.append(f"{ensure_ca().parent}:/mnt/ca:ro")
         script = FULL_SETUP + script
 
-    # The same relay every other guest command uses, for the same two reasons and one more.
-    # msb forwards output as it happens only when it has a terminal of its own, and it decides
-    # what to give the guest the same way — so reading msb through a plain pipe means the whole
-    # run arrives at once, while handing it this terminal means everything inside formats for a
-    # screen (apt's progress meter, msb's cursor moves) and leaves the terminal in raw mode
-    # afterwards. The relay resolves both: msb gets a PTY, the command inside gets pipes and
-    # /dev/null. The third reason is ours — the parse below then reads exactly the cleaned text
-    # a human sees, rather than a separately buffered copy of it.
+    # The same relay as every guest command: msb streams live only with a terminal, and a
+    # real one would make everything inside format for a screen. msb gets a PTY, the command
+    # pipes. The parse below then reads the same cleaned text a human sees.
     found, lines, report = {}, [], {}
 
     def note(text):
@@ -5960,14 +5738,10 @@ def _cpus_arg(value):
 class _MarkedParser(argparse.ArgumentParser):
     """argparse whose stderr lines carry silkgate's voice mark.
 
-    say()/die() open every line silkgate speaks as itself with the byte relayed guest
-    output cannot carry (see say); argparse's `usage:` and `error:` lines go to stderr
-    too, so they are host voice and get the same mark. Scripts read the exit status (2
-    for a usage error) and the message text, so both stay exactly argparse's own — the
-    mark opens each stderr line and terminals draw nothing for it. error() and exit()
-    are argparse's documented override points, and add_subparsers() instantiates the
-    calling class, so every subcommand's parser marks its errors the same way. Help goes
-    to stdout, the stream that carries no claim of being silkgate's, and stays bare.
+    argparse's `usage:` and `error:` lines are host voice, so they get say()'s mark. The
+    status and text stay argparse's own. error() and exit() are argparse's override points,
+    and add_subparsers() reuses this class, so every subcommand is covered. Help goes to
+    stdout, bare.
     """
 
     def exit(self, status=0, message=None):
@@ -6173,11 +5947,9 @@ def main():
     try:
         args.fn(args)
     except KeyboardInterrupt:
-        # An interrupt is not an error: the finally-blocks have already unwound on the
-        # way here, so no traceback and no chatter — just the conventional status.
-        # os._exit skips interpreter shutdown, which would otherwise re-surface a
-        # pending SIGINT as a traceback on stderr; SIGINT is ignored first so a late
-        # Ctrl-C cannot land inside this handler itself.
+        # An interrupt isn't an error: the finally-blocks already unwound, so just exit 130.
+        # os._exit skips shutdown, which would print a pending SIGINT as a traceback.
+        # SIGINT is ignored first, so a late Ctrl-C can't land in this handler.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             sys.stdout.flush()
