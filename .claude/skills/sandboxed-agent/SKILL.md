@@ -60,7 +60,7 @@ credential. Nothing else.**
 | context copy a plain `claude -p` reads | `/root/.claude/CLAUDE.md` |
 | projected `model` and `effortLevel` | `/root/.claude/settings.json` (`--no-settings` skips) |
 | a `--brief FILE` | `/silkgate/BRIEF.md` |
-| defaults | 1G memory, half the host's CPUs. `--memory 2G` for a test suite or build. |
+| defaults | 1G memory, half the host's CPUs. Don't pass `--memory` unless the guest ran out. |
 | audit log | `~/.silkgate/logs/proxy-*.log`, printed at startup |
 
 - The base image has no node, no python, no git. `--with claude` alone can't run
@@ -245,8 +245,8 @@ control.**
 - A command gets a real terminal whenever your stdin is one: colors, cursor codes, and
   stdout merged into stderr. That corrupts a JSON stream. Pass `--no-tty` for anything you
   parse.
-- Exit 137 with a bare `Killed` is usually the guest's OOM killer. Give it more memory. A
-  `--branch` teardown still harvests.
+- Exit 137 with a bare `Killed` is usually the guest's OOM killer. Rerun with more
+  `--memory`: that's the one reason to raise it. A `--branch` teardown still harvests.
 - Nothing bounds a runaway agent. Wrap it in `timeout 600 …` if that matters. The clock
   includes a cold image build.
 - Host sleep kills every guest's API stream at once. A `-p` run exits and loses its

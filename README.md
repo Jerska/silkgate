@@ -90,8 +90,8 @@ silkgate down foo                # the last session out stops the proxy
 - Output streams live, with stdout and stderr apart, so a parent can parse `stream-json`.
 - A command gets a terminal when your stdin is one, which merges both streams. Pass
   `--no-tty` when you parse the output.
-- Each guest gets 1G of memory and half the host's CPUs. Change it with `--memory 2G` and
-  `--cpus 4`.
+- Each guest gets 1G of memory and half the host's CPUs. Raise `--memory` only after a
+  guest runs out (exit 137, `Killed`).
 - Hand over a long task as a file: `--brief task.md` lands it at `/silkgate/BRIEF.md`.
 
 ## Secrets
