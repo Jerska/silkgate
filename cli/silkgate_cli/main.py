@@ -16,7 +16,7 @@ import re
 import signal
 import sys
 
-from . import console, core, images, logs, mitm, profile, ui_server, verify
+from . import briefing, console, core, images, logs, mitm, profile, ui_server, verify
 
 
 # The two argument types that reach a generated Dockerfile or an msb argv are checked by
@@ -114,13 +114,13 @@ def main():
                        help="set an env var in the guest (repeatable). Secrets go in "
                             "SILKGATE_EGRESS_SECRET_<NAME> instead.")
         p.add_argument("--no-context", action="store_true",
-                       help=f"don't write {core.GUEST_CONTEXT} or $SILKGATE_CONTEXT")
+                       help=f"don't write {briefing.GUEST_CONTEXT} or $SILKGATE_CONTEXT")
         p.add_argument("--no-settings", action="store_true",
                        help="don't copy your Claude Code model and effortLevel into the guest")
 
     def brief_opt(p, scope):
         p.add_argument("--brief", metavar="FILE",
-                       help=f"{scope} task brief, copied to {core.GUEST_BRIEF} (max 1 MiB)")
+                       help=f"{scope} task brief, copied to {briefing.GUEST_BRIEF} (max 1 MiB)")
 
     # Session guests default to 1G and half the host's CPUs — msb's own 512M / 1 vCPU
     # OOM-kills a guest that runs an agent beside a test suite. Both are limits the

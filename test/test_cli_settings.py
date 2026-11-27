@@ -35,6 +35,8 @@ con = pkg.console
 prof = pkg.profile
 mt = pkg.mitm
 im = pkg.images
+br = pkg.briefing
+ss = pkg.sessions
 
 
 def tearDownModule():
@@ -65,7 +67,7 @@ class SettingsCase(unittest.TestCase):
     def resolve(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            resolved = sg._resolve_settings(self.workspace, self.user_file)
+            resolved = br._resolve_settings(self.workspace, self.user_file)
         return resolved, err.getvalue()
 
 
@@ -100,7 +102,7 @@ class TestSettingsResolution(SettingsCase):
     def test_no_workspace_reads_the_user_file_alone(self):
         self.write("user", {"model": "user-m"})
         self.write("local", {"model": "local-m"})
-        self.assertEqual(sg._resolve_settings(None, self.user_file), {"model": "user-m"})
+        self.assertEqual(br._resolve_settings(None, self.user_file), {"model": "user-m"})
 
     def test_non_string_and_empty_values_are_ignored(self):
         self.write("local", {"model": 7, "effortLevel": ""})
@@ -132,8 +134,8 @@ class TestSettingsAllowlist(SettingsCase):
         self.write("user", self.HOST_FILE)
         args = types.SimpleNamespace(no_settings=False)
         profile = types.SimpleNamespace(conf={"settings_path": "/root/.claude/settings.json"})
-        with mock.patch.object(sg, "CLAUDE_SETTINGS", self.user_file):
-            text, paths = sg._settings_for(args, [profile], self.workspace)
+        with mock.patch.object(br, "CLAUDE_SETTINGS", self.user_file):
+            text, paths = br._settings_for(args, [profile], self.workspace)
         self.assertEqual(paths, ["/root/.claude/settings.json"])
         self.assertEqual(json.loads(text),
                          {"model": "claude-fable-5", "effortLevel": "max"})
@@ -174,15 +176,15 @@ class TestSettingsWorkspace(SettingsCase):
     def test_checkout_and_branch_use_the_repo_root(self):
         spec = {"checkout": "HEAD", "repo_root": "/host/repo"}
         mounts = [("/host/data", "/workspace", "rw")]      # spec wins even beside one
-        self.assertEqual(sg._settings_workspace(spec, mounts), "/host/repo")
+        self.assertEqual(br._settings_workspace(spec, mounts), "/host/repo")
 
     def test_a_workspace_mount_supplies_it_otherwise(self):
         mounts = [("/host/data", "/data", "ro"), ("/host/proj", "/workspace", "rw")]
-        self.assertEqual(sg._settings_workspace(None, mounts), "/host/proj")
+        self.assertEqual(br._settings_workspace(None, mounts), "/host/proj")
 
     def test_no_workspace_directory_means_none(self):
-        self.assertIsNone(sg._settings_workspace(None, [("/host/data", "/data", "ro")]))
-        self.assertIsNone(sg._settings_workspace(None, []))
+        self.assertIsNone(br._settings_workspace(None, [("/host/data", "/data", "ro")]))
+        self.assertIsNone(br._settings_workspace(None, []))
 
 
 class TestSettingsFor(SettingsCase):
@@ -198,26 +200,26 @@ class TestSettingsFor(SettingsCase):
     def test_no_profile_consumes_it_stages_nothing(self):
         self.write("user", {"model": "user-m"})
         bare = types.SimpleNamespace(conf={})
-        with mock.patch.object(sg, "CLAUDE_SETTINGS", self.user_file):
-            self.assertEqual(sg._settings_for(self.args(), [bare], None), (None, ()))
+        with mock.patch.object(br, "CLAUDE_SETTINGS", self.user_file):
+            self.assertEqual(br._settings_for(self.args(), [bare], None), (None, ()))
 
     def test_nothing_resolved_stages_nothing(self):
-        with mock.patch.object(sg, "CLAUDE_SETTINGS", self.user_file):
-            self.assertEqual(sg._settings_for(self.args(), [self.claude_like()],
+        with mock.patch.object(br, "CLAUDE_SETTINGS", self.user_file):
+            self.assertEqual(br._settings_for(self.args(), [self.claude_like()],
                                               self.workspace), (None, ()))
 
     def test_no_settings_flag_stages_nothing(self):
         self.write("user", {"model": "user-m"})
-        with mock.patch.object(sg, "CLAUDE_SETTINGS", self.user_file):
-            self.assertEqual(sg._settings_for(self.args(no_settings=True),
+        with mock.patch.object(br, "CLAUDE_SETTINGS", self.user_file):
+            self.assertEqual(br._settings_for(self.args(no_settings=True),
                                               [self.claude_like()], self.workspace),
                              (None, ()))
 
     def test_the_shipped_claude_profile_names_the_path(self):
         self.write("user", {"effortLevel": "xhigh"})
         profile = prof.Profile("claude")
-        with mock.patch.object(sg, "CLAUDE_SETTINGS", self.user_file):
-            text, paths = sg._settings_for(self.args(), [profile], None)
+        with mock.patch.object(br, "CLAUDE_SETTINGS", self.user_file):
+            text, paths = br._settings_for(self.args(), [profile], None)
         self.assertEqual(paths, ["/root/.claude/settings.json"])
         self.assertEqual(json.loads(text), {"effortLevel": "xhigh"})
 
@@ -244,7 +246,7 @@ class TestRunUpWiring(SettingsCase):
                 mock.patch.object(sg, "_provision_session", spy), \
                 mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
                 mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
-                mock.patch.object(sg, "CLAUDE_SETTINGS", self.user_file), \
+                mock.patch.object(br, "CLAUDE_SETTINGS", self.user_file), \
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:
@@ -299,10 +301,10 @@ class TestProvisionStaging(SettingsCase):
                 mock.patch.object(sg.subprocess, "run", fake_run):
             sg._provision_session(name, "img:1", 8090, "", prof.load_ruleset(""),
                                   [], None, [], {"profiles": [], "command": None}, **kwargs)
-        self.addCleanup(shutil.rmtree, sg.session_dir(name), ignore_errors=True)
+        self.addCleanup(shutil.rmtree, ss.session_dir(name), ignore_errors=True)
         copies = [calls["argv"][i + 1] for i, a in enumerate(calls["argv"])
                   if a == "--copy-file"]
-        return sg.session_dir(name), copies
+        return ss.session_dir(name), copies
 
     def test_settings_are_staged_and_copied(self):
         sdir, copies = self.provision(

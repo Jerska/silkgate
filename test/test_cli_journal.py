@@ -39,6 +39,8 @@ con = pkg.console
 prof = pkg.profile
 mt = pkg.mitm
 im = pkg.images
+br = pkg.briefing
+ss = pkg.sessions
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -74,17 +76,17 @@ class JournalCase(unittest.TestCase):
         return err.getvalue()
 
     def write_session(self, name, sid=None, **extra):
-        sdir = sg.session_dir(name)
+        sdir = ss.session_dir(name)
         sdir.mkdir(parents=True)
         (sdir / "rules.txt").write_text(RULE)
         meta = {"name": name, "sandbox": f"sg-{name}", "port": 8090, **extra}
         if sid is not None:
             meta["sid"] = sid
-        sg._write_json(sdir / "meta.json", meta)
+        ss._write_json(sdir / "meta.json", meta)
         return meta
 
     def journal_events(self, path):
-        return [rec.get("event") for rec in sg._read_journal(path)]
+        return [rec.get("event") for rec in ss._read_journal(path)]
 
 
 # -- the journal helper ---------------------------------------------------------
@@ -93,10 +95,10 @@ class TestJournal(JournalCase):
 
     def test_appends_parseable_lines(self):
         self.write_session("j1")
-        sg._journal("j1", "exec_start", exec_id="cafe1234", argv=["echo", "hi"],
+        ss._journal("j1", "exec_start", exec_id="cafe1234", argv=["echo", "hi"],
                     tty=False, env_names=["FOO"], via="exec")
-        sg._journal("j1", "exec_end", exec_id="cafe1234", rc=0)
-        records = sg._read_journal(sg.session_dir("j1") / "journal.jsonl")
+        ss._journal("j1", "exec_end", exec_id="cafe1234", rc=0)
+        records = ss._read_journal(ss.session_dir("j1") / "journal.jsonl")
         self.assertEqual([r["event"] for r in records], ["exec_start", "exec_end"])
         for rec in records:
             self.assertIn("ts", rec)
@@ -106,8 +108,8 @@ class TestJournal(JournalCase):
 
     def test_journal_file_is_private(self):
         self.write_session("j2")
-        sg._journal("j2", "down")
-        mode = (sg.session_dir("j2") / "journal.jsonl").stat().st_mode
+        ss._journal("j2", "down")
+        mode = (ss.session_dir("j2") / "journal.jsonl").stat().st_mode
         self.assertEqual(stat.S_IMODE(mode), 0o600,
                          "exec argv holds the operator's prompt — owner-only")
 
@@ -116,13 +118,13 @@ class TestJournal(JournalCase):
         operation it records."""
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            sg._journal("nosuchsession", "down")     # no session dir to write into
+            ss._journal("nosuchsession", "down")     # no session dir to write into
         self.assertIn("warning", err.getvalue())
         self.assertIn("could not journal", err.getvalue())
 
     def test_read_journal_skips_garbage(self):
         self.write_session("j3")
-        path = sg.session_dir("j3") / "journal.jsonl"
+        path = ss.session_dir("j3") / "journal.jsonl"
         good1 = json.dumps({"ts": "t", "event": "created"})
         good2 = json.dumps({"ts": "t", "event": "down"})
         path.write_bytes((good1 + "\n" + '{"ts": "torn' + "\n" + "\xff\xfe garbage\n"
@@ -130,19 +132,19 @@ class TestJournal(JournalCase):
         self.assertEqual(self.journal_events(path), ["created", "down"])
 
     def test_read_journal_missing_file_is_empty(self):
-        self.assertEqual(sg._read_journal(self.tmp / "absent.jsonl"), [])
+        self.assertEqual(ss._read_journal(self.tmp / "absent.jsonl"), [])
 
     def test_argv_is_capped_per_record(self):
         """argv holds the operator's whole prompt and was the journal's one unbounded
         field — the archive inherits the journal whole, so one record must stay a few
         KiB however large the prompt."""
         self.write_session("j4")
-        prompt = "p" * (sg._JOURNAL_ARGV_LIMIT * 3)
-        sg._journal("j4", "exec_start", exec_id="cafe1234",
+        prompt = "p" * (ss._JOURNAL_ARGV_LIMIT * 3)
+        ss._journal("j4", "exec_start", exec_id="cafe1234",
                     argv=["claude", "-p", prompt], tty=False, env_names=[], via="exec")
-        rec = sg._read_journal(sg.session_dir("j4") / "journal.jsonl")[0]
+        rec = ss._read_journal(ss.session_dir("j4") / "journal.jsonl")[0]
         recorded = sum(len(a) for a in rec["argv"])
-        self.assertLessEqual(recorded, sg._JOURNAL_ARGV_LIMIT + len("..."))
+        self.assertLessEqual(recorded, ss._JOURNAL_ARGV_LIMIT + len("..."))
         self.assertEqual(rec["argv"][:2], ["claude", "-p"],
                          "whole leading elements survive")
         self.assertTrue(rec["argv"][-1].endswith("..."),
@@ -153,15 +155,15 @@ class TestJournal(JournalCase):
     def test_argv_at_or_under_the_cap_is_recorded_whole(self):
         self.write_session("j5")
         argv = ["claude", "-p", "q" * 100]
-        sg._journal("j5", "exec_start", exec_id="cafe1234", argv=argv)
-        rec = sg._read_journal(sg.session_dir("j5") / "journal.jsonl")[0]
+        ss._journal("j5", "exec_start", exec_id="cafe1234", argv=argv)
+        rec = ss._read_journal(ss.session_dir("j5") / "journal.jsonl")[0]
         self.assertEqual(rec["argv"], argv)
 
     def test_argv_elements_past_the_cut_are_dropped(self):
         self.write_session("j6")
-        argv = ["a" * sg._JOURNAL_ARGV_LIMIT, "never-recorded", "nor-this"]
-        sg._journal("j6", "exec_start", exec_id="cafe1234", argv=argv)
-        rec = sg._read_journal(sg.session_dir("j6") / "journal.jsonl")[0]
+        argv = ["a" * ss._JOURNAL_ARGV_LIMIT, "never-recorded", "nor-this"]
+        ss._journal("j6", "exec_start", exec_id="cafe1234", argv=argv)
+        rec = ss._read_journal(ss.session_dir("j6") / "journal.jsonl")[0]
         self.assertEqual(rec["argv"], [argv[0], "..."],
                          "the first element spends the whole budget; the mark says "
                          "more followed")
@@ -172,12 +174,12 @@ class TestJournal(JournalCase):
 class TestSid(JournalCase):
 
     def test_new_sid_matches_the_validator(self):
-        sid = sg._new_sid("abc-123")
-        self.assertTrue(sg._SID_RE.fullmatch(sid), sid)
+        sid = ss._new_sid("abc-123")
+        self.assertTrue(ss._SID_RE.fullmatch(sid), sid)
         self.assertIn("-abc-123-", sid)
 
     def test_sids_are_unique(self):
-        self.assertNotEqual(sg._new_sid("x"), sg._new_sid("x"))
+        self.assertNotEqual(ss._new_sid("x"), ss._new_sid("x"))
 
     def test_sid_re_refuses_what_is_not_a_sid(self):
         for bad in ("", "../etc", "20250101T000000Z-x-zzzzzz",     # not hex
@@ -185,7 +187,7 @@ class TestSid(JournalCase):
                     "20250101T000000Z-a/b-abcdef",                 # path component
                     "x-20250101T000000Z-abcdef",
                     "20250101T000000Z-" + "a" * 33 + "-abcdef"):   # name over 32
-            self.assertIsNone(sg._SID_RE.fullmatch(bad), bad)
+            self.assertIsNone(ss._SID_RE.fullmatch(bad), bad)
 
 
 # -- archived-meta reads -----------------------------------------------------------
@@ -206,54 +208,54 @@ class TestArchivedMetaReads(JournalCase):
 
     def test_bad_sid_is_refused_before_it_reads_anything(self):
         for bad in ("../aaa", "", "a" * 40, "20250101T000000Z-x-ZZZZZZ"):
-            self.refuses("invalid archive sid", sg.read_archived_meta, bad)
+            self.refuses("invalid archive sid", ss.read_archived_meta, bad)
 
     def test_absent_archive_is_none(self):
-        self.assertIsNone(sg.read_archived_meta(self.SID))
+        self.assertIsNone(ss.read_archived_meta(self.SID))
 
     def test_meta_must_agree_with_its_directory(self):
         self.plant_archive(self.SID, self.meta(sid="20250101T000000Z-bbb222-abcdef"))
-        self.refuses("refusing it", sg.read_archived_meta, self.SID)
+        self.refuses("refusing it", ss.read_archived_meta, self.SID)
 
     def test_planted_sandbox_is_refused(self):
         self.plant_archive(self.SID, self.meta(sandbox="--net-rule=allow@x"))
-        self.refuses("refusing it", sg.read_archived_meta, self.SID)
+        self.refuses("refusing it", ss.read_archived_meta, self.SID)
 
     def test_planted_branch_is_refused(self):
         self.plant_archive(self.SID, self.meta(branch="-evil", base="0" * 40))
-        self.refuses("refusing it", sg.read_archived_meta, self.SID)
+        self.refuses("refusing it", ss.read_archived_meta, self.SID)
 
     def test_checkout_meta_needs_a_clean_base(self):
         self.plant_archive(self.SID, self.meta(checkout="HEAD", base="not-a-sha"))
-        self.refuses("refusing it", sg.read_archived_meta, self.SID)
+        self.refuses("refusing it", ss.read_archived_meta, self.SID)
 
     def test_git_dir_must_be_a_clean_absolute_path(self):
         for bad in ("relative/.git", "/has\nnewline/.git", "/has\x1b[31mcolor/.git"):
             self.plant_archive(self.SID, self.meta(git_dir=bad))
-            self.refuses("refusing it", sg.read_archived_meta, self.SID)
+            self.refuses("refusing it", ss.read_archived_meta, self.SID)
 
     def test_workspace_must_be_a_clean_absolute_path(self):
         self.plant_archive(self.SID, self.meta(workspace="../../etc"))
-        self.refuses("refusing it", sg.read_archived_meta, self.SID)
+        self.refuses("refusing it", ss.read_archived_meta, self.SID)
 
     def test_wellformed_meta_is_returned(self):
         meta = self.meta(checkout="v1", base="0" * 40, git_dir="/repo/.git",
                          workspace="/repo/.silkgate/sandboxes/aaa111", ended="t")
         self.plant_archive(self.SID, meta)
-        self.assertEqual(sg.read_archived_meta(self.SID), meta)
+        self.assertEqual(ss.read_archived_meta(self.SID), meta)
 
     def test_new_checks_hold_for_live_reads_too(self):
         self.write_session("live1", git_dir="not/absolute")
-        self.refuses("refusing it", sg.read_meta, "live1")
+        self.refuses("refusing it", ss.read_meta, "live1")
 
     def test_planted_sid_fails_the_field_check(self):
         for bad in ("../../../../tmp/silkgate-escape", "/tmp/silkgate-escape",
                     "20250101T000000Z-a/b-abcdef"):
-            self.assertIn("sid", sg._check_meta_fields(self.meta(sid=bad)) or "", bad)
+            self.assertIn("sid", ss._check_meta_fields(self.meta(sid=bad)) or "", bad)
 
     def test_planted_sid_is_refused_on_a_live_read(self):
         self.write_session("live2", sid="../../../../tmp/silkgate-escape")
-        self.refuses("refusing it", sg.read_meta, "live2")
+        self.refuses("refusing it", ss.read_meta, "live2")
 
     def test_list_archived_metas_is_chronological_and_skips_foreign_dirs(self):
         older = "20240101T000000Z-old-abcdef"
@@ -261,7 +263,7 @@ class TestArchivedMetaReads(JournalCase):
         self.plant_archive(newer, {"name": "new", "sid": newer})
         self.plant_archive(older, {"name": "old", "sid": older})
         (pt.ARCHIVE_DIR / "not-a-sid").mkdir()
-        self.assertEqual([m["sid"] for m in sg.list_archived_metas()], [older, newer])
+        self.assertEqual([m["sid"] for m in ss.list_archived_metas()], [older, newer])
 
 
 # -- teardown: the archive lands complete -------------------------------------------
@@ -286,14 +288,14 @@ class TestTeardownArchive(JournalCase):
         return d / str(port)
 
     def test_archive_lands_complete(self):
-        sid = sg._new_sid("t1")
+        sid = ss._new_sid("t1")
         meta = self.write_session("t1", sid=sid)
-        sg._journal("t1", "exec_start", exec_id="cafe1234", argv=["true"], tty=False,
+        ss._journal("t1", "exec_start", exec_id="cafe1234", argv=["true"], tty=False,
                     env_names=[], via="exec")
         claim = self.claim(8090, "t1")
         self.teardown(meta)
         adir = pt.ARCHIVE_DIR / sid
-        self.assertFalse(sg.session_dir("t1").exists())
+        self.assertFalse(ss.session_dir("t1").exists())
         self.assertFalse(claim.exists(), "the port claim outlived the session")
         archived = json.loads((adir / "meta.json").read_text())
         self.assertEqual(archived["sid"], sid)
@@ -308,12 +310,12 @@ class TestTeardownArchive(JournalCase):
         self.teardown(meta)
         entries = [d for d in pt.ARCHIVE_DIR.iterdir() if d.is_dir()]
         self.assertEqual(len(entries), 1)
-        self.assertTrue(sg._SID_RE.fullmatch(entries[0].name), entries[0].name)
+        self.assertTrue(ss._SID_RE.fullmatch(entries[0].name), entries[0].name)
         self.assertEqual(json.loads((entries[0] / "meta.json").read_text())["sid"],
                          entries[0].name)
 
     def test_snapshot_failure_warns_and_teardown_completes(self):
-        sid = sg._new_sid("t3")
+        sid = ss._new_sid("t3")
         meta = self.write_session("t3", sid=sid)
         err = self.teardown(meta, logs=(None, "guest is gone"))
         self.assertIn("no guest-output snapshot", err)
@@ -322,36 +324,36 @@ class TestTeardownArchive(JournalCase):
         self.assertFalse((adir / "output.log").exists())
 
     def test_archive_false_removes_the_session_whole(self):
-        meta = self.write_session("t4", sid=sg._new_sid("t4"))
+        meta = self.write_session("t4", sid=ss._new_sid("t4"))
         self.teardown(meta, archive=False)
-        self.assertFalse(sg.session_dir("t4").exists())
+        self.assertFalse(ss.session_dir("t4").exists())
         self.assertEqual(list(pt.ARCHIVE_DIR.iterdir()), [],
                          "a session never handed over leaves no archive")
 
     def test_rename_failure_warns_and_teardown_completes(self):
-        meta = self.write_session("t5", sid=sg._new_sid("t5"))
+        meta = self.write_session("t5", sid=ss._new_sid("t5"))
         blocker = self.tmp / "blocker"
         blocker.write_text("")                           # ARCHIVE_DIR.mkdir must fail
         with mock.patch.object(pt, "ARCHIVE_DIR", blocker / "archive"):
             err = self.teardown(meta)
         self.assertIn("could not archive", err)
-        self.assertFalse(sg.session_dir("t5").exists(),
+        self.assertFalse(ss.session_dir("t5").exists(),
                          "the teardown must complete even when the archive cannot")
 
     def test_unremovable_sandbox_still_keeps_the_session(self):
-        meta = self.write_session("t6", sid=sg._new_sid("t6"))
+        meta = self.write_session("t6", sid=ss._new_sid("t6"))
         err = io.StringIO()
         with mock.patch.object(sg, "_remove_sandbox", lambda sandbox: False), \
                 mock.patch.object(sg, "_run_msb_logs",
                                   lambda sandbox, tail_n=None, since=None: ([], None)), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
             sg._teardown_session(meta)
-        self.assertTrue(sg.session_dir("t6").exists(),
+        self.assertTrue(ss.session_dir("t6").exists(),
                         "enforcement stays fail-closed: no removal, no archive")
         self.assertEqual(list(pt.ARCHIVE_DIR.iterdir()), [])
 
     def test_snapshot_is_bounded(self):
-        sid = sg._new_sid("t7")
+        sid = ss._new_sid("t7")
         meta = self.write_session("t7", sid=sid)
         big = ["x" * 1000] * 2000                        # ~2 MiB of guest chatter
         self.teardown(meta, logs=(big, None))
@@ -359,7 +361,7 @@ class TestTeardownArchive(JournalCase):
         self.assertLessEqual(size, sg._SNAPSHOT_MAX_BYTES)
 
     def test_snapshot_byte_knob_slices_before_the_write_keeping_the_tail(self):
-        sid = sg._new_sid("t8")
+        sid = ss._new_sid("t8")
         meta = self.write_session("t8", sid=sid)
         lines = [f"line {i:04d} " + "x" * 90 for i in range(200)]   # ~20 KiB
         os.environ["SILKGATE_SNAPSHOT_MAX_BYTES"] = "1024"
@@ -404,7 +406,7 @@ class TestTeardownArchive(JournalCase):
             with mock.patch.object(con, "preflight", lambda *a: None):
                 self.refuses("refusing it", sg.cmd_down,
                              types.SimpleNamespace(name=name))
-            self.assertTrue(sg.session_dir(name).exists(),
+            self.assertTrue(ss.session_dir(name).exists(),
                             "the refusal must come before any move")
             escaped = (pt.ARCHIVE_DIR / bad).resolve()
             self.assertFalse(escaped.exists(),
@@ -483,13 +485,13 @@ class TestBrief(JournalCase):
         self.refuses("over the 1 MiB limit", sg._read_brief, str(big))
 
     def test_context_points_at_the_brief_only_when_one_lands(self):
-        pointer = f"Your task brief is at `{sg.GUEST_BRIEF}`. Read it first."
+        pointer = f"Your task brief is at `{br.GUEST_BRIEF}`. Read it first."
         ruleset = prof.load_ruleset("")
-        with_brief = sg.session_context([], ruleset, persistent=False, brief=True)
+        with_brief = br.session_context([], ruleset, persistent=False, brief=True)
         self.assertIn(pointer, with_brief)
         self.assertLess(with_brief.index(pointer), with_brief.index("## What's installed"),
                         "the pointer comes before everything else the guest reads")
-        without = sg.session_context([], ruleset, persistent=False)
+        without = br.session_context([], ruleset, persistent=False)
         self.assertNotIn("BRIEF.md", without)
 
     def test_context_for_keys_the_pointer_on_the_flag(self):
@@ -514,18 +516,18 @@ class TestBrief(JournalCase):
         with mock.patch.object(sg, "_msb", lambda: "msb"), \
                 mock.patch.object(sg.subprocess, "run", fake_run):
             sg._provision_session("br1", "img:1", 8090, RULE, ruleset, [], None, [],
-                                  {}, context="ctx", context_paths=(sg.GUEST_CONTEXT,),
+                                  {}, context="ctx", context_paths=(br.GUEST_CONTEXT,),
                                   brief=b"# the task\n")
-        sdir = sg.session_dir("br1")
+        sdir = ss.session_dir("br1")
         self.assertEqual((sdir / "brief.md").read_bytes(), b"# the task\n")
         pairs = [seen["argv"][i + 1] for i, a in enumerate(seen["argv"])
                  if a == "--copy-file"]
-        self.assertIn(f"{sdir / 'brief.md'}:{sg.GUEST_BRIEF}", pairs)
-        self.assertIn(f"{sdir / 'context.md'}:{sg.GUEST_CONTEXT}", pairs)
+        self.assertIn(f"{sdir / 'brief.md'}:{br.GUEST_BRIEF}", pairs)
+        self.assertIn(f"{sdir / 'context.md'}:{br.GUEST_CONTEXT}", pairs)
         self.assertEqual(self.journal_events(sdir / "journal.jsonl"), ["created"],
                          "the session appears with its journal already begun")
         meta = json.loads((sdir / "meta.json").read_text())
-        self.assertTrue(sg._SID_RE.fullmatch(meta["sid"]), "sid persisted at provision")
+        self.assertTrue(ss._SID_RE.fullmatch(meta["sid"]), "sid persisted at provision")
 
 
 # -- meta additions ------------------------------------------------------------------
@@ -636,24 +638,24 @@ class TestExecBrief(JournalCase):
         f = self.tmp / "task.md"
         f.write_bytes(b"# this exec's ask\n")
         landed = self.run_exec("x1", flag=str(f))
-        start = sg._read_journal(sg.session_dir("x1") / "journal.jsonl")[0]
+        start = ss._read_journal(ss.session_dir("x1") / "journal.jsonl")[0]
         self.assertEqual(start["event"], "exec_start")
         self.assertEqual(start["brief_source"], "flag")
         self.assertEqual(start["brief_sha256"],
                          hashlib.sha256(b"# this exec's ask\n").hexdigest())
-        stored = sg.session_dir("x1") / "briefs" / f"{start['exec_id']}.md"
+        stored = ss.session_dir("x1") / "briefs" / f"{start['exec_id']}.md"
         self.assertEqual(stored.read_bytes(), b"# this exec's ask\n")
         self.assertEqual(landed, [("sg-x1", b"# this exec's ask\n")])
 
     def test_session_default_covers_a_briefless_exec(self):
         self.write_session("x2")
-        (sg.session_dir("x2") / "brief.md").write_bytes(b"# the default\n")
+        (ss.session_dir("x2") / "brief.md").write_bytes(b"# the default\n")
         landed = self.run_exec("x2")
-        start = sg._read_journal(sg.session_dir("x2") / "journal.jsonl")[0]
+        start = ss._read_journal(ss.session_dir("x2") / "journal.jsonl")[0]
         self.assertEqual(start["brief_source"], "default")
         self.assertEqual(start["brief_sha256"],
                          hashlib.sha256(b"# the default\n").hexdigest())
-        stored = sg.session_dir("x2") / "briefs" / f"{start['exec_id']}.md"
+        stored = ss.session_dir("x2") / "briefs" / f"{start['exec_id']}.md"
         self.assertEqual(stored.read_bytes(), b"# the default\n",
                          "the default is stored per exec like an own brief")
         self.assertEqual(landed, [("sg-x2", b"# the default\n")],
@@ -661,23 +663,23 @@ class TestExecBrief(JournalCase):
 
     def test_own_flag_beats_the_session_default(self):
         self.write_session("x3")
-        (sg.session_dir("x3") / "brief.md").write_bytes(b"# the default\n")
+        (ss.session_dir("x3") / "brief.md").write_bytes(b"# the default\n")
         f = self.tmp / "own.md"
         f.write_bytes(b"# my own\n")
         landed = self.run_exec("x3", flag=str(f))
-        start = sg._read_journal(sg.session_dir("x3") / "journal.jsonl")[0]
+        start = ss._read_journal(ss.session_dir("x3") / "journal.jsonl")[0]
         self.assertEqual(start["brief_source"], "flag")
         self.assertEqual(landed, [("sg-x3", b"# my own\n")])
 
     def test_no_brief_anywhere_journals_no_fields_and_lands_nothing(self):
         self.write_session("x4")
         landed = self.run_exec("x4")
-        start = sg._read_journal(sg.session_dir("x4") / "journal.jsonl")[0]
+        start = ss._read_journal(ss.session_dir("x4") / "journal.jsonl")[0]
         self.assertEqual(start["event"], "exec_start")
         self.assertNotIn("brief_source", start)
         self.assertNotIn("brief_sha256", start)
         self.assertEqual(landed, [])
-        self.assertFalse((sg.session_dir("x4") / "briefs").exists())
+        self.assertFalse((ss.session_dir("x4") / "briefs").exists())
 
     def test_failed_landing_dies_before_the_exec_starts(self):
         self.write_session("x5")
@@ -692,19 +694,19 @@ class TestExecBrief(JournalCase):
                                   lambda *a, **k: ran.append(1) or 0):
             self.refuses("could not land the brief", sg.cmd_exec, args)
         self.assertEqual(ran, [], "the command must not run without its brief")
-        self.assertEqual(self.journal_events(sg.session_dir("x5") / "journal.jsonl"),
+        self.assertEqual(self.journal_events(ss.session_dir("x5") / "journal.jsonl"),
                          [], "no exec_start for an exec that never started")
 
     def test_attach_inherits_the_session_default(self):
         self.write_session("x6", command=["claude"])
-        (sg.session_dir("x6") / "brief.md").write_bytes(b"# the default\n")
+        (ss.session_dir("x6") / "brief.md").write_bytes(b"# the default\n")
         landed = []
         with mock.patch.object(sg, "_land_brief_in_guest",
                                lambda s, d: landed.append((s, d)) or None), \
                 mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
                 self.assertRaises(SystemExit):
             sg.cmd_attach(types.SimpleNamespace(name="x6"))
-        start = sg._read_journal(sg.session_dir("x6") / "journal.jsonl")[0]
+        start = ss._read_journal(ss.session_dir("x6") / "journal.jsonl")[0]
         self.assertEqual(start["brief_source"], "default")
         self.assertEqual(landed, [("sg-x6", b"# the default\n")])
 
@@ -719,8 +721,8 @@ class TestExecBrief(JournalCase):
                 mock.patch.object(sg.subprocess, "run", fake_run):
             self.assertIsNone(sg._land_brief_in_guest("sg-x", b"# ask\n"))
         script = seen["argv"][seen["argv"].index("-c") + 1]
-        self.assertIn(f"cat > {sg.GUEST_BRIEF}.tmp", script)
-        self.assertIn(f"mv {sg.GUEST_BRIEF}.tmp {sg.GUEST_BRIEF}", script)
+        self.assertIn(f"cat > {br.GUEST_BRIEF}.tmp", script)
+        self.assertIn(f"mv {br.GUEST_BRIEF}.tmp {br.GUEST_BRIEF}", script)
         self.assertEqual(seen["kwargs"]["input"], b"# ask\n",
                          "a megabyte brief rides stdin, never argv")
 
@@ -770,7 +772,7 @@ class TestExecBrief(JournalCase):
         self.assertEqual(caught.exception.code, 0)
         sdirs = [d for d in pt.SESSIONS_DIR.iterdir() if not d.name.startswith(".")]
         self.assertEqual(len(sdirs), 1)
-        recs = sg._read_journal(sdirs[0] / "journal.jsonl")
+        recs = ss._read_journal(sdirs[0] / "journal.jsonl")
         start = next(r for r in recs if r["event"] == "exec_start")
         self.assertEqual(start["via"], "run")
         self.assertEqual(start["brief_source"], "flag")
@@ -803,7 +805,7 @@ class TestExecJournal(JournalCase):
         args = types.SimpleNamespace(name="e1", env=["FOO=secret"], tty=False,
                                      cmd=["--", "echo", "hi"])
         captured = self.run_cmd(sg.cmd_exec, args)
-        records = sg._read_journal(sg.session_dir("e1") / "journal.jsonl")
+        records = ss._read_journal(ss.session_dir("e1") / "journal.jsonl")
         self.assertEqual([r["event"] for r in records], ["exec_start", "exec_end"])
         start, end = records
         self.assertEqual(start["via"], "exec")
@@ -815,14 +817,14 @@ class TestExecJournal(JournalCase):
         self.assertEqual(start["exec_id"], captured["exec_id"],
                          "the journaled id is the one threaded into the relay")
         self.assertRegex(start["exec_id"], r"^[0-9a-f]{8}$")
-        meta = sg._read_json(sg.session_dir("e1") / "meta.json")
+        meta = ss._read_json(ss.session_dir("e1") / "meta.json")
         self.assertEqual(meta["last_rc"], 7, "exec_end also lands meta.last_rc")
 
     def test_cmd_attach_brackets_run_guest(self):
         self.write_session("e2", command=["claude"])
         args = types.SimpleNamespace(name="e2")
         self.run_cmd(sg.cmd_attach, args, rc=0)
-        records = sg._read_journal(sg.session_dir("e2") / "journal.jsonl")
+        records = ss._read_journal(ss.session_dir("e2") / "journal.jsonl")
         self.assertEqual([r["event"] for r in records], ["exec_start", "exec_end"])
         self.assertEqual(records[0]["via"], "attach")
         self.assertIs(records[0]["tty"], True)
@@ -839,10 +841,10 @@ class TestExecJournal(JournalCase):
         with mock.patch.object(sg, "run_guest", interrupted), \
                 self.assertRaises(KeyboardInterrupt):
             sg.cmd_exec(args)
-        records = sg._read_journal(sg.session_dir("e3") / "journal.jsonl")
+        records = ss._read_journal(ss.session_dir("e3") / "journal.jsonl")
         self.assertEqual([r["event"] for r in records], ["exec_start", "exec_end"])
         self.assertEqual(records[1]["rc"], 130)
-        self.assertEqual(sg._read_json(sg.session_dir("e3") / "meta.json")["last_rc"],
+        self.assertEqual(ss._read_json(ss.session_dir("e3") / "meta.json")["last_rc"],
                          130)
 
     def test_unknowable_rc_journals_null_and_skips_last_rc(self):
@@ -856,10 +858,10 @@ class TestExecJournal(JournalCase):
 
         with mock.patch.object(sg, "run_guest", dies), self.assertRaises(SystemExit):
             sg.cmd_exec(args)
-        records = sg._read_journal(sg.session_dir("e4") / "journal.jsonl")
+        records = ss._read_journal(ss.session_dir("e4") / "journal.jsonl")
         self.assertEqual([r["event"] for r in records], ["exec_start", "exec_end"])
         self.assertIsNone(records[1]["rc"])
-        self.assertNotIn("last_rc", sg._read_json(sg.session_dir("e4") / "meta.json"))
+        self.assertNotIn("last_rc", ss._read_json(ss.session_dir("e4") / "meta.json"))
 
     def test_harvest_journals_its_verdict(self):
         meta = self.write_session("h1", branch="agent/x", base="0" * 40,
@@ -873,7 +875,7 @@ class TestExecJournal(JournalCase):
                                lambda m: ("SILKGATE_ERROR", "timed out")), \
                 contextlib.redirect_stderr(err):
             self.assertFalse(gt._harvest_branch(meta))
-        records = sg._read_journal(sg.session_dir("h1") / "journal.jsonl")
+        records = ss._read_journal(ss.session_dir("h1") / "journal.jsonl")
         self.assertEqual([r["result"] for r in records], ["no_commits", "failed"])
         self.assertEqual(records[1]["detail"], "timed out")
 
@@ -900,24 +902,24 @@ class TestLsAll(JournalCase):
         return out.getvalue()
 
     def archive_session(self, name="old1", rc=3):
-        sid = sg._new_sid(name)
+        sid = ss._new_sid(name)
         adir = pt.ARCHIVE_DIR / sid
         adir.mkdir(parents=True)
-        sg._write_json(adir / "meta.json", {"name": name, "sid": sid, "port": 8091,
-                                            "created": sg.now_iso(),
-                                            "ended": sg.now_iso()})
-        sg._journal_into(adir, "created")
-        sg._journal_into(adir, "exec_start", exec_id="cafe1234", argv=["true"])
-        sg._journal_into(adir, "exec_end", exec_id="cafe1234", rc=rc)
-        sg._journal_into(adir, "down")
+        ss._write_json(adir / "meta.json", {"name": name, "sid": sid, "port": 8091,
+                                            "created": ss.now_iso(),
+                                            "ended": ss.now_iso()})
+        ss._journal_into(adir, "created")
+        ss._journal_into(adir, "exec_start", exec_id="cafe1234", argv=["true"])
+        ss._journal_into(adir, "exec_end", exec_id="cafe1234", rc=rc)
+        ss._journal_into(adir, "down")
         return sid
 
     def test_default_ls_summarises_execs_without_archived_rows(self):
-        self.write_session("live1", created=sg.now_iso())
-        sg._journal("live1", "exec_start", exec_id="aa", argv=["true"])
-        sg._journal("live1", "exec_end", exec_id="aa", rc=7)
-        sg._journal("live1", "exec_start", exec_id="bb", argv=["true"])
-        sg._journal("live1", "exec_end", exec_id="bb", rc=0)
+        self.write_session("live1", created=ss.now_iso())
+        ss._journal("live1", "exec_start", exec_id="aa", argv=["true"])
+        ss._journal("live1", "exec_end", exec_id="aa", rc=7)
+        ss._journal("live1", "exec_start", exec_id="bb", argv=["true"])
+        ss._journal("live1", "exec_end", exec_id="bb", rc=0)
         self.archive_session()
         out = self.ls_output()
         header, row = out.splitlines()[:2]
@@ -929,7 +931,7 @@ class TestLsAll(JournalCase):
         self.assertNotIn("archived", out)
 
     def test_all_appends_archived_rows_with_their_sid(self):
-        self.write_session("live1", sid=sg._new_sid("live1"), created=sg.now_iso())
+        self.write_session("live1", sid=ss._new_sid("live1"), created=ss.now_iso())
         sid = self.archive_session(rc=3)
         out = self.ls_output(show_all=True)
         lines = out.splitlines()
@@ -948,8 +950,8 @@ class TestLsAll(JournalCase):
         self.assertIn(sid, out)
 
     def test_exec_without_end_shows_a_dash_exit(self):
-        self.write_session("live2", created=sg.now_iso())
-        sg._journal("live2", "exec_start", exec_id="aa", argv=["true"])
+        self.write_session("live2", created=ss.now_iso())
+        ss._journal("live2", "exec_start", exec_id="aa", argv=["true"])
         row = self.ls_output().splitlines()[1]
         self.assertEqual(row.split()[-2:], ["1", "-"])
 
@@ -1128,7 +1130,7 @@ class TestCaptureWiring(JournalCase):
 
     def test_live_capture_file_survives_a_full_prune(self):
         live = self.log_file("capture-00-live.jsonl", age_days=90)
-        sg._write_json(pt.PROXY_JSON, {"pid": os.getpid(), "capture": str(live)})
+        ss._write_json(pt.PROXY_JSON, {"pid": os.getpid(), "capture": str(live)})
         self.addCleanup(pt.PROXY_JSON.unlink)
         for i in range(1, mt.LOG_RETAIN_COUNT + 6):
             self.log_file(f"capture-{i:02d}.jsonl", age_days=40 + i)

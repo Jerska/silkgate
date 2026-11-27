@@ -1,6 +1,5 @@
 """The machinery behind the silkgate commands: profiles, images, sessions, the proxy, guests."""
 import hashlib
-import json
 import os
 import posixpath
 import re
@@ -11,461 +10,17 @@ import sys
 import termios
 import textwrap
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-GUEST_CONTEXT = "/silkgate/CONTEXT.md"        # what the guest is told about its sandbox
-GUEST_BRIEF = "/silkgate/BRIEF.md"            # where --brief lands the operator's task
 GUEST_EXECS = "/silkgate/execs"               # one pidfile per exec, <exec_id>.pid
 TIER1_PROBE_TARGET = "1.1.1.1:443"   # must be a live public service: the probe passes only
                                      # when a connect that WOULD succeed is denied (tier1_fault)
 
 import rule_engine
 
-from . import console, foreground, git, images, mitm, paths, profile
-
-
-# --- what the guest is told about itself --------------------------------------
-# Generated per session from the profiles, ruleset, and mounts, so it can't drift. It saves a
-# cooperating agent wasted turns. It's never a control: a hostile guest ignores it.
-
-def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, checkout=None,
-                    brief=False):
-    """The markdown a guest gets about its own sandbox.
-
-    `mounts` is the validated -v list as (host, guest, mode). The workspace text follows
-    the active mode: branch, checkout, or a /workspace mount's mode. `brief` means a brief
-    landed at GUEST_BRIEF, so the guest is pointed at it first."""
-    lines = [
-        "# Where you are: a silkgate sandbox",
-        "",
-        "Read this to learn what's installed here, what you can reach, and what survives",
-        "this machine.",
-        "",
-        "**You're in a disposable VM. Every network request goes through a proxy that allows",
-        "only the destinations listed below. Nothing inside this machine can widen that.**",
-    ]
-    if brief:
-        lines += ["", f"Your task brief is at `{GUEST_BRIEF}`. Read it first."]
-    lines += [
-        "",
-        "Launch subagents freely for independent work.",
-        "",
-        "## What's installed",
-        "",
-    ]
-    if profiles:
-        # What is installed, so one entry per (name, version) — instances of a profile
-        # that differ only in args install the same tools once.
-        for p in images._image_profiles(profiles):
-            # Named as packages, not commands, since the two differ (ripgrep ships `rg`).
-            extra = f", plus packages {', '.join(p.packages)}" if p.packages else ""
-            lines.append(f"- `{p.image_spec}`{extra}")
-    else:
-        lines.append("- Nothing beyond the base image.")
-    lines += [
-        "",
-        "That's all. git, python, pip, make, and compilers are absent unless listed, and",
-        "you can't install more: no package mirror is reachable.",
-        "",
-        "## What survives",
-        "",
-    ]
-    ws_mode = next((mode for _, dst, mode in mounts if dst == "/workspace"), None)
-    others = [(dst, mode) for _, dst, mode in mounts if dst != "/workspace"]
-    if branch:
-        lines += [
-            f"**Commit to branch `{branch}` as you go. Commits are the deliverable.**",
-            "",
-            "- `/workspace` is a checkout of the project on that branch.",
-            "- When the session ends, your commits land in the host repo. Everything",
-            "  uncommitted is deleted. The host can also collect commits mid-session.",
-            "- Never amend or rewrite a commit you made: the branch only moves forward.",
-            "- Don't push: no remote accepts it. `origin` is a read-only copy of the host repo,",
-            "  so `git log` and `git fetch origin` work.",
-        ]
-    elif checkout:
-        lines += [
-            "**Put your results in printed output. Nothing you write leaves this machine,",
-            "commits included.**",
-            "",
-            f"- `/workspace` is a throwaway checkout of the project at `{checkout}`. Local",
-            "  commits are fine.",
-            "- `origin` is a read-only copy of the host repo, so `git log` and",
-            "  `git fetch origin` work. No remote accepts a push.",
-        ]
-    elif ws_mode == "ro":
-        lines += [
-            "**Put your results in printed output.** `/workspace` is host code, read-only.",
-            "The rest of the filesystem is scratch that dies with this machine.",
-        ]
-    elif ws_mode == "rw":
-        lines += [
-            "**What you leave in `/workspace` is the deliverable.** It's a host directory,",
-            "read-write. The rest of the filesystem is scratch that dies with this machine.",
-        ]
-    elif others:
-        lines.append("**`/workspace` is scratch that dies with this machine.** No host"
-                     " directory is mounted there.")
-    else:
-        lines.append("**Nothing you write survives this machine.** No host directory is mounted.")
-    if others:
-        lines += ["", "Other host directories mounted here:", ""]
-        for dst, mode in others:
-            lines.append(f"- `{dst}`: " + ("read-only." if mode == "ro" else
-                                            "read-write. What you leave there lands on the host."))
-    lines += [
-        "",
-        "This machine " + ("stays up between commands, so what you leave behind persists."
-                           if persistent else "is destroyed when this command finishes."),
-        "",
-        "## What you can reach",
-        "",
-    ]
-    if ruleset.rules:
-        lines += [
-            "**Only these destinations, with these methods.** http and https both go through",
-            "the proxy, and the match ignores the scheme.",
-            "",
-        ]
-        for rule in ruleset.rules:
-            methods = " ".join(sorted(rule.methods))
-            inject = f", injects `{rule.inject_auth}`" if rule.inject_auth else ""
-            lines.append(f"- `{rule.raw.split()[0]}`: {methods}{inject}")
-        lines += [
-            "",
-            "In a host, `*` matches one label. In a path, `*` matches one segment. `**` matches",
-            "anything, an empty path included. GET is enough to install from a listed registry.",
-        ]
-    else:
-        # An empty allowlist is the strictest policy silkgate can express, and it is a normal
-        # configuration rather than a broken one — so say what it means instead of a bare list.
-        lines += [
-            "**Nothing. The allowlist is empty, so work from what's on this machine.** No host,",
-            "port, or protocol works, and there's no DNS.",
-        ]
-    lines += [
-        "",
-        "## When a request is refused",
-        "",
-        "**A refusal is policy, not a broken network. Retrying can't change it.**",
-        "",
-        "| You see | It means |",
-        "|---|---|",
-        "| http: a 403 with body `no matching rule` | the proxy refused it |",
-        "| https: `CONNECT tunnel failed, response 403` | the proxy refused it, before TLS |",
-        "| a 500 with `X-Silkgate: deny` | the proxy failed internally. Report it, don't retry. |",
-        "| an error without `X-Silkgate: deny` | the destination answered: fix the request |",
-        "",
-        "Every proxy refusal carries the `X-Silkgate: deny` response header. `curl -v` shows",
-        "it on a refused CONNECT too. A destination could fake it, so treat it as a strong",
-        "hint, not proof.",
-        "",
-        "If you need an unlisted destination, say so in your answer: the host, path, method,",
-        "and why. Your printed output is the only channel to whoever set the task.",
-    ]
-    # A profile can ship a context.md — guidance that travels with the capability,
-    # templated like its rules — appended once per instance, so the guest learns how
-    # to use each grant it holds.
-    for p in profiles:
-        snippet = p.rendered_context().strip()
-        if snippet:
-            lines += ["", snippet]
-    inject_names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
-    if inject_names:
-        lines += [
-            "",
-            "## Credentials",
-            "",
-            "**The key or token in your environment is a placeholder. Use it as if it were",
-            "real.** The proxy swaps in the real value, which never enters this machine. It only",
-            "replaces a header you send, never adds one. So a request without the header gets a",
-            "real 401 from the destination: add the header and resend.",
-            "",
-            "Status at launch:",
-            "",
-        ]
-        for name in inject_names:
-            value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{name.upper()}")
-            parsed = rule_engine._parse_secret(value) if value else None
-            if parsed is not None:
-                # The guest learns the header's name, never any part of its value.
-                status = f"available. The proxy fills in the `{parsed[0]}` header."
-            else:
-                reason = "not set" if not value else "not a valid header line"
-                status = (f"missing ({reason}). Requests that need it will be denied. Tell"
-                          " whoever set your task: a retry can't fix it.")
-            lines.append(f"- `inject_auth={name}`: {status}")
-    return "\n".join(lines) + "\n"
-
-
-# --- persistent sessions: host state ----------------------------------------
-
-def now_iso():
-    return datetime.now().astimezone().isoformat(timespec="seconds")
-
-
-def _write_json(path, obj):
-    """Atomic-ish write: temp file then rename, so a reader never sees half a file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj))
-    tmp.replace(path)
-
-
-def _read_json(path):
-    try:
-        return json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-
-
-def session_dir(name):
-    return paths.SESSIONS_DIR / name
-
-
-def sandbox_name(name):
-    return f"sg-{name}"
-
-
-_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
-# What msb accepts as a sandbox name. meta.json's "sandbox" reaches `msb exec`/`msb rm` argv,
-# so it is held to this before it is used — a value msb would read as a flag is not a name.
-_SANDBOX_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-
-
-def _name_ok(name):
-    return bool(_NAME_RE.fullmatch(name or ""))
-
-
-def _validate_name(name):
-    # Used as a dir name, an msb sandbox name (sg-<name>), and a net-rule component.
-    if not _name_ok(name):
-        console.die(f"invalid session name {name!r} (letters, digits, '-', '_'; ≤32 chars)")
-
-
-# A session id outlives the session: it names the archive dir and threads through the
-# journal, so it packs chronology (a UTC stamp first, making plain name order time
-# order), identity (the session name) and uniqueness (6 random hex) into one string
-# that is safe as a path component. Session names can repeat across time; sids cannot.
-_SID_RE = re.compile(r"\d{8}T\d{6}Z-[A-Za-z0-9][A-Za-z0-9_-]{0,31}-[0-9a-f]{6}")
-
-
-def _new_sid(name):
-    return f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{name}-{uuid4().hex[:6]}"
-
-
-# How much argv text one journal record holds. argv carries the whole prompt, and the
-# journal has no other cap, so it's cut here with a "..." tail. A few KiB keeps a prompt's
-# head readable, and a loop of huge prompts costs megabytes, never gigabytes.
-_JOURNAL_ARGV_LIMIT = 8192
-
-
-def _clip_argv(argv):
-    """argv for one journal record: whole elements until the limit, the element that
-    crosses it cut with a '...' tail, everything after dropped."""
-    out, spent = [], 0
-    for arg in argv:
-        s = str(arg)
-        if spent + len(s) > _JOURNAL_ARGV_LIMIT:
-            out.append(s[:_JOURNAL_ARGV_LIMIT - spent] + "...")
-            break
-        out.append(s)
-        spent += len(s)
-    return out
-
-
-def _journal(name, event, **fields):
-    """Append one event record to a session's journal (journal.jsonl in its dir).
-
-    Bookkeeping fails open, so this warns and never raises: a teardown must never block on
-    it. Each record is one os.write on an O_APPEND descriptor, so concurrent execs
-    interleave whole records, never bytes.
-
-    argv holds the operator's prompt, on purpose, bounded by _clip_argv. Env vars appear
-    as names only.
-    """
-    _journal_into(session_dir(name), event, **fields)
-
-
-def _journal_into(sdir, event, **fields):
-    """_journal against an explicit directory — for the one record (`created`) that
-    must land in the staging dir, before the rename makes the session appear."""
-    try:
-        if isinstance(fields.get("argv"), (list, tuple)):
-            fields["argv"] = _clip_argv(fields["argv"])
-        record = json.dumps({"ts": now_iso(), "event": event, **fields})
-        fd = os.open(sdir / "journal.jsonl",
-                     os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            os.write(fd, (record + "\n").encode())
-        finally:
-            os.close(fd)
-    except Exception as e:                     # never raise: bookkeeping, not enforcement
-        console.say(f"warning: could not journal {event!r} for {sdir.name}: {e}")
-
-
-def _end_exec(name, exec_id, rc):
-    """Close one exec bracket: the exec_end record, then meta["last_rc"] — the newest
-    exec's rc, kept in meta so `ls` and the dashboard can show it without reading the
-    journal. Both are bookkeeping: fail-open, never raising. last_rc is written only
-    for a known rc; a null rc stays a journal-only fact."""
-    _journal(name, "exec_end", exec_id=exec_id, rc=rc)
-    if not isinstance(rc, int):
-        return
-    mpath = session_dir(name) / "meta.json"
-    meta = _read_json(mpath)
-    if meta is None:                             # torn down mid-exec: nowhere to record
-        return
-    try:
-        _write_json(mpath, {**meta, "last_rc": rc})
-    except Exception as e:
-        console.say(f"warning: could not record last_rc for {name!r}: {e}")
-
-
-def _bracketed_exec(name, exec_id, run):
-    """run(), with an exec_end journaled even when it's interrupted. An interrupt records
-    the shell's rc (130 for Ctrl-C, 128+signo for a signal), or null when unknown. A
-    missing exec_end means this process crashed."""
-    rc = None
-    try:
-        rc = run()
-        return rc
-    except KeyboardInterrupt:
-        rc = 130
-        raise
-    except SystemExit as e:
-        if isinstance(e.code, int):
-            rc = e.code
-        raise
-    finally:
-        _end_exec(name, exec_id, rc)
-
-
-def _read_journal(path):
-    """Parsed journal records, oldest first. Torn or foreign lines are skipped rather
-    than fatal: a crash can cut an append mid-line, and one bad line must not hide the
-    history around it."""
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return []
-    records = []
-    for line in lines:
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(rec, dict):
-            records.append(rec)
-    return records
-
-
-def _clean_abs_path(value):
-    """Whether a meta path is absolute and free of control characters — the bar it must
-    clear before reaching git argv, an rmtree decision, or a terminal."""
-    s = str(value)
-    return s.startswith("/") and not any(ord(c) < 0x20 or ord(c) == 0x7f for c in s)
-
-
-def _check_meta_fields(meta):
-    """Why this meta.json's fields cannot be used, or None — shared by the live registry
-    and the archive, because the UI's diff puts archived meta fields into git argv too,
-    so they are held to read_meta's bar. Every field is optional on read; only a present
-    field with a bad value refuses."""
-    sandbox = meta.get("sandbox")
-    if sandbox is not None and not _SANDBOX_RE.fullmatch(str(sandbox)):
-        return f"its meta.json names sandbox {sandbox!r}"
-    # sid becomes a path component of ARCHIVE_DIR at teardown (sdir.rename), where a
-    # '..' or absolute value would move the whole session dir — journal included —
-    # anywhere the planter names. Same bar the archive read side already holds it to.
-    if meta.get("sid") is not None and not _SID_RE.fullmatch(str(meta["sid"])):
-        return f"its meta.json names sid {meta['sid']!r}"
-    if meta.get("branch") is not None:
-        # Branch metas add git argv (branch, base) and an rmtree decision (repo_root via
-        # _reap_derived_workspace) — same refusal as sandbox above for a planted meta.
-        branch, base = str(meta["branch"]), str(meta.get("base", ""))
-        if (not git._BRANCH_RE.fullmatch(branch) or ".." in branch
-                or not git._BASE_RE.fullmatch(base)):
-            return f"its meta.json names branch {branch!r}"
-    elif meta.get("checkout") is not None:
-        # A checkout meta carries base into git argv the same way a branch one does.
-        if not git._BASE_RE.fullmatch(str(meta.get("base", ""))):
-            return f"its meta.json names base {meta.get('base')!r}"
-    for field in ("git_dir", "workspace"):
-        if meta.get(field) is not None and not _clean_abs_path(meta[field]):
-            return f"its meta.json has invalid {field} field"
-    return None
-
-
-def read_meta(name):
-    """One session's meta.json, or None when there is no such session.
-
-    Every command that takes a session name comes through here, so this checks it. The
-    name is a path component, so '..' would read a meta.json from outside the registry,
-    and its fields become msb argv and an rmtree target. A meta that disagrees with its
-    directory is refused.
-    """
-    _validate_name(name)
-    meta = _read_json(session_dir(name) / "meta.json")
-    if meta is None:
-        return None
-    if meta.get("name") != name:
-        console.die(f"session {name!r}: its meta.json names session {meta.get('name')!r} — "
-                    "refusing it")
-    bad = _check_meta_fields(meta)
-    if bad:
-        console.die(f"session {name!r}: {bad} — refusing it")
-    return meta
-
-
-def list_metas():
-    if not paths.SESSIONS_DIR.is_dir():
-        return []
-    metas = []
-    for d in sorted(paths.SESSIONS_DIR.iterdir()):
-        if d.name.startswith(".") or not _name_ok(d.name):   # not something silkgate created
-            continue
-        m = read_meta(d.name)
-        if m:
-            metas.append(m)
-    return metas
-
-
-def read_archived_meta(sid):
-    """One archived session's meta.json, or None when no archive holds that sid.
-
-    Read with read_meta's checks: the sid is a path component, the meta must name its own
-    directory's sid, and every field is checked, because the UI's diff puts archived meta
-    fields into git argv."""
-    if not _SID_RE.fullmatch(sid or ""):
-        console.die(f"invalid archive sid {sid!r}")
-    meta = _read_json(paths.ARCHIVE_DIR / sid / "meta.json")
-    if meta is None:
-        return None
-    if meta.get("sid") != sid:
-        console.die(f"archived session {sid!r}: its meta.json names sid {meta.get('sid')!r} — "
-                    "refusing it")
-    bad = _check_meta_fields(meta)
-    if bad:
-        console.die(f"archived session {sid!r}: {bad} — refusing it")
-    return meta
-
-
-def list_archived_metas():
-    """Every archived session's meta, oldest first — a sid opens with its UTC stamp, so
-    the plain name sort is chronological."""
-    if not paths.ARCHIVE_DIR.is_dir():
-        return []
-    metas = []
-    for d in sorted(paths.ARCHIVE_DIR.iterdir()):
-        if not _SID_RE.fullmatch(d.name):            # not something silkgate archived
-            continue
-        m = read_archived_meta(d.name)
-        if m:
-            metas.append(m)
-    return metas
+from . import briefing, console, foreground, git, images, mitm, paths, profile, sessions
 
 
 # --- msb session guests -----------------------------------------------------
@@ -664,7 +219,7 @@ def _plain(line):
 # exported here, not passed with `msb -e`, because msb aborts on an env value that holds a
 # newline.
 _EXPORT_CONTEXT = ('[ -f %s ] && SILKGATE_CONTEXT=$(cat %s) && export SILKGATE_CONTEXT; '
-                   % (GUEST_CONTEXT, GUEST_CONTEXT))
+                   % (briefing.GUEST_CONTEXT, briefing.GUEST_CONTEXT))
 
 # What a journaled exec sets up in the guest, before the wrapper shell:
 # - an X-Silkgate-Exec header in ANTHROPIC_CUSTOM_HEADERS, the SDK's hook for extra
@@ -931,7 +486,7 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
     The rename makes the session appear atomically, so the addon never caches a half-written
     one. On failure, undo only what's ours: the staging dir, the renamed dir if we renamed
     it, the port claim, any half-created sandbox, and the proxy if nothing else needs it."""
-    sdir = session_dir(name)
+    sdir = sessions.session_dir(name)
     if sdir.exists():
         console.die(f"session already exists: {sdir}")
     tmp = paths.SESSIONS_DIR / f".tmp-{name}"            # dot-prefixed: invisible to registries
@@ -947,13 +502,13 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
             (tmp / "settings.json").write_text(settings)
         if brief is not None:
             (tmp / "brief.md").write_bytes(brief)
-        meta = {"name": name, "sandbox": sandbox_name(name), "sid": _new_sid(name),
-                "port": port, "image": image, "workspace": ws,
-                "created": now_iso(), **meta_extra}
-        _write_json(tmp / "meta.json", meta)
+        meta = {"name": name, "sandbox": sessions.sandbox_name(name),
+                "sid": sessions._new_sid(name), "port": port, "image": image, "workspace": ws,
+                "created": sessions.now_iso(), **meta_extra}
+        sessions._write_json(tmp / "meta.json", meta)
         # Into the staging dir, right after meta.json: the rename below is what makes
         # the session appear, so it appears with its journal already begun.
-        _journal_into(tmp, "created", meta=meta)
+        sessions._journal_into(tmp, "created", meta=meta)
         try:
             tmp.rename(sdir)                             # atomic claim; fails if name raced us
             owned = True
@@ -968,16 +523,16 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
         if settings:
             copies += [(sdir / "settings.json", dst) for dst in settings_paths]
         if brief is not None:
-            copies.append((sdir / "brief.md", GUEST_BRIEF))
+            copies.append((sdir / "brief.md", briefing.GUEST_BRIEF))
         created = True
-        if subprocess.run(msb_create_argv(sandbox_name(name), image, port, mounts=mounts,
+        if subprocess.run(msb_create_argv(sessions.sandbox_name(name), image, port, mounts=mounts,
                                           env=env, copies=copies, memory=memory,
                                           cpus=cpus)).returncode:
             console.die(f"msb create failed for session {name!r}")
     except BaseException:                                # incl. SystemExit from die()
         with foreground._deferred_interrupts():          # a Ctrl-C cannot halve the unwind
             if created:                                  # failed or cut short, a create
-                _remove_sandbox(sandbox_name(name))      # can still have registered it
+                _remove_sandbox(sessions.sandbox_name(name))  # can still have registered it
             shutil.rmtree(tmp, ignore_errors=True)
             if owned:
                 shutil.rmtree(sdir, ignore_errors=True)
@@ -1076,7 +631,7 @@ def _prune_archive():
     except OSError:
         return
     for d in entries:
-        if not _SID_RE.fullmatch(d.name):            # not something silkgate archived
+        if not sessions._SID_RE.fullmatch(d.name):            # not something silkgate archived
             continue
         try:
             stamped.append((d.stat().st_mtime, d))
@@ -1110,8 +665,8 @@ def _teardown_session(meta, archive=True):
     The teardown that empties the registry stops the shared proxy, whoever started it.
     Every removal runs through here, so the proxy's lifetime follows the registry."""
     name = meta.get("name")
-    sandbox = meta.get("sandbox") or (sandbox_name(name) if name else None)
-    sdir = session_dir(name) if name else None
+    sandbox = meta.get("sandbox") or (sessions.sandbox_name(name) if name else None)
+    sdir = sessions.session_dir(name) if name else None
     archive = archive and sdir is not None and sdir.is_dir()
     if archive and sandbox:
         _snapshot_output(sandbox, sdir)              # the guest's log dies with the VM
@@ -1123,10 +678,11 @@ def _teardown_session(meta, archive=True):
         # rename (or rmtree) is then what genuinely frees it.
         mitm._release_port(name, meta.get("port"))
         if archive:
-            _journal(name, "down")
-            sid = meta.get("sid") or _new_sid(name)  # pre-feature metas: minted here
+            sessions._journal(name, "down")
+            sid = meta.get("sid") or sessions._new_sid(name)  # pre-feature metas: minted here
             try:
-                _write_json(sdir / "meta.json", {**meta, "sid": sid, "ended": now_iso()})
+                sessions._write_json(sdir / "meta.json",
+                                     {**meta, "sid": sid, "ended": sessions.now_iso()})
             except OSError as e:
                 console.say(f"warning: could not stamp 'ended' into {name!r}'s meta: {e}")
             try:
@@ -1145,7 +701,7 @@ def _teardown_session(meta, archive=True):
 def _maybe_stop_proxy():
     """Stop the shared proxy once the last session is gone. The check here is a courtesy;
     stop_proxy re-checks sessions and port claims under the lifecycle lock."""
-    if list_metas():
+    if sessions.list_metas():
         return
     meta = mitm.read_proxy()
     if meta:
@@ -1283,8 +839,8 @@ def cmd_run(args):
         console.die("nothing to run — pass a command after -- (or --with a profile that names "
                     "one)")
     name = args.name or uuid4().hex[:6]
-    _validate_name(name)
-    if session_dir(name).exists():
+    sessions._validate_name(name)
+    if sessions.session_dir(name).exists():
         console.die(f"session {name!r} already exists")
     # The ask is well-formed; now the whole toolchain shortfall in one report, before any
     # host process. An explicit --image is run as-is, never built, so docker is not its
@@ -1315,8 +871,8 @@ def cmd_run(args):
         proxy = mitm.ensure_proxy(args.port)
         port = mitm.pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, vmounts, persistent=False)
-        settings, settings_paths = _settings_for(args, profiles,
-                                                 _settings_workspace(spec, vmounts))
+        settings, settings_paths = briefing._settings_for(
+            args, profiles, briefing._settings_workspace(spec, vmounts))
         meta_extra = {**_session_meta(profiles, cmd),
                       **_observability_meta(args, rules_text, None), "tty": tty,
                       **(spec or {})}
@@ -1326,30 +882,31 @@ def cmd_run(args):
                            meta_extra, ctx, ctx_paths, settings, settings_paths,
                            memory=args.memory, cpus=args.cpus)
         provisioned = True
-        fault = tier1_fault(sandbox_name(name), port)
+        fault = tier1_fault(sessions.sandbox_name(name), port)
         if fault:
             console.die(fault)              # the finally below tears the session down
         if args.branch:
-            git._setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
+            git._setup_branch_guest(sessions.sandbox_name(name), args.branch, spec["base"], name)
             branch_ready = True
         elif spec:
-            git._setup_checkout_guest(sandbox_name(name), spec["base"], name)
+            git._setup_checkout_guest(sessions.sandbox_name(name), spec["base"], name)
         console.say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
         exec_id = uuid4().hex[:8]
-        brief_fields = _exec_brief_fields(name, sandbox_name(name), exec_id, args.brief)
-        _journal(name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
-                 env_names=sorted({p.partition("=")[0] for p in args.env}), via="run",
-                 **brief_fields)
-        rc = _bracketed_exec(name, exec_id, lambda: run_guest(
-            lambda c: msb_exec_argv(sandbox_name(name), c, tty=tty, env=args.env),
+        brief_fields = _exec_brief_fields(name, sessions.sandbox_name(name), exec_id, args.brief)
+        sessions._journal(name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
+                          env_names=sorted({p.partition("=")[0] for p in args.env}), via="run",
+                          **brief_fields)
+        rc = sessions._bracketed_exec(name, exec_id, lambda: run_guest(
+            lambda c: msb_exec_argv(sessions.sandbox_name(name), c, tty=tty, env=args.env),
             cmd, tty=tty, exec_id=exec_id))
     finally:
         # One-shot means one-shot even interrupted: the unwind runs with the stop
         # signals deferred, so a second Ctrl-C cannot leave the session half-removed.
         with foreground._deferred_interrupts():
             if provisioned:
-                meta = read_meta(name) or {"name": name, "sandbox": sandbox_name(name),
-                                           **(spec or {}), **({"workspace": ws} if ws else {})}
+                meta = sessions.read_meta(name) or {
+                    "name": name, "sandbox": sessions.sandbox_name(name),
+                    **(spec or {}), **({"workspace": ws} if ws else {})}
                 # Harvest while the guest is still up — its gitdir dies with the VM. A
                 # harvest that could not bank everything keeps the workspace and must not
                 # let a green guest run mask it, hence the forced nonzero exit.
@@ -1367,7 +924,7 @@ def cmd_run(args):
                     shutil.rmtree(ws, ignore_errors=True)   # empty: created before the try
             # Only tear down the proxy if this command started it and nothing else
             # needs it.
-            if not proxy_was_running and not list_metas():
+            if not proxy_was_running and not sessions.list_metas():
                 mitm.stop_proxy(mitm.read_proxy() or proxy)
     sys.exit(rc)
 
@@ -1416,8 +973,8 @@ def _read_brief(path):
 # not carry a megabyte — and the rename makes the swap atomic, so a guest reading
 # the brief mid-exec never sees a torn file.
 _BRIEF_LAND_SH = ("set -eu\n"
-                  f"cat > {GUEST_BRIEF}.tmp\n"
-                  f"mv {GUEST_BRIEF}.tmp {GUEST_BRIEF}\n")
+                  f"cat > {briefing.GUEST_BRIEF}.tmp\n"
+                  f"mv {briefing.GUEST_BRIEF}.tmp {briefing.GUEST_BRIEF}\n")
 
 
 def _land_brief_in_guest(sandbox, data):
@@ -1446,11 +1003,11 @@ def _exec_brief_fields(name, sandbox, exec_id, flag_path):
     data, source = _read_brief(flag_path), "flag"
     if data is None:
         try:
-            data = (session_dir(name) / "brief.md").read_bytes()
+            data = (sessions.session_dir(name) / "brief.md").read_bytes()
         except OSError:                          # no default either: briefless exec
             return {}
         source = "default"
-    bdir = session_dir(name) / "briefs"
+    bdir = sessions.session_dir(name) / "briefs"
     try:
         bdir.mkdir(exist_ok=True)
         (bdir / f"{exec_id}.md").write_bytes(data)
@@ -1488,96 +1045,11 @@ def _context_for(args, profiles, ruleset, mounts, *, persistent):
     if args.no_context:
         return None, ()
     paths = list(dict.fromkeys(
-        [GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
-                           if p.conf.get("context_path")]))
-    return session_context(profiles, ruleset, mounts=mounts, persistent=persistent,
-                           branch=args.branch, checkout=args.checkout,
-                           brief=bool(getattr(args, "brief", None))), paths
-
-
-# --- the settings projection: the host's model configuration, forwarded ---------
-# Claude Code reads three settings files, lowest rank first: user (~/.claude/settings.json),
-# project (.claude/settings.json), local (.claude/settings.local.json). An "env" block entry
-# in any of them beats every direct key. The host resolves its answer once, and the guest
-# gets only that, so it defaults to the host's model and effort.
-
-# The host's user-rank settings file. The project and local files come from the host
-# directory that becomes /workspace.
-CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
-
-# The only keys that ever leave the host, each with the env var Claude Code maps to it.
-# Everything else in a settings file — permissions, hooks, apiKeyHelper, every other env
-# entry — stays behind: env entries can carry secrets, and the guest needs none of it.
-_SETTINGS_KEYS = (("model", "ANTHROPIC_MODEL"),
-                  ("effortLevel", "CLAUDE_CODE_EFFORT_LEVEL"))
-
-
-def _read_settings(path):
-    """One settings file as a dict. Absent is {}; a file that exists but does not hold a
-    JSON object warns and counts as absent too — the same contract as a malformed secret:
-    the launch continues, and the warning says why the projection lacks the file."""
-    try:
-        text = path.read_text()
-    except OSError:
-        return {}
-    try:
-        data = json.loads(text)
-    except ValueError:
-        console.say(f"warning: {path} is not valid JSON — the settings projection ignores it")
-        return {}
-    if not isinstance(data, dict):
-        console.say(f"warning: {path} is not a JSON object — the settings projection ignores it")
-        return {}
-    return data
-
-
-def _resolve_settings(workspace, user_settings):
-    """At most {model, effortLevel}: the answer the host's own Claude Code would reach.
-
-    `workspace` is the host directory mounted at /workspace (or None), and `user_settings`
-    the user-rank file, both passed in so tests never read the real home. Per key, the
-    first match wins: env-block values (local, project, user), then direct keys, same order.
-    """
-    files = []                                   # highest rank first
-    if workspace:
-        dot = Path(workspace) / ".claude"
-        files += [_read_settings(dot / "settings.local.json"),
-                  _read_settings(dot / "settings.json")]
-    files.append(_read_settings(Path(user_settings)))
-    env_blocks = [f["env"] for f in files if isinstance(f.get("env"), dict)]
-    resolved = {}
-    for key, env_name in _SETTINGS_KEYS:
-        candidates = [b.get(env_name) for b in env_blocks] + [f.get(key) for f in files]
-        value = next((v for v in candidates if isinstance(v, str) and v), None)
-        if value is not None:
-            resolved[key] = value
-    return resolved
-
-
-def _settings_workspace(spec, mounts):
-    """The host directory whose project and local settings files apply: the one that
-    becomes /workspace. The repository root for --checkout and --branch, else the SRC of
-    the mount whose DST is /workspace, else None — the user file alone then decides."""
-    if spec:
-        return spec["repo_root"]
-    return next((host for host, guest, _ in mounts if guest == "/workspace"), None)
-
-
-def _settings_for(args, profiles, workspace):
-    """(settings JSON text, where to put it in the guest) — or (None, ()) with
-    --no-settings, with no profile naming a settings_path, or with neither key resolved.
-
-    Nothing is staged unless a profile has a `settings_path` AND a key resolves on the host.
-    """
-    if args.no_settings:
-        return None, ()
-    paths = [p.conf["settings_path"] for p in profiles if p.conf.get("settings_path")]
-    if not paths:
-        return None, ()
-    resolved = _resolve_settings(workspace, CLAUDE_SETTINGS)
-    if not resolved:
-        return None, ()
-    return json.dumps(resolved) + "\n", paths
+        [briefing.GUEST_CONTEXT] + [p.conf["context_path"] for p in profiles
+                                    if p.conf.get("context_path")]))
+    return briefing.session_context(profiles, ruleset, mounts=mounts, persistent=persistent,
+                                    branch=args.branch, checkout=args.checkout,
+                                    brief=bool(getattr(args, "brief", None))), paths
 
 
 def cmd_up(args):
@@ -1586,8 +1058,8 @@ def cmd_up(args):
     profiles, rules_text, ruleset = _session_policy(args)
     brief = _read_brief(args.brief)             # host-side, before any provisioning
     name = args.name or uuid4().hex[:6]
-    _validate_name(name)
-    if session_dir(name).exists():
+    sessions._validate_name(name)
+    if sessions.session_dir(name).exists():
         console.die(f"session {name!r} already exists")
     # The ask is well-formed; now the whole toolchain shortfall in one report, before any
     # host process. An explicit --image is run as-is, never built, so docker is not its
@@ -1616,8 +1088,8 @@ def cmd_up(args):
         proxy = mitm.ensure_proxy(args.port)
         port = mitm.pick_port(proxy, name)
         ctx, ctx_paths = _context_for(args, profiles, ruleset, vmounts, persistent=True)
-        settings, settings_paths = _settings_for(args, profiles,
-                                                 _settings_workspace(spec, vmounts))
+        settings, settings_paths = briefing._settings_for(
+            args, profiles, briefing._settings_workspace(spec, vmounts))
         meta_extra = {**_session_meta(profiles, profile.profile_command(profiles)),
                       **_observability_meta(args, rules_text, brief),
                       **(spec or {})}
@@ -1627,13 +1099,13 @@ def cmd_up(args):
                            meta_extra, ctx, ctx_paths, settings, settings_paths,
                            memory=args.memory, cpus=args.cpus, brief=brief)
         provisioned = True
-        fault = tier1_fault(sandbox_name(name), port)
+        fault = tier1_fault(sessions.sandbox_name(name), port)
         if fault:
             console.die(fault)
         if args.branch:
-            git._setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
+            git._setup_branch_guest(sessions.sandbox_name(name), args.branch, spec["base"], name)
         elif spec:
-            git._setup_checkout_guest(sandbox_name(name), spec["base"], name)
+            git._setup_checkout_guest(sessions.sandbox_name(name), spec["base"], name)
     except BaseException:
         # A session `up` never handed over is removed whole, interrupt included: nothing
         # of the user's is in it yet, and one left behind would hide the failure. Stop
@@ -1641,8 +1113,8 @@ def cmd_up(args):
         with foreground._deferred_interrupts():
             if provisioned:
                 # A session never handed over leaves nothing worth archiving.
-                _teardown_session(read_meta(name) or
-                                  {"name": name, "sandbox": sandbox_name(name)},
+                _teardown_session(sessions.read_meta(name) or
+                                  {"name": name, "sandbox": sessions.sandbox_name(name)},
                                   archive=False)
             else:
                 mitm._release_port(name)     # a claim pick_port made, however far it got
@@ -1655,7 +1127,7 @@ def cmd_up(args):
 
 
 def cmd_exec(args):
-    meta = read_meta(args.name)
+    meta = sessions.read_meta(args.name)
     if not meta:
         console.die(f"no such session: {args.name!r} (silkgate ls)")
     profile.check_env(args.env)
@@ -1666,17 +1138,17 @@ def cmd_exec(args):
     exec_id = uuid4().hex[:8]
     brief_fields = _exec_brief_fields(args.name, meta["sandbox"], exec_id,
                                       getattr(args, "brief", None))
-    _journal(args.name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
-             env_names=sorted({p.partition("=")[0] for p in args.env}), via="exec",
-             **brief_fields)
-    rc = _bracketed_exec(args.name, exec_id, lambda: run_guest(
+    sessions._journal(args.name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
+                      env_names=sorted({p.partition("=")[0] for p in args.env}), via="exec",
+                      **brief_fields)
+    rc = sessions._bracketed_exec(args.name, exec_id, lambda: run_guest(
         lambda c: msb_exec_argv(meta["sandbox"], c, tty=tty, env=args.env),
         cmd, tty=tty, exec_id=exec_id))
     sys.exit(rc)
 
 
 def cmd_attach(args):
-    meta = read_meta(args.name)
+    meta = sessions.read_meta(args.name)
     if not meta:
         console.die(f"no such session: {args.name!r} (silkgate ls)")
     cmd = meta.get("command")
@@ -1686,9 +1158,9 @@ def cmd_attach(args):
     exec_id = uuid4().hex[:8]
     # attach takes no --brief; the session default still covers it, like any exec.
     brief_fields = _exec_brief_fields(args.name, meta["sandbox"], exec_id, None)
-    _journal(args.name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=True,
-             env_names=[], via="attach", **brief_fields)
-    rc = _bracketed_exec(args.name, exec_id, lambda: run_guest(
+    sessions._journal(args.name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=True,
+                      env_names=[], via="attach", **brief_fields)
+    rc = sessions._bracketed_exec(args.name, exec_id, lambda: run_guest(
         lambda c: msb_exec_argv(meta["sandbox"], c, tty=True), cmd, tty=True,
         exec_id=exec_id))
     sys.exit(rc)
@@ -1710,7 +1182,7 @@ def _down_session(meta):
 
 
 def cmd_down(args):
-    meta = read_meta(args.name)
+    meta = sessions.read_meta(args.name)
     if not meta:
         console.die(f"no such session: {args.name!r} (silkgate ls)")
     # Teardown needs msb to stop/rm the guest; without this, its absence surfaces as
@@ -1725,7 +1197,7 @@ def cmd_down(args):
 def cmd_harvest(args):
     """Bundle the session's branch out of the live guest and fast-forward the host branch —
     the mid-session save point. No teardown, no workspace reaping."""
-    meta = read_meta(args.name)
+    meta = sessions.read_meta(args.name)
     if not meta:
         console.die(f"no such session: {args.name!r} (silkgate ls)")
     if not meta.get("branch"):
@@ -1772,7 +1244,7 @@ def _print_table(rows):
 def _journal_summary(path):
     """(EXECS, EXIT) table cells from one journal: how many execs the session ran, and
     the newest exec_end's rc — "-" where none closed, or the rc itself is unknown."""
-    records = _read_journal(path)
+    records = sessions._read_journal(path)
     execs = sum(1 for r in records if r.get("event") == "exec_start")
     last = next((r for r in reversed(records) if r.get("event") == "exec_end"), None)
     rc = None if last is None else last.get("rc")
@@ -1794,8 +1266,8 @@ def _mounts_cell(meta):
 
 def cmd_ls(args):
     show_all = bool(getattr(args, "all", False))
-    metas = list_metas()
-    archived = list_archived_metas() if show_all else []
+    metas = sessions.list_metas()
+    archived = sessions.list_archived_metas() if show_all else []
     if not metas and not archived:
         print("no sessions")
     else:
@@ -1805,7 +1277,7 @@ def cmd_ls(args):
         for m in metas:
             row = (m["name"], statuses.get(m["sandbox"], "?"),
                    str(m.get("port", "?")), _mounts_cell(m), _age(m.get("created")),
-                   *_journal_summary(session_dir(m["name"]) / "journal.jsonl"))
+                   *_journal_summary(sessions.session_dir(m["name"]) / "journal.jsonl"))
             rows.append(row + ((m.get("sid") or "-",) if show_all else ()))
         for m in archived:
             # The port is history, not a claim, so the cell stays empty; AGE counts
@@ -1838,7 +1310,7 @@ def cmd_secret_set(args):
         console.die(f'SILKGATE_EGRESS_SECRET_{name.upper()} is not a valid "<Header>: <value>" '
                     "line — expected a printable-ASCII header name (not a routing header) and a "
                     "non-empty value")
-    if not read_meta(args.session):
+    if not sessions.read_meta(args.session):
         console.die(f"no such session: {args.session!r} (silkgate ls)")
     if not mitm._proxy_running():
         console.die("shared proxy not running — start a session first (silkgate up)")
@@ -1851,7 +1323,7 @@ def cmd_secret_ls(args):
     if not mitm._proxy_running():
         console.die("shared proxy not running — start a session first (silkgate up)")
     if args.session:
-        if not read_meta(args.session):
+        if not sessions.read_meta(args.session):
             console.die(f"no such session: {args.session!r} (silkgate ls)")
         for n in sorted(mitm._sock_call({"op": "list_secrets",
                                          "session": args.session}).get("names", [])):

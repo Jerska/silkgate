@@ -38,6 +38,8 @@ con = pkg.console
 prof = pkg.profile
 mt = pkg.mitm
 im = pkg.images
+br = pkg.briefing
+ss = pkg.sessions
 
 
 def tearDownModule():
@@ -271,27 +273,27 @@ class TestSessionNames(CliCase):
         self.plant(outside, {"name": "planted", "sandbox": "sg-planted", "port": 8090})
         self.enterContext(mock.patch.object(pt, "SESSIONS_DIR", self.tmp / "sessions"))
         pt.SESSIONS_DIR.mkdir()
-        self.assertTrue((sg.session_dir("../planted") / "meta.json").is_file())
+        self.assertTrue((ss.session_dir("../planted") / "meta.json").is_file())
         for name in ["../planted", "../../etc", "/tmp/planted", "foo/../../planted", "..",
                      ".", "a b", "-x", "", "x" * 33, "sg;id"]:
-            self.refuses("invalid session name", sg.read_meta, name)
+            self.refuses("invalid session name", ss.read_meta, name)
 
     def test_meta_must_agree_with_its_directory(self):
         self.enterContext(mock.patch.object(pt, "SESSIONS_DIR", self.tmp / "sessions"))
         self.plant(pt.SESSIONS_DIR / "good", {"name": "good", "sandbox": "sg-good", "port": 8090})
-        self.assertEqual(sg.read_meta("good")["sandbox"], "sg-good")
-        self.assertIsNone(sg.read_meta("absent"))
+        self.assertEqual(ss.read_meta("good")["sandbox"], "sg-good")
+        self.assertIsNone(ss.read_meta("absent"))
         self.plant(pt.SESSIONS_DIR / "liar", {"name": "victim", "sandbox": "sg-victim"})
-        self.refuses("refusing it", sg.read_meta, "liar")
+        self.refuses("refusing it", ss.read_meta, "liar")
         self.plant(pt.SESSIONS_DIR / "flag", {"name": "flag", "sandbox": "--net-rule=allow@x"})
-        self.refuses("refusing it", sg.read_meta, "flag")
+        self.refuses("refusing it", ss.read_meta, "flag")
 
     def test_list_metas_skips_what_silkgate_did_not_create(self):
         self.enterContext(mock.patch.object(pt, "SESSIONS_DIR", self.tmp / "sessions"))
         self.plant(pt.SESSIONS_DIR / "good", {"name": "good", "sandbox": "sg-good", "port": 8090})
         self.plant(pt.SESSIONS_DIR / ".tmp-staging", {"name": "staging", "sandbox": "sg-x"})
         self.plant(pt.SESSIONS_DIR / "not a session", {"name": "elsewhere", "sandbox": "sg-y"})
-        self.assertEqual([m["name"] for m in sg.list_metas()], ["good"])
+        self.assertEqual([m["name"] for m in ss.list_metas()], ["good"])
 
 
 class TestMountGuards(CliCase):
@@ -737,7 +739,7 @@ class TestImageIdentityExcludesArg(ArgProfileCase):
     def test_guest_brief_lists_the_install_once_without_the_arg(self):
         self.profile_dir({"tmpl": self.TMPL})
         profiles = prof.resolve_profiles(["tmpl:a/b", "tmpl:c/d"])
-        ctx = sg.session_context(profiles, prof.load_ruleset(prof.compose_rules(profiles)),
+        ctx = br.session_context(profiles, prof.load_ruleset(prof.compose_rules(profiles)),
                                  persistent=False)
         self.assertEqual(ctx.count("- `tmpl`"), 1, ctx)
         self.assertNotIn("tmpl:a/b`", ctx)
@@ -831,7 +833,7 @@ class TestProfileContextSnippets(ArgProfileCase):
 
     def brief_for(self, specs):
         profiles = prof.resolve_profiles(specs)
-        return sg.session_context(profiles, prof.load_ruleset(prof.compose_rules(profiles)),
+        return br.session_context(profiles, prof.load_ruleset(prof.compose_rules(profiles)),
                                   persistent=False)
 
     def test_snippet_lands_expanded_once_per_instance(self):
@@ -875,10 +877,10 @@ class TestEmptyAllowlist(CliCase):
         self.assertIn("reach nothing", err.getvalue())
 
     def test_guest_brief_describes_an_empty_allowlist(self):
-        empty = sg.session_context([], prof.load_ruleset(""), persistent=False)
+        empty = br.session_context([], prof.load_ruleset(""), persistent=False)
         self.assertIn("The allowlist is empty", empty)
         self.assertNotIn("Only these", empty)
-        listed = sg.session_context([], prof.load_ruleset("api.anthropic.com/v1/** POST\n"),
+        listed = br.session_context([], prof.load_ruleset("api.anthropic.com/v1/** POST\n"),
                                     persistent=False)
         self.assertIn("Only these", listed)
         self.assertIn("`api.anthropic.com/v1/**`", listed)
@@ -1020,7 +1022,7 @@ class TestSecretValidation(CliCase):
         ruleset = self._ruleset()
         with mock.patch.dict(os.environ,
                              {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: sk-ant-test"}):
-            ctx = sg.session_context([], ruleset, persistent=False)
+            ctx = br.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
         self.assertIn("available", ctx)
         self.assertIn("`x-api-key`", ctx)          # names the header the proxy rewrites
@@ -1031,7 +1033,7 @@ class TestSecretValidation(CliCase):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith("SILKGATE_EGRESS_SECRET_")}
         with mock.patch.dict(os.environ, env, clear=True):
-            ctx = sg.session_context([], ruleset, persistent=False)
+            ctx = br.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
         self.assertIn("missing (", ctx)
         self.assertIn("not set", ctx)
@@ -1040,7 +1042,7 @@ class TestSecretValidation(CliCase):
         ruleset = self._ruleset()
         with mock.patch.dict(os.environ,
                              {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: "}):
-            ctx = sg.session_context([], ruleset, persistent=False)
+            ctx = br.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
         self.assertIn("missing (", ctx)
         # A header name parsed out of a malformed secret is a guess — never surface it.
@@ -1048,7 +1050,7 @@ class TestSecretValidation(CliCase):
 
     def test_session_context_omits_section_when_no_inject_auth(self):
         ruleset = prof.load_ruleset("api.anthropic.com/v1/** POST\n")
-        ctx = sg.session_context([], ruleset, persistent=False)
+        ctx = br.session_context([], ruleset, persistent=False)
         self.assertNotIn("Injected credentials", ctx)
 
 
@@ -1145,7 +1147,7 @@ class TestPreflight(CliCase):
         sdir.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, sdir, ignore_errors=True)
         (sdir / "meta.json").write_text(json.dumps(
-            {"name": "pf3", "sandbox": sg.sandbox_name("pf3"), "port": 8090}))
+            {"name": "pf3", "sandbox": ss.sandbox_name("pf3"), "port": 8090}))
         # Derived from what each cmd_* dials, not from what feels symmetric: an explicit
         # --image is run as-is (never built), so docker drops out of run/up with it.
         for argv, tools in [
@@ -1225,7 +1227,7 @@ class TestPreflight(CliCase):
         sdir.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, sdir, ignore_errors=True)
         (sdir / "meta.json").write_text(json.dumps(
-            {"name": "lazy1", "sandbox": sg.sandbox_name("lazy1"), "port": 8090,
+            {"name": "lazy1", "sandbox": ss.sandbox_name("lazy1"), "port": 8090,
              "command": ["true"]}))
         with self.path_holding(), \
                 mock.patch.object(sys, "argv",
@@ -1389,8 +1391,8 @@ class TestRunName(GitRepoCase):
         preflight.assert_not_called()
 
     def test_live_session_name_is_refused(self):
-        sg.session_dir("rn2").mkdir(parents=True)
-        self.addCleanup(shutil.rmtree, sg.session_dir("rn2"), True)
+        ss.session_dir("rn2").mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, ss.session_dir("rn2"), True)
         self.argv_refuses("already exists", ["run", "--name", "rn2", "--", "true"])
 
 
@@ -1563,15 +1565,15 @@ class TestBranchGuards(GitRepoCase):
 
     def test_read_meta_refuses_a_planted_branch(self):
         self.plant_meta("aaa111", branch="-evil", base="0" * 40)
-        self.refuses("refusing it", sg.read_meta, "aaa111")
+        self.refuses("refusing it", ss.read_meta, "aaa111")
 
     def test_read_meta_refuses_a_planted_base(self):
         self.plant_meta("bbb222", branch="fine", base="not-a-sha")
-        self.refuses("refusing it", sg.read_meta, "bbb222")
+        self.refuses("refusing it", ss.read_meta, "bbb222")
 
     def test_read_meta_accepts_a_wellformed_branch_meta(self):
         self.plant_meta("ccc333", branch="agent/x", base="0" * 40)
-        self.assertEqual(sg.read_meta("ccc333")["branch"], "agent/x")
+        self.assertEqual(ss.read_meta("ccc333")["branch"], "agent/x")
 
     def test_reap_needs_both_locks(self):
         root = self.tmp / "proj"
@@ -1610,7 +1612,7 @@ class TestBranchGuards(GitRepoCase):
             self.assertEqual(caught.exception.code, 42, argv[0])
             self.assertEqual(seen["spec"], fake_spec)
             self.assertTrue(seen["name"] == "w1" if argv[0] == "up"
-                            else sg._name_ok(seen["name"]))
+                            else ss._name_ok(seen["name"]))
 
 
 class TestHarvestWiring(CliCase):
@@ -1630,7 +1632,7 @@ class TestHarvestWiring(CliCase):
         def read_meta(name):
             if not meta_on_disk:
                 return None
-            return {"name": name, "sandbox": sg.sandbox_name(name), "workspace": ws,
+            return {"name": name, "sandbox": ss.sandbox_name(name), "workspace": ws,
                     **self.FAKE_SPEC}
 
         def harvest(meta):
@@ -1652,13 +1654,13 @@ class TestHarvestWiring(CliCase):
                 mock.patch.object(sg, "tier1_fault", lambda *a: None), \
                 mock.patch.object(gt, "_setup_branch_guest", lambda *a: None), \
                 mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
-                mock.patch.object(sg, "read_meta", read_meta), \
+                mock.patch.object(ss, "read_meta", read_meta), \
                 mock.patch.object(gt, "_harvest_branch", harvest), \
                 mock.patch.object(sg, "_teardown_session",
                                   lambda meta: calls.append("teardown")), \
                 mock.patch.object(gt, "_reap_derived_workspace",
                                   lambda meta: calls.append("reap")), \
-                mock.patch.object(sg, "list_metas", lambda: []), \
+                mock.patch.object(ss, "list_metas", lambda: []), \
                 mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(con, "say", lambda *a, **k: None), \
                 self.assertRaises(SystemExit) as caught:
@@ -1700,13 +1702,13 @@ class TestHarvestWiring(CliCase):
 
         with mock.patch.object(sys, "argv", ["silkgate", "down", "d1"]), \
                 self.no_preflight(), \
-                mock.patch.object(sg, "read_meta", lambda name: dict(meta)), \
+                mock.patch.object(ss, "read_meta", lambda name: dict(meta)), \
                 mock.patch.object(gt, "_harvest_branch", harvest), \
                 mock.patch.object(sg, "_teardown_session",
                                   lambda m: calls.append("teardown")), \
                 mock.patch.object(gt, "_reap_derived_workspace",
                                   lambda m: calls.append("reap")), \
-                mock.patch.object(sg, "list_metas", lambda: []), \
+                mock.patch.object(ss, "list_metas", lambda: []), \
                 mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(con, "say", lambda *a, **k: None):
             try:
@@ -2186,7 +2188,7 @@ class TestGithubProfiles(CliCase):
     def test_grant_snippets_steer_the_guest_to_the_rest_api(self):
         with contextlib.redirect_stderr(io.StringIO()):
             profiles = prof.resolve_profiles(["github-read:a/b", "github-write:c/d"])
-            ctx = sg.session_context(profiles,
+            ctx = br.session_context(profiles,
                                      prof.load_ruleset(prof.compose_rules(profiles)),
                                      persistent=False)
         self.assertIn("## GitHub grant: a/b (read)", ctx)
@@ -2377,7 +2379,7 @@ class TestGuestBriefMounts(CliCase):
     every other mount with its mode."""
 
     def ctx(self, mounts, branch=None, checkout=None):
-        return sg.session_context([], prof.load_ruleset(""), mounts=mounts,
+        return br.session_context([], prof.load_ruleset(""), mounts=mounts,
                                   persistent=False, branch=branch, checkout=checkout)
 
     def test_workspace_rw_text(self):
@@ -2423,7 +2425,7 @@ class TestGuestBriefEgress(CliCase):
     the 500 action, and the report channel."""
 
     def ctx(self, rules="api.anthropic.com/v1/** POST inject_auth=anthropic\n"):
-        return sg.session_context([], prof.load_ruleset(rules), persistent=False)
+        return br.session_context([], prof.load_ruleset(rules), persistent=False)
 
     def test_injected_rule_carries_the_marker(self):
         self.assertIn("- `api.anthropic.com/v1/**`: POST, injects `anthropic`",

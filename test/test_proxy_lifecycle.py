@@ -62,6 +62,7 @@ PATHS = pkg.paths
 CONSOLE = pkg.console
 FOREGROUND = pkg.foreground
 MITM = pkg.mitm
+SESSIONS = pkg.sessions
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -350,10 +351,10 @@ def _race_worker(barrier, q, proxy, name):
         barrier.wait(timeout=20)
         port = MITM.pick_port(proxy, name)
         time.sleep(0.05)                      # the window before meta.json becomes visible
-        sdir = MOD.session_dir(name)
+        sdir = SESSIONS.session_dir(name)
         sdir.mkdir(parents=True)
         (sdir / "rules.txt").write_text(RULE)
-        MOD._write_json(sdir / "meta.json",
+        SESSIONS._write_json(sdir / "meta.json",
                         {"name": name, "sandbox": "sg-" + name, "port": port})
         q.put((name, port))
     except SystemExit as e:
@@ -368,7 +369,7 @@ def _teardown_worker(barrier, q, name, down_style):
     the _maybe_stop_proxy that `down` follows up with."""
     try:
         barrier.wait(timeout=20)
-        MOD._teardown_session(MOD.read_meta(name))
+        MOD._teardown_session(SESSIONS.read_meta(name))
         if down_style:
             MOD._maybe_stop_proxy()
         q.put((name, "ok"))
@@ -431,16 +432,16 @@ class _FakeToolsCase(unittest.TestCase):
         (d / str(port)).write_text(json.dumps({"name": name, "pid": pid}))
 
     def write_session(self, name, port):
-        sdir = MOD.session_dir(name)
+        sdir = SESSIONS.session_dir(name)
         sdir.mkdir(parents=True)
         (sdir / "rules.txt").write_text(RULE)
-        MOD._write_json(sdir / "meta.json",
+        SESSIONS._write_json(sdir / "meta.json",
                         {"name": name, "sandbox": "sg-" + name, "port": port})
 
     def proxy_meta(self, pid, base=8090):
         meta = {"pid": pid, "base_port": base, "ports": list(range(base, base + MITM.POOL_SIZE)),
                 "log": str(PATHS.LOG_DIR / "proxy.log"), "sock": str(PATHS.PROXY_SOCK)}
-        MOD._write_json(PATHS.PROXY_JSON, meta)
+        SESSIONS._write_json(PATHS.PROXY_JSON, meta)
         return meta
 
     def start_stub_sock(self):
@@ -764,7 +765,7 @@ class LifecycleTest(_FakeToolsCase):
         with self.assertRaises(SystemExit):
             MOD._provision_session("prov1", "img", port, RULE, ruleset,
                                    [], None, [], {"profiles": [], "command": None})
-        self.assertFalse(MOD.session_dir("prov1").exists())
+        self.assertFalse(SESSIONS.session_dir("prov1").exists())
         self.assertFalse((PATHS.SESSIONS_DIR / ".tmp-prov1").exists())
         self.assertFalse(self.claim_path(port).exists(), "port claim leaked")
         self.assertIn("rm sg-prov1", self.msb_log(),
@@ -776,23 +777,23 @@ class LifecycleTest(_FakeToolsCase):
         self.proxy_meta(pid=stub.pid)
         self.msb_cfg({"create_ok": True})
         ruleset = rule_engine.RuleSet.parse(RULE)
-        orig, planted = MOD._write_json, []
+        orig, planted = SESSIONS._write_json, []
 
         def landing_racer(path, obj):
             if not planted:                       # the winner lands while we stage
                 planted.append(True)
                 self.write_session("racy", 8091)
-                (MOD.session_dir("racy") / "marker").write_text("winner")
+                (SESSIONS.session_dir("racy") / "marker").write_text("winner")
             orig(path, obj)
 
-        MOD._write_json = landing_racer
-        self.addCleanup(setattr, MOD, "_write_json", orig)
+        SESSIONS._write_json = landing_racer
+        self.addCleanup(setattr, SESSIONS, "_write_json", orig)
         with self.assertRaises(SystemExit):
             MOD._provision_session("racy", "img", 8090, RULE, ruleset,
                                    [], None, [], {"profiles": [], "command": None})
-        self.assertTrue((MOD.session_dir("racy") / "marker").exists(),
+        self.assertTrue((SESSIONS.session_dir("racy") / "marker").exists(),
                         "loser's cleanup deleted the winner's session dir")
-        self.assertEqual((MOD.read_meta("racy") or {}).get("port"), 8091,
+        self.assertEqual((SESSIONS.read_meta("racy") or {}).get("port"), 8091,
                          "winner's meta.json destroyed")
 
     def test_teardown_keeps_session_while_sandbox_survives(self):
@@ -801,16 +802,16 @@ class LifecycleTest(_FakeToolsCase):
         self.write_session("t1", 8090)
         self.write_claim(8090, "t1", _dead_pid())
         self.msb_cfg({"rm_ok": False, "listed": ["sg-t1"]})
-        meta = MOD.read_meta("t1")
+        meta = SESSIONS.read_meta("t1")
         with self.assertRaises(SystemExit):
             MOD._teardown_session(meta)
-        self.assertTrue(MOD.session_dir("t1").exists(),
+        self.assertTrue(SESSIONS.session_dir("t1").exists(),
                         "session dir removed while its guest may be alive")
         self.assertTrue(self.claim_path(8090).exists(),
                         "port freed while its guest may be alive")
         self.msb_cfg({"rm_ok": True})
         MOD._teardown_session(meta)
-        self.assertFalse(MOD.session_dir("t1").exists())
+        self.assertFalse(SESSIONS.session_dir("t1").exists())
         self.assertFalse(self.claim_path(8090).exists())
 
     def test_teardown_forgives_rm_of_unregistered_sandbox(self):
@@ -818,16 +819,16 @@ class LifecycleTest(_FakeToolsCase):
         self.write_session("t2", 8090)
         self.write_claim(8090, "t2", _dead_pid())
         self.msb_cfg({"rm_ok": False, "listed": []})
-        MOD._teardown_session(MOD.read_meta("t2"))
-        self.assertFalse(MOD.session_dir("t2").exists())
+        MOD._teardown_session(SESSIONS.read_meta("t2"))
+        self.assertFalse(SESSIONS.session_dir("t2").exists())
         self.assertFalse(self.claim_path(8090).exists())
 
     def test_teardown_releases_port_claim(self):
         self.write_session("t3", 8090)
         self.write_claim(8090, "t3", _dead_pid())
         self.msb_cfg({"rm_ok": True})
-        MOD._teardown_session(MOD.read_meta("t3"))
-        self.assertFalse(MOD.session_dir("t3").exists())
+        MOD._teardown_session(SESSIONS.read_meta("t3"))
+        self.assertFalse(SESSIONS.session_dir("t3").exists())
         self.assertFalse(self.claim_path(8090).exists(), "port claim outlived its session")
 
     # -- the proxy's lifetime follows the registry (#29) ---------------------------
@@ -841,7 +842,7 @@ class LifecycleTest(_FakeToolsCase):
         self.proxy_meta(pid=stub.pid)
         self.write_session("last", 8090)
         self.write_claim(8090, "last", os.getpid())
-        MOD._teardown_session(MOD.read_meta("last"))
+        MOD._teardown_session(SESSIONS.read_meta("last"))
         self._settle(stub)
         self.assertIsNotNone(stub.poll(),
                              "the proxy outlived its last session — the #29 orphan")
@@ -852,7 +853,7 @@ class LifecycleTest(_FakeToolsCase):
         self.proxy_meta(pid=stub.pid)
         self.write_session("going", 8090)
         self.write_session("staying", 8091)
-        MOD._teardown_session(MOD.read_meta("going"))
+        MOD._teardown_session(SESSIONS.read_meta("going"))
         self.assertIsNone(stub.poll(), "proxy stopped while a session still needs it")
         self.assertTrue(PATHS.PROXY_JSON.exists())
 
@@ -863,7 +864,7 @@ class LifecycleTest(_FakeToolsCase):
         self.proxy_meta(pid=stub.pid)
         self.write_session("going", 8090)
         self.write_claim(8091, "starting", os.getpid())
-        MOD._teardown_session(MOD.read_meta("going"))
+        MOD._teardown_session(SESSIONS.read_meta("going"))
         self.assertIsNone(stub.poll(), "proxy killed under a starting session")
         self.assertTrue(PATHS.PROXY_JSON.exists())
 
@@ -879,7 +880,7 @@ class LifecycleTest(_FakeToolsCase):
             self.write_session(name, 8090 + i)
             self.write_claim(8090 + i, name, os.getpid())
         self.run_teardown_race(names, down_style=False)
-        self.assertEqual(MOD.list_metas(), [])
+        self.assertEqual(SESSIONS.list_metas(), [])
         self._settle(stub)
         self.assertIsNotNone(stub.poll(),
                              "no sessions remain yet the proxy is still up — the #29 orphan")

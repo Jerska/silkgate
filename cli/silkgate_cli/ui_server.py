@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import console, core, git, logs, mitm, paths
+from . import console, core, git, logs, mitm, paths, sessions
 
 
 # --- ui: a local web view over the events files -------------------------------------
@@ -221,16 +221,16 @@ def _resolve_ident(ident):
     The ident is checked before it's a path: by read_meta for a name, read_archived_meta
     for a sid. Their die() on a planted meta becomes a not-found here, not a dead thread.
     A name that also parses as a sid resolves live first."""
-    if core._NAME_RE.fullmatch(ident or ""):
+    if sessions._NAME_RE.fullmatch(ident or ""):
         try:
-            meta = core.read_meta(ident)
+            meta = sessions.read_meta(ident)
         except SystemExit:
             return None, None, None
         if meta:
-            return meta, "live", core.session_dir(ident)
-    if core._SID_RE.fullmatch(ident or ""):
+            return meta, "live", sessions.session_dir(ident)
+    if sessions._SID_RE.fullmatch(ident or ""):
         try:
-            meta = core.read_archived_meta(ident)
+            meta = sessions.read_archived_meta(ident)
         except SystemExit:
             return None, None, None
         if meta:
@@ -261,7 +261,7 @@ def _session_briefs(meta, state, sdir):
     operator brief. It's guest-writable, so its label is the warning, and symlinks aren't
     followed."""
     sources = {}
-    for rec in core._read_journal(sdir / "journal.jsonl"):
+    for rec in sessions._read_journal(sdir / "journal.jsonl"):
         if rec.get("event") == "exec_start" and rec.get("brief_source"):
             sources[str(rec.get("exec_id"))] = str(rec["brief_source"])
     briefs = {}
@@ -400,7 +400,7 @@ def _metrics_snapshot():
                 and now - _METRICS_CACHE["at"] < UI_METRICS_TTL):
             return _METRICS_CACHE["payload"]
         metrics = []
-        metas = core.list_metas()
+        metas = sessions.list_metas()
         if metas:
             raw = _run_msb_metrics()
             by_sandbox = {}
@@ -417,7 +417,7 @@ def _metrics_snapshot():
                     if "memory_bytes" in row:
                         row["memory_rss_bytes"] = row.pop("memory_bytes")
                     metrics.append({"session": m["name"], **row})
-        payload = {"sampled": core.now_iso(), "ttl": UI_METRICS_TTL, "metrics": metrics}
+        payload = {"sampled": sessions.now_iso(), "ttl": UI_METRICS_TTL, "metrics": metrics}
         _METRICS_CACHE.update(at=now, payload=payload)
         return payload
 
@@ -431,7 +431,7 @@ def _search_files():
         entries += [(p, source) for p in paths.LOG_DIR.glob(pattern)]
     if paths.ARCHIVE_DIR.is_dir():
         entries += [(d / "journal.jsonl", "journal") for d in paths.ARCHIVE_DIR.iterdir()
-                    if core._SID_RE.fullmatch(d.name) and (d / "journal.jsonl").is_file()]
+                    if sessions._SID_RE.fullmatch(d.name) and (d / "journal.jsonl").is_file()]
 
     def mtime(entry):
         try:
@@ -484,14 +484,14 @@ def _session_state(name):
     """One live session's state as the UI reports it: "frozen" while rules.frozen
     holds the preserved ruleset, else "live". The VM runs either way — frozen is
     about egress, not placement, so archive stays out of this answer."""
-    return "frozen" if (core.session_dir(name) / "rules.frozen").exists() else "live"
+    return "frozen" if (sessions.session_dir(name) / "rules.frozen").exists() else "live"
 
 
 def _freeze_session(name):
     """Freeze one live session's egress: rules.txt moves to rules.frozen and an empty
     ruleset takes its place — deny-by-default does the rest, since the addon re-reads
     the session's rules on every resolve. Why it failed, or None."""
-    sdir = core.session_dir(name)
+    sdir = sessions.session_dir(name)
     if (sdir / "rules.frozen").exists():
         return "already frozen"
     try:
@@ -499,21 +499,21 @@ def _freeze_session(name):
         (sdir / "rules.txt").write_text("")
     except OSError as e:
         return f"could not freeze: {e}"
-    core._journal(name, "frozen")
+    sessions._journal(name, "frozen")
     return None
 
 
 def _resume_session(name):
     """Undo _freeze_session: the preserved ruleset moves back over the empty one (one
     atomic rename). Why it failed, or None."""
-    sdir = core.session_dir(name)
+    sdir = sessions.session_dir(name)
     if not (sdir / "rules.frozen").exists():
         return "not frozen"
     try:
         (sdir / "rules.frozen").rename(sdir / "rules.txt")
     except OSError as e:
         return f"could not resume: {e}"
-    core._journal(name, "resumed")
+    sessions._journal(name, "resumed")
     return None
 
 
@@ -704,9 +704,9 @@ def _ui_server(port):
                          "ended": m.get("ended"),
                          **({"last_rc": m["last_rc"]} if "last_rc" in m else {}),
                          **({"branch": m["branch"]} if m.get("branch") else {})}
-                        for m in reversed(core.list_archived_metas()[-UI_ARCHIVED_LIMIT:])]
+                        for m in reversed(sessions.list_archived_metas()[-UI_ARCHIVED_LIMIT:])]
             self._json({"sessions": [{**m, "state": _session_state(m["name"])}
-                                     for m in core.list_metas()],
+                                     for m in sessions.list_metas()],
                         "archived": archived,
                         "proxy": {"running": running,
                                   "pid": (ident or meta.get("pid")) if running else None,
@@ -800,7 +800,7 @@ def _ui_server(port):
             # briefs map — a frozen VM still runs, so it reads as live there.
             reported = _session_state(meta["name"]) if state == "live" else state
             self._json({"session": meta, "state": reported,
-                        "journal": core._read_journal(sdir / "journal.jsonl"),
+                        "journal": sessions._read_journal(sdir / "journal.jsonl"),
                         "briefs": _session_briefs(meta, state, sdir),
                         "rules": rules,
                         "pointers": {"events": proxy.get("events"),
@@ -893,7 +893,7 @@ def _ui_server(port):
                     {"error": "an archived session has nothing to kill"}, 409)
             token, detail = _kill_in_guest(meta, exec_id)
             if token == "SILKGATE_KILLED":
-                core._journal(meta["name"], "killed", exec_id=exec_id)
+                sessions._journal(meta["name"], "killed", exec_id=exec_id)
                 return self._json({"ok": True})
             if token == "SILKGATE_NO_PIDFILE":
                 return self._json({"error": f"no pidfile for exec {exec_id} — "

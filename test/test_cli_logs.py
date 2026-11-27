@@ -51,6 +51,7 @@ LOGS = pkg.logs
 PATHS = pkg.paths
 CONSOLE = pkg.console
 MITM = pkg.mitm
+SESSIONS = pkg.sessions
 
 RULE = "api.anthropic.com/** GET"
 
@@ -164,14 +165,14 @@ class SilkgateTest(unittest.TestCase):
                 "sock": str(PATHS.PROXY_SOCK)}
         if events is not None:
             meta["events"] = str(events)
-        MOD._write_json(PATHS.PROXY_JSON, meta)
+        SESSIONS._write_json(PATHS.PROXY_JSON, meta)
         return meta
 
     def write_session(self, name, port=8090):
-        sdir = MOD.session_dir(name)
+        sdir = SESSIONS.session_dir(name)
         sdir.mkdir(parents=True)
         (sdir / "rules.txt").write_text(RULE + "\n")
-        MOD._write_json(sdir / "meta.json",
+        SESSIONS._write_json(sdir / "meta.json",
                         {"name": name, "sandbox": "sg-" + name, "port": port})
 
     def log_names(self):
@@ -544,7 +545,7 @@ class LogsAuditTest(SilkgateTest):
                              '[12:00:01.500] {"session": "foo", "decision": "deny", '
                              '"host": "b", "date": "2026-08-04", "status": 403}\n')
             elif step == 1:                              # `silkgate down foo` elsewhere
-                shutil.rmtree(MOD.session_dir("foo"))
+                shutil.rmtree(SESSIONS.session_dir("foo"))
             else:
                 raise AssertionError("follow did not stop after its session went away")
 

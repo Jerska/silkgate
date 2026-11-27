@@ -1,11 +1,10 @@
 """Checkout and branch sessions: a clone of the host repository in the guest, and its way back."""
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
 
-from . import console, core, paths
+from . import console, core, paths, sessions
 
 
 # --- checkout/branch sessions: a clone in the guest, from the host repo ---------
@@ -32,10 +31,6 @@ _GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_
 def _host_git_env():
     """os.environ minus git's repo-location overrides, for every host-side git call."""
     return {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_VARS}
-_BASE_RE = re.compile(r"[0-9a-f]{40}")
-# meta.json's branch reaches git argv (always behind --git-dir, always fully qualified) and,
-# with repo_root, an rmtree decision — held to a charset before use, like "sandbox" above.
-_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,200}")
 
 
 def _git(git_dir, *argv):
@@ -321,9 +316,9 @@ def _ingest_bundle(meta, bundle, tip):
     count = _git(git_dir, "rev-list", "--count", f"{meta['base']}..{staged}")
     n = count.stdout.strip() if count and not count.returncode else "?"
     console.say(f"branch {branch}: {n} commit(s) since base, tip {staged[:12]}")
-    mpath = core.session_dir(name) / "meta.json"
+    mpath = sessions.session_dir(name) / "meta.json"
     if mpath.is_file():
-        core._write_json(mpath, {**meta, "branch_ingested": staged})
+        sessions._write_json(mpath, {**meta, "branch_ingested": staged})
         meta["branch_ingested"] = staged
     return True
 
@@ -352,8 +347,8 @@ def _harvest_branch(meta):
         ok, result = False, "failed"
     # The verdict is settled before the record is cut, and _journal never raises, so a
     # journal failure cannot change what this harvest reports.
-    core._journal(meta["name"], "harvest", result=result, tip=tip,
-                  detail=None if token == "SILKGATE_BUNDLED" else detail or None)
+    sessions._journal(meta["name"], "harvest", result=result, tip=tip,
+                      detail=None if token == "SILKGATE_BUNDLED" else detail or None)
     return ok
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import rule_engine
 
-from . import console, core, foreground, paths
+from . import console, foreground, paths, sessions
 
 
 # Mirrored in doc/PROXY.md (The port pool). Update both.
@@ -300,7 +300,7 @@ def ensure_ca():
 # --- shared proxy -----------------------------------------------------------
 
 def read_proxy():
-    return core._read_json(paths.PROXY_JSON)
+    return sessions._read_json(paths.PROXY_JSON)
 
 
 def proxy_alive(pid):
@@ -429,10 +429,10 @@ def start_shared_proxy(base_port, ports=None):
     meta = {"pid": proc.pid, "base_port": ports[0], "ports": ports,
             "log": str(log_path), "events": str(events_path),
             "capture": str(capture_path),
-            "sock": str(paths.PROXY_SOCK), "started": core.now_iso()}
+            "sock": str(paths.PROXY_SOCK), "started": sessions.now_iso()}
     try:
         _wait_proxy_ready(proc, ports, log_path)
-        core._write_json(paths.PROXY_JSON, meta)
+        sessions._write_json(paths.PROXY_JSON, meta)
     except BaseException:       # incl. a Ctrl-C mid-wait: until proxy.json lands, no
         foreground.stop(proc)   # other command can ever find this mitmdump to stop
         raise                   # it (stop is a no-op where the wait already did)
@@ -454,11 +454,11 @@ def _pinned_pool(meta):
     dies if a port is taken. The caller holds _proxy_lock and calls this before the old
     proxy record, where the pool is read from, is cleared."""
     owners = {}
-    for m in core.list_metas():
+    for m in sessions.list_metas():
         if m.get("port"):
             owners.setdefault(m["port"], m["name"])
     for p in _live_claims():
-        owners.setdefault(p, (core._read_json(_claim_path(p)) or {}).get("name"))
+        owners.setdefault(p, (sessions._read_json(_claim_path(p)) or {}).get("name"))
     if not owners:
         return None
     pool = (meta or {}).get("ports") or []
@@ -486,7 +486,7 @@ def _ensure_proxy_locked(base_port):
                         f"{paths.PROXY_JSON} is gone — kill that process and retry")
         if ident and meta.get("pid") != ident:
             meta["pid"] = ident                # proxy.json outlived the proxy it described;
-            core._write_json(paths.PROXY_JSON, meta)  # the socket's owner is the identity
+            sessions._write_json(paths.PROXY_JSON, meta)  # the socket's owner is the identity
         return meta
     pinned = _pinned_pool(meta)                # read while the stale record still exists
     if meta:                                   # record of a proxy that no longer answers
@@ -503,7 +503,7 @@ def stop_proxy(meta):
     signalled, so a stale proxy.json whose pid was recycled cannot draw a SIGKILL onto an
     unrelated process. When nothing answers there is nothing to kill, only files to clear."""
     with _proxy_lock():
-        if core.list_metas() or _live_claims():
+        if sessions.list_metas() or _live_claims():
             return
         ident = _proxy_ident()
         if ident is None:
@@ -547,7 +547,7 @@ def _claim_port(port, name):
     except FileExistsError:
         return False
     with os.fdopen(fd, "w") as fh:
-        fh.write(json.dumps({"name": name, "pid": os.getpid(), "created": core.now_iso()}))
+        fh.write(json.dumps({"name": name, "pid": os.getpid(), "created": sessions.now_iso()}))
     return True
 
 
@@ -557,11 +557,11 @@ def _claim_stale(port, path):
     Not stale while its session dir exists — the guest may still hold L3 access to the
     port even if unhealthy, and only `down` frees that — nor while any session's meta
     names the port, nor while the claiming process is alive (provisioning in flight)."""
-    info = core._read_json(path) or {}
+    info = sessions._read_json(path) or {}
     name = info.get("name")
-    if name and core.session_dir(name).exists():
+    if name and sessions.session_dir(name).exists():
         return False
-    if any(m.get("port") == port for m in core.list_metas()):
+    if any(m.get("port") == port for m in sessions.list_metas()):
         return False
     return not proxy_alive(info.get("pid"))
 
@@ -575,7 +575,7 @@ def _release_port(name, port=None):
     except OSError:
         return
     for path in paths:
-        info = core._read_json(path)
+        info = sessions._read_json(path)
         if info and info.get("name") == name:
             try:
                 os.unlink(path)
@@ -601,7 +601,7 @@ def pick_port(proxy, name):
     crash leftover: reaped and reused. A pool held entirely by live sessions and claims
     is genuinely full, and an error."""
     with _proxy_lock():
-        taken = {m.get("port") for m in core.list_metas() if m.get("name") != name}
+        taken = {m.get("port") for m in sessions.list_metas() if m.get("name") != name}
         for p in proxy["ports"]:
             if p in taken:
                 continue

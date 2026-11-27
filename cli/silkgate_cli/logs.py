@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import console, core, mitm
+from . import console, core, mitm, sessions
 
 
 # --- logs: per-session observability ----------------------------------------
@@ -45,7 +45,7 @@ def _logs_guest(args, meta):
     printed = len(full)
     while True:
         time.sleep(args.interval)
-        if not core.session_dir(args.name).exists():  # someone ran `silkgate down`
+        if not sessions.session_dir(args.name).exists():  # someone ran `silkgate down`
             console.die(f"session {args.name!r} is gone — stopped following")
         lines, err = core._run_msb_logs(sandbox)
         if err is not None:                          # sandbox removed / msb unhappy
@@ -112,7 +112,7 @@ def _logs_audit(args):
         return
     while True:
         time.sleep(args.interval)
-        if not core.session_dir(name).exists():
+        if not sessions.session_dir(name).exists():
             console.die(f"session {name!r} is gone — stopped following")
         p = mitm.read_proxy()
         # Identity, not pid liveness: after an unclean exit proxy.json survives and its
@@ -142,8 +142,8 @@ def cmd_logs(args):
     A supervising parent sees nothing until an exec exits (msb's exec is RPC-shaped),
     so -f polls the live captured log (there is no `msb logs --follow`). --audit reads
     the shared audit log and keeps only lines whose "session" field is this session."""
-    core._validate_name(args.name)
-    meta = core.read_meta(args.name)
+    sessions._validate_name(args.name)
+    meta = sessions.read_meta(args.name)
     if not meta:
         console.die(f"no such session: {args.name!r} (silkgate ls)")
     if args.tail is not None and args.tail < 0:

@@ -63,6 +63,7 @@ UI = pkg.ui_server
 GIT = pkg.git
 PATHS = pkg.paths
 MITM = pkg.mitm
+SESSIONS = pkg.sessions
 
 
 def event(**kw):
@@ -159,24 +160,24 @@ class UiTest(unittest.TestCase):
         if events is not None:
             meta["events"] = str(events)
         meta.update(extra)
-        MOD._write_json(PATHS.PROXY_JSON, meta)
+        SESSIONS._write_json(PATHS.PROXY_JSON, meta)
         return meta
 
     def write_session(self, name, port=8090, rules="api.anthropic.com/** GET\n",
                       **extra):
-        sdir = MOD.session_dir(name)
+        sdir = SESSIONS.session_dir(name)
         sdir.mkdir(parents=True)
         (sdir / "rules.txt").write_text(rules)
-        MOD._write_json(sdir / "meta.json",
+        SESSIONS._write_json(sdir / "meta.json",
                         {"name": name, "sandbox": "sg-" + name, "port": port, **extra})
         return sdir
 
     def write_archive(self, name="old1", **extra):
         """One archived session dir under the repointed ARCHIVE_DIR -> (sid, dir)."""
-        sid = MOD._new_sid(name)
+        sid = SESSIONS._new_sid(name)
         adir = PATHS.ARCHIVE_DIR / sid
         adir.mkdir(parents=True)
-        MOD._write_json(adir / "meta.json",
+        SESSIONS._write_json(adir / "meta.json",
                         {"name": name, "sandbox": "sg-" + name, "port": 8091,
                          "sid": sid, "created": "2026-08-04T10:00:00+00:00",
                          "ended": "2026-08-04T12:00:00+00:00", **extra})
@@ -702,8 +703,8 @@ class UiSessionDetailTest(UiServerTest):
 
     def test_live_session_detail(self):
         sdir = self.write_session("s1", rules="pypi.org/** GET\n")
-        MOD._journal("s1", "created", meta={})
-        MOD._journal("s1", "exec_start", exec_id="cafe1234", argv=["true"])
+        SESSIONS._journal("s1", "created", meta={})
+        SESSIONS._journal("s1", "exec_start", exec_id="cafe1234", argv=["true"])
         cap = self.events_file("capture-01.jsonl")
         resp, got = self.get_json("/api/session/s1")
         self.assertEqual(resp.status, 200)
@@ -751,9 +752,9 @@ class UiSessionDetailTest(UiServerTest):
         (bdir / "cafe1234.md").write_bytes(b"# exec one's own ask\n")
         (bdir / "beef5678.md").write_bytes(b"# the default\n")
         (bdir / "not-an-exec-id.md").write_bytes(b"planted\n")
-        MOD._journal("s6", "exec_start", exec_id="cafe1234", argv=["true"],
+        SESSIONS._journal("s6", "exec_start", exec_id="cafe1234", argv=["true"],
                      brief_sha256="x", brief_source="flag")
-        MOD._journal("s6", "exec_start", exec_id="beef5678", argv=["true"],
+        SESSIONS._journal("s6", "exec_start", exec_id="beef5678", argv=["true"],
                      brief_sha256="y", brief_source="default")
         _, got = self.get_json("/api/session/s6")
         self.assertEqual(sorted(got["briefs"]),
@@ -805,7 +806,7 @@ class UiSessionDetailTest(UiServerTest):
         (self.root / "ws").mkdir()
         (self.root / "ws" / "BRIEF.md").write_text("# too late\n")
         (adir / "rules.txt").write_text("RULES\n")
-        MOD._journal_into(adir, "down")
+        SESSIONS._journal_into(adir, "down")
         _, got = self.get_json(f"/api/session/{sid}")
         self.assertEqual(got["state"], "archived")
         self.assertEqual(got["session"]["sid"], sid)
@@ -829,9 +830,9 @@ class UiSessionDetailTest(UiServerTest):
             self.assertEqual(resp.status, 404, ident)
 
     def test_planted_meta_is_refused_as_404(self):
-        sdir = MOD.session_dir("evil")
+        sdir = SESSIONS.session_dir("evil")
         sdir.mkdir(parents=True)
-        MOD._write_json(sdir / "meta.json", {"name": "other"})
+        SESSIONS._write_json(sdir / "meta.json", {"name": "other"})
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             resp, _ = self.get_json("/api/session/evil")
@@ -1202,7 +1203,7 @@ class UiSearchTest(UiServerTest):
         self.events_file("capture-01.jsonl",
                          capture_event(id="c", model="claude-fable-5"))
         sid, adir = self.write_archive("olds")
-        MOD._journal_into(adir, "exec_start", exec_id="cafe1234",
+        SESSIONS._journal_into(adir, "exec_start", exec_id="cafe1234",
                           argv=["claude", "-p", "fix pypi build"])
         return sid
 
@@ -1277,7 +1278,7 @@ class UiControlTest(UiServerTest):
         self.assertEqual(resp.status, 409)
         self.assertIn("not frozen", got["error"])
         events = [r["event"] for r in
-                  MOD._read_journal(sdir / "journal.jsonl")]
+                  SESSIONS._read_journal(sdir / "journal.jsonl")]
         self.assertEqual(events, ["frozen", "resumed"])
 
     def test_down_drives_the_shared_teardown_path(self):
@@ -1326,7 +1327,7 @@ class UiControlTest(UiServerTest):
         self.assertIn('kill -KILL -- -"$pgid"', script)
         self.assertEqual(seen["argv"][-1], "cafe1234",
                          "the exec id rides argv, never spliced into the script")
-        events = MOD._read_journal(sdir / "journal.jsonl")
+        events = SESSIONS._read_journal(sdir / "journal.jsonl")
         self.assertEqual([(r["event"], r.get("exec_id")) for r in events],
                          [("killed", "cafe1234")])
 

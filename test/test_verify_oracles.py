@@ -47,6 +47,7 @@ pt = pkg.paths
 con = pkg.console
 prof = pkg.profile
 mt = pkg.mitm
+ss = pkg.sessions
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet                                          # noqa: E402
@@ -844,7 +845,7 @@ class GuestArgv(unittest.TestCase):
 
     def test_the_name_is_one_msb_accepts_and_no_session_can_produce(self):
         name = vf._verify_guest_name("main")
-        self.assertTrue(sg._SANDBOX_RE.fullmatch(name))
+        self.assertTrue(ss._SANDBOX_RE.fullmatch(name))
         self.assertFalse(name.startswith("sg-"))       # sandbox_name()'s prefix; never ours
         self.assertTrue(vf._VERIFY_GUEST_RE.fullmatch(name))
         self.assertIn(str(os.getpid()), name)
@@ -976,7 +977,7 @@ class LeakedGuests(unittest.TestCase):
     def test_a_sessions_sandbox_is_never_touched(self):
         # `verify foo` is not a thing, but `up --name verify-123-main` is, and its sandbox is
         # sg-prefixed for exactly this reason.
-        self.listed(sg.sandbox_name(f"verify-{_dead_pid()}-main"), "sg-other")
+        self.listed(ss.sandbox_name(f"verify-{_dead_pid()}-main"), "sg-other")
         _, log = self.reap()
         self.assertNotIn("rm ", log)
 
