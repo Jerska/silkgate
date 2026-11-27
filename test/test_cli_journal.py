@@ -496,7 +496,7 @@ class TestBrief(JournalCase):
         ruleset = sg.load_ruleset("")
         with_brief = sg.session_context([], ruleset, persistent=False, brief=True)
         self.assertIn(pointer, with_brief)
-        self.assertLess(with_brief.index(pointer), with_brief.index("## What is here"),
+        self.assertLess(with_brief.index(pointer), with_brief.index("## What's installed"),
                         "the pointer comes before everything else the guest reads")
         without = sg.session_context([], ruleset, persistent=False)
         self.assertNotIn("BRIEF.md", without)

@@ -1043,29 +1043,19 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
     lines = [
         "# Where you are: a silkgate sandbox",
         "",
-        "Read this to learn what is installed here, what is reachable, and what survives",
+        "Read this to learn what's installed here, what you can reach, and what survives",
         "this machine.",
         "",
-        "**Work within what this file lists — nothing inside this machine can widen it.**",
-        "Silkgate runs a command — usually a coding agent — inside a small, disposable",
-        "virtual machine. Everything the machine sends to the network passes through one",
-        "proxy. The proxy permits a named list of destinations and refuses the rest.",
+        "**You're in a disposable VM. Every network request goes through a proxy that allows",
+        "only the destinations listed below. Nothing inside this machine can widen that.**",
     ]
     if brief:
-        lines += [
-            "",
-            f"Your task brief is at `{GUEST_BRIEF}`. Read it first.",
-        ]
+        lines += ["", f"Your task brief is at `{GUEST_BRIEF}`. Read it first."]
     lines += [
         "",
-        "## Split independent work across subagents",
+        "Launch subagents freely for independent work.",
         "",
-        "**Do not hesitate to launch multiple subagents to process independent work in",
-        "parallel.**",
-        "",
-        "## What is here",
-        "",
-        "**Use only the tools listed below — nothing more can be installed.**",
+        "## What's installed",
         "",
     ]
     if profiles:
@@ -1073,141 +1063,110 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         # that differ only in args install the same tools once.
         for p in _image_profiles(profiles):
             # Named as packages, not commands, since the two differ (ripgrep ships `rg`).
-            extra = f" — plus packages {', '.join(p.packages)}" if p.packages else ""
+            extra = f", plus packages {', '.join(p.packages)}" if p.packages else ""
             lines.append(f"- `{p.image_spec}`{extra}")
     else:
         lines.append("- Nothing beyond the base image.")
     lines += [
         "",
-        "That list is exhaustive: the base image is a bare distro plus those tools. git,",
-        "python, pip, make and compilers are absent unless named above, and you cannot",
-        "add them. apt is installed, but no mirror is reachable. Check what exists",
-        "before you reach for it.",
+        "That's all. git, python, pip, make, and compilers are absent unless listed, and",
+        "you can't install more: no package mirror is reachable.",
         "",
-        "## What survives this machine",
+        "## What survives",
         "",
     ]
     ws_mode = next((mode for _, dst, mode in mounts if dst == "/workspace"), None)
     others = [(dst, mode) for _, dst, mode in mounts if dst != "/workspace"]
     if branch:
         lines += [
-            f"**Commit your work to branch `{branch}` as you go — commits are the",
-            "deliverable.** `/workspace` is a checkout of the project on that branch, and",
-            "git works. When this session ends, the commits land in the host repository as",
-            "that branch, and everything uncommitted in `/workspace` is deleted. The host",
-            "can collect the branch mid-session too. Never rewrite or amend a commit you",
-            "already made: the branch only moves forward. Do not push — no remote accepts a",
-            "push. If you need history, `git log` and `git fetch origin` work. The clone's",
-            "origin is a read-only mount of the host repository.",
+            f"**Commit to branch `{branch}` as you go. Commits are the deliverable.**",
+            "",
+            "- `/workspace` is a checkout of the project on that branch.",
+            "- When the session ends, your commits land in the host repo. Everything",
+            "  uncommitted is deleted. The host can also collect commits mid-session.",
+            "- Never amend or rewrite a commit you made: the branch only moves forward.",
+            "- Don't push: no remote accepts it. `origin` is a read-only copy of the host repo,",
+            "  so `git log` and `git fetch origin` work.",
         ]
     elif checkout:
         lines += [
-            "**Put your results in printed output — nothing you write leaves this machine,",
-            "commits included.** `/workspace` is a disposable checkout of the project at",
-            f"`{checkout}` as of session start, and git works: local commits are fine. The",
-            "clone's origin is a read-only mount of the host repository, so",
-            "`git fetch origin` and `git log` work. No remote accepts a push.",
+            "**Put your results in printed output. Nothing you write leaves this machine,",
+            "commits included.**",
+            "",
+            f"- `/workspace` is a throwaway checkout of the project at `{checkout}`. Local",
+            "  commits are fine.",
+            "- `origin` is a read-only copy of the host repo, so `git log` and",
+            "  `git fetch origin` work. No remote accepts a push.",
         ]
     elif ws_mode == "ro":
         lines += [
-            "**Put your results in printed output — `/workspace` is read-only and nothing",
-            "else survives.** `/workspace` is host code, and writes to it fail. The rest of",
-            "the filesystem is writable scratch that dies with this machine.",
+            "**Put your results in printed output.** `/workspace` is host code, read-only.",
+            "The rest of the filesystem is scratch that dies with this machine.",
         ]
     elif ws_mode == "rw":
         lines += [
-            "**Treat what you leave in `/workspace` as the deliverable.** `/workspace` is",
-            "your working directory, read-write, and a directory on the host. The rest of",
-            "the filesystem is writable too and fine for scratch work, but it does not",
-            "outlast this machine.",
+            "**What you leave in `/workspace` is the deliverable.** It's a host directory,",
+            "read-write. The rest of the filesystem is scratch that dies with this machine.",
         ]
     elif others:
-        lines.append("**`/workspace` is writable scratch that dies with this machine — no"
-                     " host directory is mounted there.**")
+        lines.append("**`/workspace` is scratch that dies with this machine.** No host"
+                     " directory is mounted there.")
     else:
         lines.append("**Nothing you write survives this machine.** No host directory is mounted.")
     if others:
-        lines += ["", "Beyond `/workspace`, these host directories are mounted:", ""]
+        lines += ["", "Other host directories mounted here:", ""]
         for dst, mode in others:
-            lines.append(f"- `{dst}` — " + ("read-only. Writes to it fail."
-                                            if mode == "ro" else
+            lines.append(f"- `{dst}`: " + ("read-only." if mode == "ro" else
                                             "read-write. What you leave there lands on the host."))
     lines += [
         "",
-        "This machine is " + ("kept alive between commands, so state you leave behind persists."
-                              if persistent else "destroyed when this command finishes."),
-        "",
-        "## The placeholder API key",
-        "",
-        "**Send the auth header on every request, with the placeholder key as its value.**",
-        "The API key in your environment is a placeholder, and calls made with it still",
-        "work. The proxy swaps in the real credential on the way out, and that credential",
-        "never enters this machine. The swap replaces the value of a header that is",
-        "present — it never adds an absent header. A request that omits the header gets a",
-        "genuine 401 from the destination. If you see a 401, add the header and resend",
-        "the request — the sandbox did not refuse it.",
+        "This machine " + ("stays up between commands, so what you leave behind persists."
+                           if persistent else "is destroyed when this command finishes."),
         "",
         "## What you can reach",
         "",
     ]
     if ruleset.rules:
         lines += [
-            "**Only these destinations are reachable, and only with the methods named",
-            "beside them.** Both http and https go through the proxy. The match is on the",
-            "host and the path, not on the scheme:",
+            "**Only these destinations, with these methods.** http and https both go through",
+            "the proxy, and the match ignores the scheme.",
             "",
         ]
         for rule in ruleset.rules:
             methods = " ".join(sorted(rule.methods))
-            inject = f" — injects `{rule.inject_auth}`" if rule.inject_auth else ""
-            lines.append(f"- `{rule.raw.split()[0]}` — {methods}{inject}")
+            inject = f", injects `{rule.inject_auth}`" if rule.inject_auth else ""
+            lines.append(f"- `{rule.raw.split()[0]}`: {methods}{inject}")
         lines += [
             "",
-            "`*` matches one DNS label in a host and one path segment in a path.",
-            "`**` matches anything: dots in a host, slashes in a path, or an empty path.",
-            "",
-            "If a package registry appears above, GET is enough to install from it. The",
-            "proxy refuses anything not listed. Over plain http the refusal is a 403 whose",
-            "body says `no matching rule`. Over https the refusal comes before the tunnel",
-            "opens. Most clients report that as a failed CONNECT that names 403 rather than",
-            "anything readable (`curl: (56) CONNECT tunnel failed, response 403`). A",
-            "refusal is policy, not a broken network and not a crash. DNS, TLS and routes",
-            "are all fine, and a retry cannot change the answer.",
+            "In a host, `*` matches one label. In a path, `*` matches one segment. `**` matches",
+            "anything, an empty path included. GET is enough to install from a listed registry.",
         ]
     else:
         # An empty allowlist is the strictest policy silkgate can express, and it is a normal
         # configuration rather than a broken one — so say what it means instead of a bare list.
         lines += [
-            "**Work from what is already on this machine — every network request is",
-            "refused.** The allowlist for this machine is empty. Over plain http the",
-            "refusal is a 403 whose body says `no matching rule`. Over https it is a",
-            "failed CONNECT that names 403. No host, port or protocol works, and there is",
-            "no DNS. A refusal is policy, not a broken network and not a crash. A retry",
-            "cannot change the answer.",
+            "**Nothing. The allowlist is empty, so work from what's on this machine.** No host,",
+            "port, or protocol works, and there's no DNS.",
         ]
     lines += [
         "",
-        "## Which side refused: read the header",
+        "## When a request is refused",
         "",
-        "**An error with the `X-Silkgate: deny` response header is the proxy's refusal —",
-        "an error without it came from the destination.** Every refusal the proxy itself",
-        "issues carries that header: those 403s, a refused https CONNECT, and the 500 the",
-        "proxy answers when it cannot decide. With that 500, the proxy protects itself",
-        "after an internal failure. Do not retry it in a loop. Report it, with the",
-        "request that caused it. On a refused CONNECT, `curl -v` shows the tunnel",
-        "response's headers even though its body is discarded. When the header is",
-        "absent, the request reached the destination and the destination said no. Common",
-        "causes are a wrong path, a bad token, or the destination's own rate limit. In",
-        "that case, fix the request, not the allowlist. The header is a diagnostic the",
-        "proxy adds, not a guarantee. A destination can imitate it, so treat it as a",
-        "strong hint.",
+        "**A refusal is policy, not a broken network. Retrying can't change it.**",
         "",
-        "## If you need a destination that is not listed",
+        "| You see | It means |",
+        "|---|---|",
+        "| http: a 403 with body `no matching rule` | the proxy refused it |",
+        "| https: `CONNECT tunnel failed, response 403` | the proxy refused it, before TLS |",
+        "| a 500 with `X-Silkgate: deny` | the proxy failed internally. Report it, don't retry. |",
+        "| an error without `X-Silkgate: deny` | the destination answered: fix the request |",
         "",
-        "**Name the destination you need in your answer to whoever set your task.** Name",
-        "the host, the path, the method and the reason. Printed output reaches whoever",
-        "set your task — that is the channel. Nobody inside this machine can widen the",
-        "list, so that report is the only thing that can.",
+        "Every proxy refusal carries the `X-Silkgate: deny` response header. `curl -v` shows",
+        "it on a refused CONNECT too. A destination could fake it, so treat it as a strong",
+        "hint, not proof.",
+        "",
+        "If you need an unlisted destination, say so in your answer: the host, path, method,",
+        "and why. Your printed output is the only channel to whoever set the task.",
     ]
     # A profile can ship a context.md — guidance that travels with the capability,
     # templated like its rules — appended once per instance, so the guest learns how
@@ -1220,13 +1179,14 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
     if inject_names:
         lines += [
             "",
-            "## Injected credentials",
+            "## Credentials",
             "",
-            "**Check the status of each credential below before you start work that needs",
-            "it.** Rules in this sandbox use `inject_auth` to replace a header value with a",
-            "real credential held on the host. The in-guest key or token is a dummy, and",
-            "the proxy swaps it at the boundary. The list below shows the status of each",
-            "credential at launch time:",
+            "**The key or token in your environment is a placeholder. Use it as if it were",
+            "real.** The proxy swaps in the real value, which never enters this machine. It only",
+            "replaces a header you send, never adds one. So a request without the header gets a",
+            "real 401 from the destination: add the header and resend.",
+            "",
+            "Status at launch:",
             "",
         ]
         for name in inject_names:
@@ -1234,13 +1194,11 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
             parsed = _parse_secret(value) if value else None
             if parsed is not None:
                 # The guest learns the header's name, never any part of its value.
-                status = (f"Available — the proxy replaces the value of the `{parsed[0]}` "
-                          "header at the boundary, and the matching in-guest key or token "
-                          "is a dummy.")
+                status = f"available. The proxy fills in the `{parsed[0]}` header."
             else:
-                reason = "not set" if not value else "set but not a valid header line"
-                status = (f"Missing or malformed ({reason}) — requests that need it will "
-                          "be denied. Report this to your operator. A retry cannot succeed.")
+                reason = "not set" if not value else "not a valid header line"
+                status = (f"missing ({reason}). Requests that need it will be denied. Tell"
+                          " whoever set your task: a retry can't fix it.")
             lines.append(f"- `inject_auth={name}`: {status}")
     return "\n".join(lines) + "\n"
 

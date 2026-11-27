@@ -891,7 +891,7 @@ class TestEmptyAllowlist(CliCase):
 
     def test_guest_brief_describes_an_empty_allowlist(self):
         empty = sg.session_context([], sg.load_ruleset(""), persistent=False)
-        self.assertIn("allowlist for this machine is empty", empty)
+        self.assertIn("The allowlist is empty", empty)
         self.assertNotIn("Only these", empty)
         listed = sg.session_context([], sg.load_ruleset("api.anthropic.com/v1/** POST\n"),
                                     persistent=False)
@@ -1037,7 +1037,7 @@ class TestSecretValidation(CliCase):
                              {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: sk-ant-test"}):
             ctx = sg.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
-        self.assertIn("Available", ctx)
+        self.assertIn("available", ctx)
         self.assertIn("`x-api-key`", ctx)          # names the header the proxy rewrites
         self.assertNotIn("sk-ant-test", ctx)       # and never any part of its value
 
@@ -1048,7 +1048,7 @@ class TestSecretValidation(CliCase):
         with mock.patch.dict(os.environ, env, clear=True):
             ctx = sg.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
-        self.assertIn("Missing or malformed", ctx)
+        self.assertIn("missing (", ctx)
         self.assertIn("not set", ctx)
 
     def test_session_context_lists_malformed_credential(self):
@@ -1057,7 +1057,7 @@ class TestSecretValidation(CliCase):
                              {"SILKGATE_EGRESS_SECRET_ANTHROPIC": "x-api-key: "}):
             ctx = sg.session_context([], ruleset, persistent=False)
         self.assertIn("inject_auth=anthropic", ctx)
-        self.assertIn("Missing or malformed", ctx)
+        self.assertIn("missing (", ctx)
         # A header name parsed out of a malformed secret is a guess — never surface it.
         self.assertNotIn("x-api-key", ctx)
 
@@ -1899,7 +1899,7 @@ class TestCheckoutSessions(GitRepoCase):
         self.assertEqual(seen["meta"]["base"], "0" * 40)
         self.assertNotIn("branch", seen["meta"])
         self.assertNotIn("workspace_derived", seen["meta"])
-        self.assertIn("disposable checkout of the project at\n`v1`", seen["context"])
+        self.assertIn("throwaway checkout of the project at `v1`", seen["context"])
         self.assertIn("Put your results in printed output", seen["context"])
 
     # --- a branchless session at harvest/down -------------------------------------
@@ -2243,8 +2243,8 @@ class TestMountProvisioning(CliCase):
             self.assertEqual(seen["mounts"], expected, argv)
             self.assertEqual(seen["meta"]["mounts"], expected, argv)
             self.assertIsNone(seen["ws"], argv)
-            self.assertIn("read-write, and a directory on the host", seen["context"], argv)
-            self.assertIn("`/data` — read-only", seen["context"], argv)
+            self.assertIn("What you leave in `/workspace` is the deliverable", seen["context"], argv)
+            self.assertIn("`/data`: read-only", seen["context"], argv)
 
     def test_no_mounts_records_no_mounts_key(self):
         seen = self.provision_capture(["run", "--", "true"])
@@ -2397,12 +2397,11 @@ class TestGuestBriefMounts(CliCase):
 
     def test_workspace_rw_text(self):
         ctx = self.ctx([("/h/p", "/workspace", "rw")])
-        self.assertIn("read-write, and a directory on the host", ctx)
+        self.assertIn("What you leave in `/workspace` is the deliverable", ctx)
 
     def test_workspace_ro_text(self):
         ctx = self.ctx([("/h/p", "/workspace", "ro")])
-        self.assertIn("`/workspace` is read-only", ctx)
-        self.assertIn("is host code, and writes to it fail", ctx)
+        self.assertIn("`/workspace` is host code, read-only", ctx)
         self.assertIn("Put your results in printed output", ctx)
 
     def test_no_mounts_text(self):
@@ -2410,28 +2409,28 @@ class TestGuestBriefMounts(CliCase):
 
     def test_other_mounts_listed_with_modes(self):
         ctx = self.ctx([("/h/a", "/data", "ro"), ("/h/b", "/out", "rw")])
-        self.assertIn("no host directory is mounted there", ctx)
-        self.assertIn("`/data` — read-only", ctx)
-        self.assertIn("`/out` — read-write", ctx)
+        self.assertIn("No host directory is mounted there", ctx)
+        self.assertIn("`/data`: read-only", ctx)
+        self.assertIn("`/out`: read-write", ctx)
 
     def test_branch_text_wins_and_other_mounts_still_listed(self):
         ctx = self.ctx([("/h/a", "/data", "ro")], branch="agent/x")
-        self.assertIn("Commit your work to branch `agent/x`", ctx)
-        self.assertIn("commits are the\ndeliverable", ctx)
-        self.assertIn("`/data` — read-only", ctx)
+        self.assertIn("Commit to branch `agent/x` as you go", ctx)
+        self.assertIn("Commits are the deliverable", ctx)
+        self.assertIn("`/data`: read-only", ctx)
 
     def test_checkout_text(self):
         ctx = self.ctx([], checkout="v1.2")
-        self.assertIn("disposable checkout of the project at\n`v1.2`", ctx)
+        self.assertIn("throwaway checkout of the project at `v1.2`", ctx)
         self.assertIn("Put your results in printed output", ctx)
         self.assertIn("No remote accepts a push", ctx)
-        self.assertIn("`git fetch origin` and `git log` work", ctx)
+        self.assertIn("`git fetch origin` work", ctx)
 
     def test_branch_text_wins_over_the_checkout_base(self):
         # --branch --checkout REF: REF is the base, the session is still a branch one.
         ctx = self.ctx([], branch="agent/x", checkout="v1.2")
-        self.assertIn("Commit your work to branch `agent/x`", ctx)
-        self.assertNotIn("disposable checkout", ctx)
+        self.assertIn("Commit to branch `agent/x` as you go", ctx)
+        self.assertNotIn("throwaway checkout", ctx)
 
 
 class TestGuestBriefEgress(CliCase):
@@ -2442,7 +2441,7 @@ class TestGuestBriefEgress(CliCase):
         return sg.session_context([], sg.load_ruleset(rules), persistent=False)
 
     def test_injected_rule_carries_the_marker(self):
-        self.assertIn("- `api.anthropic.com/v1/**` — POST — injects `anthropic`",
+        self.assertIn("- `api.anthropic.com/v1/**`: POST, injects `anthropic`",
                       self.ctx())
 
     def test_plain_rule_carries_no_marker(self):
@@ -2450,21 +2449,21 @@ class TestGuestBriefEgress(CliCase):
 
     def test_the_silkgate_500_has_an_action(self):
         ctx = self.ctx()
-        self.assertIn("Do not retry it in a loop", ctx)
-        self.assertIn("Report it, with the\nrequest that caused it", ctx)
+        self.assertIn("Report it, don't retry", ctx)
+        self.assertIn("the proxy failed internally", ctx)
 
     def test_glob_legend_sits_under_the_reachable_list(self):
         ctx = self.ctx()
-        self.assertIn("`*` matches one DNS label in a host and one path segment", ctx)
-        self.assertIn("dots in a host, slashes in a path, or an empty path", ctx)
+        self.assertIn("`*` matches one segment", ctx)
+        self.assertIn("an empty path included", ctx)
 
     def test_empty_allowlist_has_no_glob_legend(self):
         # No rules, no patterns — a legend under an empty list would explain nothing.
         self.assertNotIn("DNS label", self.ctx(""))
 
     def test_the_report_channel_is_defined(self):
-        self.assertIn("Printed output reaches whoever\nset your task — that is the "
-                      "channel", self.ctx())
+        self.assertIn("Your printed output is the only channel to whoever set the task",
+                      self.ctx())
 
 
 if __name__ == "__main__":
