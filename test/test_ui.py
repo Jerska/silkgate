@@ -23,7 +23,7 @@ What is covered:
   * SSE: retry preamble, record frames carrying resumable cursor ids, heartbeats while
     no proxy runs, and Last-Event-ID resume yielding only the suffix — for the audit
     stream and (parameterized) the capture stream
-  * wave 2: the new static routes and their traversal 404s, the CSRF/rebinding matrix,
+  * the session views' static routes and their traversal 404s, the CSRF/rebinding matrix,
     /api/session/<ident> (live + archived + bad idents + the briefs map with its
     per-exec/default/workspace source labeling),
     /output (TTL cache, caps), /api/metrics (TTL, empty registry, cached failures),
@@ -135,7 +135,7 @@ class UiTest(unittest.TestCase):
         MOD.LOG_DIR.mkdir(parents=True)
         MOD.SESSIONS_DIR.mkdir(parents=True)
         MOD.UI_DIR.mkdir()
-        # The wave-2 caches and the busy set live once per process; every test
+        # The UI server's caches and busy set live once per process. Every test
         # starts them cold so no test reads another's answers.
         MOD._METRICS_CACHE.update(at=None, payload=None)
         MOD._OUTPUT_CACHE.clear()
@@ -591,7 +591,7 @@ class UiStreamTest(UiServerTest):
         self.assertNotIn(b'"id": "x"', data, "the old file's history is not replayed")
 
 
-# -- the wave-2 static routes ---------------------------------------------------------
+# -- the static routes ----------------------------------------------------------------
 
 class UiWave2StaticTest(UiServerTest):
 

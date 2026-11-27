@@ -39,7 +39,7 @@ test("session routes carry ident and a clamped tab", () => {
                "an unknown tab falls back to the default, not a blank pane");
 });
 
-test("every wave-2 tab parses and round-trips", () => {
+test("every session tab parses and round-trips", () => {
   for (const tab of ["diff", "config", "brief", "output", "metrics"]) {
     const hash = `#/session/demo?tab=${tab}`;
     assert.deepEqual(parseRoute(hash), { view: "session", ident: "demo", tab });

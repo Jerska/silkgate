@@ -134,8 +134,8 @@ class CliCase(unittest.TestCase):
 
 
 class TestBuildArguments(CliCase):
-    """Finding 5: a version and a base image reach a generated Dockerfile that docker
-    builds as root on the host, outside the proxy."""
+    """A version and a base image reach a generated Dockerfile that docker builds as
+    root on the host, outside the proxy, so both are validated."""
 
     GOOD_VERSIONS = ["22.11.0", "3.12.7", "2.1.89", "1", "v1.2.3-rc1", "1.0.0+build.5", "a_b"]
     BAD_VERSIONS = ['1" ; echo PWNED-AT-BUILD-TIME ; #', "1$(id)", "1`id`", "1;id", "1 2",
@@ -271,8 +271,8 @@ class TestGuestCaEnv(CliCase):
 
 
 class TestSessionNames(CliCase):
-    """Finding 8: a session name is a path component of session_dir(), and what the
-    meta.json found there says becomes msb argv and an rmtree target."""
+    """A session name is a path component of session_dir(), and the meta.json found
+    there becomes msb argv and an rmtree target, so both are validated."""
 
     def plant(self, directory, meta):
         directory.mkdir(parents=True, exist_ok=True)
@@ -1068,7 +1068,7 @@ class TestSecretValidation(CliCase):
 
 
 class TestVerifyScoring(CliCase):
-    """Finding 9: a run where most checks SKIP is not containment.
+    """A run where most checks SKIP is not containment.
 
     The two sets come from the module rather than being spelled out again, so adding a check
     to the guest script cannot leave these assertions describing a contract that moved.
@@ -1425,7 +1425,7 @@ class TestBranchGuards(GitRepoCase):
                               ["up", "--name", "col1", "--branch", "x", "-v", f"{d}:{dst}"])
 
     def test_mounts_combine_with_branch(self):
-        # A -v mount beside --branch is legal now; only /workspace is owned. Reaching the
+        # A -v mount beside --branch is legal: only /workspace is owned. Reaching the
         # _branch_workspace spy proves _mount_args accepted the pair (it runs first).
         data = self.tmp / "data"
         data.mkdir()
@@ -1681,9 +1681,9 @@ class TestHarvestWiring(CliCase):
         return caught.exception.code, calls, seen.get("meta")
 
     def test_run_harvests_from_the_launch_spec_when_meta_vanishes(self):
-        # Regression: with meta.json unreadable mid-run, the fallback meta lacked
-        # branch/base/workspace — _bundle_in_guest raised KeyError inside the finally,
-        # so _teardown_session never ran and the sandbox leaked.
+        # With meta.json unreadable mid-run, the fallback meta must still carry
+        # branch, base, and workspace, or the harvest raises inside the finally and
+        # teardown never runs, leaking the sandbox.
         code, calls, meta = self.drive_run(harvest_ok=True, meta_on_disk=False)
         self.assertEqual(code, 0)
         self.assertEqual(meta["branch"], "nb")

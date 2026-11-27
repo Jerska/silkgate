@@ -52,16 +52,16 @@ class EngineSelfTests(ScriptCase):
 
 class ReproVerdicts(ScriptCase):
     def test_engine_findings_stay_fixed(self):
-        """Exits non-zero if any documented rule-engine fix (FEEDBACK §7) regresses."""
+        """engine_claims.py exits non-zero if any rule-engine defect it demonstrates returns."""
         self.assertExitsZero(run(sys.executable, REPO / "test" / "repro" / "engine_claims.py"))
 
     def test_build_injection_stays_refused(self):
-        """Drives the real CLI in subprocesses; exit 0 means every `--with`/`--base`
-        injection attempt (FEEDBACK §5) is still refused at parse time."""
+        """Drives the real CLI in subprocesses. Exit 0 means every `--with` and `--base`
+        injection attempt is refused at parse time."""
         self.assertExitsZero(run(sys.executable, REPO / "test" / "repro" / "build_injection.py"))
 
     def test_git_profile_rules_hold(self):
-        """The static half of the §6 repro: profiles/git/rules.txt must parse to zero
+        """The static half of git_profile_clone.sh: profiles/git/rules.txt must parse to zero
         rules, and the composed github floor plus a github-read grant must match both
         smart-HTTP fetch phases and deny push. The live half needs msb and the network."""
         self.assertExitsZero(run("sh", REPO / "test" / "repro" / "git_profile_clone.sh",

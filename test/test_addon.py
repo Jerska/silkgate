@@ -5,14 +5,13 @@
 
 Needs mitmproxy importable (the addon imports it); nothing else, and nothing listens.
 
-Grown from test/repro/addon_host_spoof.py, which found finding 1: policy was decided from
-`flow.request.pretty_host` — the client's `Host:` header — while mitmproxy connects to
-`flow.request.host`, so a guest could name an allowlisted host in a header and have the
-request, and the host-held credential, delivered anywhere it liked. Nothing in this file had
-ever been executed by a test, which is why that survived.
+The central rule: policy is decided from `flow.request.host`, where mitmproxy connects,
+never from `flow.request.pretty_host`, the client's `Host:` header. Otherwise a guest could
+name an allowlisted host in a header and have the request, and the host-held credential,
+delivered anywhere. test/repro/addon_host_spoof.py demonstrates that attack.
 
-Every case asserts on the audit record as well as on the response, because the same bug made
-the audit trail forgeable: a line naming a host the request never reached is worse than no
+Every case asserts on the audit record as well as on the response, because a spoofed host
+also forges the audit trail: a line naming a host the request never reached is worse than no
 line. The record must stay one JSON object per line and must keep `session`, which is what
 `silkgate logs --audit` filters on.
 """
@@ -183,7 +182,7 @@ class AddonCase(unittest.TestCase):
         return flow.response.content.decode("ascii", "replace").strip()
 
 
-# --- the four cases from the reproduction ------------------------------------
+# --- host spoofing: the destination decides, never the Host header ----------
 class HostSpoof(AddonCase):
 
     def test_honest_allow(self):
@@ -224,7 +223,7 @@ class HostSpoof(AddonCase):
         self.assertNoSecret(f)
 
     def test_sni_mismatch_is_denied(self):
-        """Case 5 of the reproduction: the one spoof the old code did catch."""
+        """A TLS SNI that disagrees with the Host header is denied."""
         f = self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
                             sni="evil.example")
         rec = self.assertDenied(f, host="api.anthropic.com",
@@ -262,7 +261,7 @@ class ClaimedAuthority(AddonCase):
                 self.assertAllowed(f, host="api.anthropic.com")
 
     def test_ip_literal_destination_is_denied(self):
-        """The engine's IP-literal guard only bites now that it sees the real destination."""
+        """The engine's IP-literal guard sees the real destination, not the claimed Host."""
         f = self.run_request(host="127.0.0.1", port=80, claimed="api.anthropic.com")
         self.assertDenied(f, host="127.0.0.1", port=80, reason="invalid host")
 
@@ -335,7 +334,7 @@ class Connect(AddonCase):
         self.assertTrue(rec["reason"].startswith("api.anthropic.com/v1/**"))
 
     def test_unlisted_authority_is_denied_and_logged(self):
-        """Finding 2: this used to be answered `200 Connection established`, unaudited."""
+        """A CONNECT to an unlisted authority is denied and audited, never tunneled."""
         f = self.run_connect(host="evil.example", port=443, claimed="evil.example:443")
         self.assertDenied(f, host="evil.example", port=443, reason="no matching rule")
 
@@ -583,7 +582,8 @@ class AuditRecord(AddonCase):
 class Secrets(AddonCase):
 
     def test_missing_secret_is_indistinguishable_from_a_policy_miss(self):
-        """Finding 8: a 500 here told the guest which secrets the host holds."""
+        """A missing secret answers like a policy miss, so the guest can't learn which
+        secrets the host holds."""
         missing = self.run_request(host="example.test", claimed="example.test", path="/x")
         self.assertDenied(missing, host="example.test", reason="missing secret")
         self.audit.lines.clear()
@@ -687,9 +687,9 @@ class Registry(RegistryCase):
                                 path="/lodash", listen_port=listen_port)
 
     def test_recreated_session_gets_its_own_rules(self):
-        """FEEDBACK §9: `down foo` + `up foo` recycling name and port inside one mtime
-        tick. The second occupant's policy — here an empty, reach-nothing ruleset — is the
-        one that must be enforced; its predecessor's allowlist is replaced data."""
+        """`down foo` then `up foo` can reuse the name and port within one mtime tick. The
+        second session's ruleset (here, an empty one) is what gets enforced, never its
+        predecessor's."""
         d = self.registry_dir({"alpha": 8090})
         self.sessions_mode(proxy_addon.SessionRegistry(str(d)))
         self.assertAllowed(self.request_npm(), host="registry.npmjs.org")
@@ -1105,7 +1105,7 @@ class EventsFileTest(AddonCase):
             self.assertEqual(content, "", "control record written to events file")
 
 
-# --- LLM capture: the wave-4 capture fixes ------------------------------------
+# --- LLM capture -------------------------------------------------------------
 CAPTURE_MODEL = "claude-sonnet-4-5"
 
 
@@ -1137,7 +1137,7 @@ def turn_events(text="Hi there.", output_tokens=42):
 class CaptureCase(AddonCase):
     """Flows through the one RULES line that opts into capture, with the capture sink
     swapped for a readable temp file. test_capture_tap.py drives the claude profile;
-    these cases pin the wave-4 capture fixes against the fixed RULES above."""
+    these cases drive the fixed RULES above."""
 
     def setUp(self):
         super().setUp()
@@ -1229,9 +1229,9 @@ def block_start(index, btype="text", **fields):
 
 
 class TotalCapSalvage(CaptureCase):
-    """r2 finding 3: a turn that dies at the total cap used to lose the model, the
-    token counts and the already-parsed block — the long turns, exactly the ones a
-    cost dashboard needs. The tap now flushes the popped decoder first."""
+    """A turn that dies at the total cap keeps its model, token counts, and parsed
+    block: the tap flushes the popped decoder first. Long turns are the ones a cost
+    view needs most."""
 
     def test_a_turn_dying_at_the_total_cap_keeps_model_and_tokens(self):
         piece = "x" * 48_000
@@ -1263,9 +1263,8 @@ class TotalCapSalvage(CaptureCase):
 
 
 class NonOkStatus(CaptureCase):
-    """r2 finding 13: a rate-limited or 5xx turn attached no decoder AND wrote no
-    capture_error, so the capture file read like idleness. One record names the
-    status; the decoder still attaches to 200s only."""
+    """A rate-limited or 5xx turn writes one record naming the status, so the capture
+    file never reads like idleness. The decoder attaches to 200s only."""
 
     def test_a_non_200_captured_flow_records_the_status(self):
         f = self.captured_request()
@@ -1367,9 +1366,9 @@ SECRET_TOKENS = [
 
 
 class TriggeredRedaction(unittest.TestCase):
-    """r2 finding 14: twenty regex passes cost ~49 ms per full block on the loop
-    every session shares. Each pass now hides behind a substring test that proves
-    it cannot match; these pin that the gate never eats a sighting."""
+    """Each secret regex runs only after a cheap substring test that proves it could
+    match, because twenty full passes cost ~49 ms per block on the loop every session
+    shares. These pin that the gate never hides a sighting."""
 
     def test_every_pattern_still_sights_through_its_trigger(self):
         for name, token in SECRET_TOKENS:

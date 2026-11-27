@@ -1,5 +1,5 @@
-// fixtures.test.js — realistic capture record sequences matching the wave-1
-// contract, shared by the capture tests (node --test runs this file too; the
+// fixtures.test.js — realistic capture record sequences matching the capture
+// record contract, shared by the capture tests (node --test runs this file too; the
 // tests at the bottom pin the fixtures to the contract's shape). Never served,
 // never imported by served files.
 //

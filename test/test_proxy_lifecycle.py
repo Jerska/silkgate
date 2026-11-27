@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lifecycle and race tests for cli/silkgate's proxy/session plumbing (FEEDBACK §2, §3, §8).
+"""Lifecycle and race tests for cli/silkgate's proxy and session plumbing.
 
 Everything runs against a temp state directory — never ~/.silkgate — with fake `msb` and
 `mitmdump` executables on PATH and stub unix control sockets standing in for the live
@@ -610,7 +610,7 @@ class LifecycleTest(_FakeToolsCase):
     # -- pick_port: the port claim ----------------------------------------------
 
     def test_concurrent_pick_port_yields_distinct_ports(self):
-        """§8 TOCTOU: N `up`s fanned out at once must not share a port."""
+        """N concurrent `up`s never share a port."""
         stub = self.start_stub_sock()
         base = 8090
         proxy = self.proxy_meta(pid=stub.pid, base=base)
@@ -662,8 +662,8 @@ class LifecycleTest(_FakeToolsCase):
             MOD.pick_port(proxy, "me")
 
     def test_pick_port_revives_proxy_stopped_under_it(self):
-        """§8 lifecycle race: `down <last>` stopped the proxy after our ensure_proxy —
-        picking a port must leave us with a live proxy, not a session nothing polices."""
+        """If a `down <last>` stops the proxy right after our ensure_proxy, picking a port
+        still leaves a live proxy, never a session nothing polices."""
         def body():
             base = _free_pool_base(MOD.POOL_SIZE)
             proxy = self.proxy_meta(pid=_dead_pid(), base=base)
@@ -680,7 +680,7 @@ class LifecycleTest(_FakeToolsCase):
     # -- proxy identity vs pid liveness ------------------------------------------
 
     def test_proxy_running_ignores_recycled_pid(self):
-        """§8 PID reuse: a live unrelated process on the recorded pid is not the proxy."""
+        """A live unrelated process on the recorded pid is not the proxy."""
         sleeper = self.start_sleeper()
         self.proxy_meta(pid=sleeper.pid)
         self.assertFalse(MOD._proxy_running(),
@@ -746,7 +746,7 @@ class LifecycleTest(_FakeToolsCase):
     # -- stop racing up -----------------------------------------------------------
 
     def test_stop_proxy_defers_to_inflight_claim(self):
-        """§8 lifecycle race, other half: a claimed port is a session being born."""
+        """A claimed port is a session being born, so stopping the proxy waits for it."""
         stub = self.start_stub_sock()
         meta = self.proxy_meta(pid=stub.pid)
         self.write_claim(8090, "starting", os.getpid())
@@ -773,8 +773,8 @@ class LifecycleTest(_FakeToolsCase):
     # -- provisioning and teardown -------------------------------------------------
 
     def test_provision_failure_cleans_everything(self):
-        """§8: a failed `msb create` must release the port claim and remove whatever
-        sandbox msb half-registered, or the next `up` with that name collides."""
+        """A failed `msb create` releases the port claim and removes whatever sandbox msb
+        half-registered, or the next `up` with that name would collide."""
         stub = self.start_stub_sock()
         _autoreap(stub.pid)
         proxy = self.proxy_meta(pid=stub.pid)
@@ -816,8 +816,8 @@ class LifecycleTest(_FakeToolsCase):
                          "winner's meta.json destroyed")
 
     def test_teardown_keeps_session_while_sandbox_survives(self):
-        """§8: `msb rm` failing on a listed sandbox means a guest may still hold L3
-        access to the port — the session dir and its claim must both stay."""
+        """If `msb rm` fails on a listed sandbox, a guest may still reach the port, so
+        the session dir and its claim both stay."""
         self.write_session("t1", 8090)
         self.write_claim(8090, "t1", _dead_pid())
         self.msb_cfg({"rm_ok": False, "listed": ["sg-t1"]})
@@ -1112,7 +1112,7 @@ class LifecycleTest(_FakeToolsCase):
         msg = self.expect_die(MOD._wait_control_sock, 2, stub.pid + 1)
         self.assertIn(str(stub.pid), msg)
 
-    # -- proxy entry points: bind address and rawtcp (§2, §3) ----------------------
+    # -- proxy entry points: bind address and rawtcp --------------------------------
 
     def test_start_shared_proxy_binds_loopback_and_disables_rawtcp(self):
         def body():
@@ -1634,8 +1634,7 @@ class InterruptTest(unittest.TestCase):
         self.assert_no_leftovers(err)
 
     def test_run_sigterm_still_cleans_up(self):
-        """The behavior the brief calls already safe — `timeout N silkgate run` — held
-        as a regression: SIGTERM exits 143 through the same unwind."""
+        """`timeout N silkgate run` is safe: SIGTERM exits 143 through the same unwind."""
         self.cfg({"exec_sleep": 120})
         proc = self.spawn_reaching(self.run_argv, self.marker("exec-live"),
                                    "the guest command to start")

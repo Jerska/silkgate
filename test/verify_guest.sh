@@ -3,10 +3,10 @@
 #
 # WHAT A BLOCKED-DIRECTION CHECK HAS TO SHOW HERE
 #
-# The allow side of this script has always insisted on an answer: check 0 requires the
-# proxy's own 403, not a connect. The deny side used to accept an absence — `tcp()` threw
-# away the errno, so "the boundary refused this in 1ms" and "this guest's own stack never
-# emitted a packet" were both rc=1 and both scored PASS. They are told apart now:
+# Both sides insist on an answer. On the allow side, check 0 requires the proxy's own 403,
+# not a connect. On the deny side, `tcp()` keeps the errno, because "the boundary refused
+# this in 1ms" and "this guest's own stack never emitted a packet" are both rc=1, and only
+# the first proves containment:
 #
 #   connected  the handshake completed          -> the check FAILS, egress reached it
 #   refused    ECONNREFUSED / ECONNRESET        -> the boundary answered: containment, PASS
@@ -21,10 +21,9 @@
 #
 # TOOLS. The `# CHECK n tools:` line opening each check below is the single source of truth
 # for what it needs installed, and `silkgate verify` reads those lines to decide which
-# checks a bare run must produce — the set is derived from this file rather than restated
-# beside it in the CLI, which is how a `verify` shipped that could not pass (7 was called
-# tool-free while this script skipped it without `ip`). `tools:none` means bash built-ins
-# plus coreutils and grep, which debian:bookworm-slim has: no `curl`, `dig`, `ip` or `ping`.
+# checks a bare run must produce. The CLI derives the set from this file and never restates
+# it, so the two can't disagree. `tools:none` means bash built-ins plus coreutils and grep,
+# which debian:bookworm-slim has: no `curl`, `dig`, `ip` or `ping`.
 #
 # SUBJECTS. A fourth verdict, UNAVAILABLE, is for a check whose subject does not exist on
 # this guest — a v6 probe on a platform with no v6 path has nothing to ask the boundary,

@@ -308,9 +308,8 @@ class NotCaptured(TapCase):
         self.assertEqual(len(post_rules), 1, "only the content-carrying POST captures")
 
     def test_records_stay_as_they_were(self):
-        """The regression the brief pins: a non-captured rule produces no capture
-        records and no new audit fields — ttfb_ms, now on every allowed flow, is
-        the single deliberate exception."""
+        """A rule without capture produces no capture records and no capture fields in
+        its audit records. ttfb_ms, on every allowed flow, is the one exception."""
         f = self.plain_flow()
         self.respond(f, [b'{"data": []}'], content_type="application/json")
         self.assertEqual(self.capture_records(), [], "no capture rule, no records")

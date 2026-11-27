@@ -419,10 +419,8 @@ def check_env(pairs):
 def check_secrets(ruleset):
     """Warn about any inject_auth secret in the ruleset that is absent or malformed.
 
-    Each secret must be set AND pass _parse_secret (a bare env var that is set but
-    evaluates to "x-api-key: " with an empty value passes the truthiness check that
-    used to be the only guard but is rejected by the proxy at request time).  Per the
-    design contract, launches always warn and continue.
+    Each secret must be set AND pass _parse_secret: "x-api-key: " is set, but the proxy
+    rejects its empty value at request time. Launches always warn and continue.
     """
     names = sorted({r.inject_auth for r in ruleset.rules if r.inject_auth})
     for n in names:
@@ -1363,8 +1361,8 @@ def _clean_abs_path(value):
 
 def _check_meta_fields(meta):
     """Why this meta.json's fields cannot be used, or None — shared by the live registry
-    and the archive, because archived metas reach git argv too (wave 2 reads them), so
-    they are held to read_meta's bar. Every field is optional on read; only a present
+    and the archive, because the UI's diff puts archived meta fields into git argv too,
+    so they are held to read_meta's bar. Every field is optional on read; only a present
     field with a bad value refuses."""
     sandbox = meta.get("sandbox")
     if sandbox is not None and not _SANDBOX_RE.fullmatch(str(sandbox)):
@@ -1429,8 +1427,8 @@ def read_archived_meta(sid):
 
     The archive is read with read_meta's suspicion: the sid is a path component of
     ARCHIVE_DIR, the meta must name the sid of the directory it was found in, and every
-    field check read_meta applies holds here too — archived metas reach git argv in
-    wave 2, so a planted one gets the same refusal a planted live one does."""
+    field check read_meta applies holds here too — the UI's diff puts archived meta
+    fields into git argv, so a planted one gets the same refusal a planted live one does."""
     if not _SID_RE.fullmatch(sid or ""):
         die(f"invalid archive sid {sid!r}")
     meta = _read_json(ARCHIVE_DIR / sid / "meta.json")
@@ -2462,9 +2460,8 @@ def _remove_sandbox(sandbox):
 # What a session's archive keeps of the guest's captured output: the last stretch of
 # it, bounded twice — lines asked of msb (a request msb honors or not) and bytes
 # written (enforced: sliced before the write) — so a chatty guest cannot balloon its
-# own archive. Wave 1's 5000 lines / 1 MiB truncated real agent sessions, so the
-# defaults now hold a full working transcript while the archive stays bounded:
-# ARCHIVE_RETAIN_COUNT snapshots cost at most ~400 MiB. Each env knob takes a
+# own archive. The defaults hold a full agent session's transcript, and
+# ARCHIVE_RETAIN_COUNT snapshots still cost at most ~400 MiB. Each env knob takes a
 # positive integer; anything else keeps the default — a cap at 0 would be no cap.
 _SNAPSHOT_TAIL_LINES = 20000     # SILKGATE_SNAPSHOT_TAIL_LINES
 _SNAPSHOT_MAX_BYTES = 8 << 20    # SILKGATE_SNAPSHOT_MAX_BYTES
@@ -3279,7 +3276,7 @@ def _exec_brief_fields(name, sandbox, exec_id, flag_path):
 
 def _observability_meta(args, rules_text, brief):
     """Recording-only meta fields: the rest of the ask, kept for the journal, the
-    archive and wave-2 reads — never an enforcement input. env_names holds names alone,
+    archive and the UI — never an enforcement input. env_names holds names alone,
     because values can be secrets. base_ref is the operator's own spelling of the base,
     display only, beside the resolved sha "base" already pins. rules_sha256 ties the
     session to the exact ruleset text it ran under. `brief` here is the session
@@ -4861,12 +4858,10 @@ FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
 #     # CHECK 7 tools:ip — root routes around the boundary
 #     # CHECK 3 tools:none — direct TCP/443 to a raw IP
 #
-# and `tools:none` is what makes a check part of the bare run. Restating that set beside this
-# comment is what shipped a documented `silkgate verify` that could not pass: 7 was listed
-# tool-free while the script skipped it without `ip` — which `--full` installs precisely
-# because the base image lacks it — and the unit tests pinned the same wrong set from a
-# synthetic `ran` string, so nothing could notice. Deriving it means the two cannot disagree:
-# adding a `have` gate to a tool-free check moves it out of the bare set in the same commit.
+# and `tools:none` is what makes a check part of the bare run. The set is derived, never
+# restated here, so it can't drift from the script: a `have` gate added to a tool-free check
+# moves it out of the bare set by itself. Check 7, for example, needs `ip`, which only
+# `--full` installs.
 #
 # A `subject:<capability>` field on the same line declares the one other thing a check may
 # report: UNAVAILABLE, for a guest that observably lacks what the check would probe (a v6
@@ -5025,11 +5020,10 @@ def _verify_msb_argv(sandbox, port, *, mounts=()):
 def _leaky_argv(argv):
     """The same guest with msb's egress default flipped to allow — a guest that really leaks.
 
-    FEEDBACK records that *dropping* --net-default-egress deny does NOT open egress (msb
-    denies by default once any --net-rule is present) while `allow` does, and that the
-    always-on Tier-1 probe was verified against exactly that. So the flip is the whole
-    mechanism, and a refactor that renamed the flag must fail here rather than quietly
-    produce a contained guest whose silence would read as "the checks cannot fail".
+    Dropping --net-default-egress deny does NOT open egress: msb denies by default once
+    any --net-rule is present. Setting it to `allow` does. So the flip is the whole
+    mechanism, and a renamed flag must fail here, not quietly produce a contained guest
+    whose silence would read as "the checks cannot fail".
     """
     out = list(argv)
     try:
@@ -5887,7 +5881,7 @@ def cmd_verify(args):
         if args.negative_control:
             leaky = _verify_guest_name("leaky")
             say("negative control: booting a second guest with --net-default-egress allow, "
-                "which is what FEEDBACK records as actually opening egress")
+                "the setting that actually opens egress")
             leaky_lines = []
             with _guarded_terminal():
                 _create_verify_guest(leaky, args.port, mounts=mounts, leaky=True,

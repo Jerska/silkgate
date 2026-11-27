@@ -200,8 +200,8 @@ class TestSid(JournalCase):
 # -- archived-meta reads -----------------------------------------------------------
 
 class TestArchivedMetaReads(JournalCase):
-    """read_archived_meta holds the archive to read_meta's bar: archived metas reach
-    git argv in wave 2, so a planted one is refused, never used."""
+    """read_archived_meta holds the archive to read_meta's bar: the UI's diff puts
+    archived meta fields into git argv, so a planted one is refused, never used."""
 
     SID = "20250101T000000Z-aaa111-abcdef"
 

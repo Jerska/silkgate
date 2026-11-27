@@ -15,9 +15,8 @@ What is new here is that the *expected set itself* is now under test rather than
 tools:…` declarations, so the tests below check three joints instead of one:
 
   * the CLI parses those declarations the way the script writes them,
-  * each declaration agrees with the `have <tool>` gates in its own check's block — a check
-    that says `tools:none` and then skips without `dig` is the exact defect that shipped a
-    documented `silkgate verify` which could not pass, and
+  * each declaration agrees with the `have <tool>` gates in its own check's block. A check
+    that says `tools:none`, then skips without `dig`, makes a bare `verify` unpassable.
   * the scoring decisions hold *for the derived sets*, whatever they currently are.
 
 `ClassifyDiscriminator` goes one step further and executes shell: the deny half of the guest
@@ -156,8 +155,8 @@ class DerivedFromTheScript(unittest.TestCase):
     def test_declared_tools_are_exactly_the_gates_in_the_block(self):
         """`tools:` is the single source of truth, so it must match the code it describes.
 
-        This is the assertion that would have caught the shipped regression: check 7 was
-        called tool-free in the CLI while its block began `if ! have ip; then S 7 …`.
+        For example, a check declared tool-free whose block begins `if ! have ip; then
+        S 7 …` skips on every bare run, so a bare `verify` could never pass.
         """
         for num, (tools, block) in sorted(BLOCKS.items()):
             declared = set() if tools == "none" else set(tools.split(","))

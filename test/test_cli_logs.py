@@ -366,8 +366,8 @@ class CmdProxyTest(SilkgateTest):
         return popen.call_args[0][0], popen.call_args[1]["env"]
 
     def test_binds_each_loopback_family_and_disables_rawtcp(self):
-        """§3's leftover: `silkgate proxy` was the one entry point still binding every
-        interface (--listen-port with no host) with the raw-TCP fallback on."""
+        """`silkgate proxy` binds each loopback family, never every interface, and runs
+        with the raw-TCP fallback off."""
         argv, env = self.run_cmd_proxy()
         pairs = list(zip(argv, argv[1:]))
         self.assertIn(("--set", "rawtcp=false"), pairs,
@@ -422,8 +422,8 @@ class EnsureCaTest(SilkgateTest):
                 os.environ[k] = v
 
     def test_first_run_generates_one_shot_with_no_server(self):
-        """§2's leftover: first run used to put a bare, rule-less mitmdump on a wildcard
-        port for up to 15s. The fake refuses to run as a server at all."""
+        """CA generation on first run starts no listening mitmdump: a rule-less server on
+        a wildcard port would be open while it runs. The fake refuses to run as a server."""
         cert = MOD.ensure_ca()
         self.assertEqual(cert, MOD.CA_DIR / "egress-ca.pem")
         self.assertEqual(cert.read_text(), "CERT\n")
@@ -525,9 +525,9 @@ class LogsAuditTest(SilkgateTest):
         self.assertIn('"host": "c"', out.getvalue())
 
     def test_follow_stops_when_nothing_answers_the_control_socket(self):
-        """§8's leftover: a live pid in proxy.json is not the proxy — after an unclean
-        exit the pid may be recycled. With nothing on the control socket, follow must
-        stop rather than trust os.kill(pid, 0) forever."""
+        """A live pid in proxy.json isn't proof of the proxy: after an unclean exit the
+        pid can be recycled. With nothing on the control socket, follow stops instead of
+        trusting os.kill(pid, 0) forever."""
         sleeper = self.start_sleeper()
         path = self.audit_log({"session": "foo", "decision": "allow"})
         self.proxy_meta(pid=sleeper.pid, log=path)       # a pid that IS alive — just not
@@ -588,8 +588,8 @@ class CmdLsTest(SilkgateTest):
         return out.getvalue()
 
     def test_recycled_pid_is_not_reported_alive(self):
-        """§8's leftover: `ls` used to report `proxy: pid N alive` about whatever
-        unrelated process happened to hold the recycled pid."""
+        """`ls` never reports `proxy: pid N alive` about an unrelated process that holds
+        a recycled pid."""
         sleeper = self.start_sleeper()
         self.proxy_meta(pid=sleeper.pid)                 # alive, but not the proxy
         self.assertIn("proxy: not running", self.ls_output())
