@@ -41,6 +41,7 @@ im = pkg.images
 br = pkg.briefing
 ss = pkg.sessions
 vm = pkg.vm
+mnt = pkg.mount
 
 
 def tearDownModule():
@@ -305,19 +306,19 @@ class TestMountGuards(CliCase):
     def test_plain_directory_is_mounted_ro_by_default(self):
         project = self.tmp / "project"
         project.mkdir()
-        self.assertEqual(sg._mount_args([f"{project}:/workspace"]),
+        self.assertEqual(mnt._mount_args([f"{project}:/workspace"]),
                          [(str(project), "/workspace", "ro")])
-        self.assertEqual(sg._mount_args([f"{project}:/workspace:rw"]),
+        self.assertEqual(mnt._mount_args([f"{project}:/workspace:rw"]),
                          [(str(project), "/workspace", "rw")])
-        self.assertEqual(sg._mount_args(None), [])
-        self.assertEqual(sg._mount_args([]), [])
-        self.refuses("not a directory", sg._mount_args,
+        self.assertEqual(mnt._mount_args(None), [])
+        self.assertEqual(mnt._mount_args([]), [])
+        self.refuses("not a directory", mnt._mount_args,
                      [f"{project / 'absent'}:/workspace:rw"])
 
     def test_malformed_specs_are_refused(self):
         d = str(self.tmp)
         for bad in ("", d, f"{d}:", f":{d}", f"{d}:/x:rx", f"{d}:/x:RW", f"{d}:/x:ro:extra"):
-            self.refuses("invalid mount", sg._mount_args, [bad])
+            self.refuses("invalid mount", mnt._mount_args, [bad])
 
     def test_parse_time_errors_name_the_flag(self):
         self.refuses_argv("invalid mount", "--mount",
@@ -328,7 +329,7 @@ class TestMountGuards(CliCase):
         mount = self.tmp / "mount"
         (mount / "clean").mkdir(parents=True)
         (mount / "vendor" / "dep" / ".git" / "hooks").mkdir(parents=True)
-        message = self.refuses("refusing to mount", sg._mount_args, [f"{mount}:/workspace:rw"])
+        message = self.refuses("refusing to mount", mnt._mount_args, [f"{mount}:/workspace:rw"])
         self.assertIn(str(Path("vendor") / "dep"), message)  # names where it found it
         self.assertIn("--allow-git-dir", message)            # and every way forward
         self.assertIn("worktree", message)
@@ -337,7 +338,7 @@ class TestMountGuards(CliCase):
     def test_git_directory_is_accepted_ro(self):
         repo = self.tmp / "repo"
         (repo / ".git" / "hooks").mkdir(parents=True)
-        self.assertEqual(sg._mount_args([f"{repo}:/workspace"]),
+        self.assertEqual(mnt._mount_args([f"{repo}:/workspace"]),
                          [(str(repo), "/workspace", "ro")])
 
     def test_worktree_pointer_file_is_allowed_in_both_modes_and_said(self):
@@ -347,7 +348,7 @@ class TestMountGuards(CliCase):
         for mode in ("ro", "rw"):
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
-                mounts = sg._mount_args([f"{tree}:/workspace:{mode}"])
+                mounts = mnt._mount_args([f"{tree}:/workspace:{mode}"])
             self.assertEqual(mounts, [(str(tree), "/workspace", mode)], mode)
             self.assertIn("worktree", err.getvalue())        # said, not silently allowed
 
@@ -355,7 +356,7 @@ class TestMountGuards(CliCase):
         mount = self.tmp / "trees"
         (mount / "wt").mkdir(parents=True)
         (mount / "wt" / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
-        self.assertEqual(sg._mount_args([f"{mount}:/workspace:rw"]),
+        self.assertEqual(mnt._mount_args([f"{mount}:/workspace:rw"]),
                          [(str(mount), "/workspace", "rw")])
 
     def test_allow_git_dir_mounts_anyway_and_says_so(self):
@@ -364,13 +365,13 @@ class TestMountGuards(CliCase):
         (repo / "sub" / ".git").mkdir(parents=True)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            mounts = sg._mount_args([f"{repo}:/workspace:rw"], allow_git_dir=True)
+            mounts = mnt._mount_args([f"{repo}:/workspace:rw"], allow_git_dir=True)
         self.assertEqual(mounts, [(str(repo), "/workspace", "rw")])
         self.assertIn("--allow-git-dir", err.getvalue())    # loud, never silent
 
     def test_allow_git_dir_does_not_unlock_forbidden_mounts(self):
         for path in [str(Path.home()), str(REPO), os.sep]:
-            self.refuses("refusing to mount", sg._mount_args,
+            self.refuses("refusing to mount", mnt._mount_args,
                          [f"{path}:/workspace:rw"], allow_git_dir=True)
 
     def test_host_state_and_home_are_refused_in_both_modes(self):
@@ -382,36 +383,36 @@ class TestMountGuards(CliCase):
                      str(REPO),                             # the checkout this CLI runs from
                      os.sep]:
             for mode in ("ro", "rw"):
-                self.refuses("refusing to mount", sg._mount_args, [f"{path}:/data:{mode}"])
+                self.refuses("refusing to mount", mnt._mount_args, [f"{path}:/data:{mode}"])
 
     def test_repo_is_the_checkout_this_cli_runs_from(self):
         # REPO also anchors the profiles, the addon, and image builds.
         self.assertEqual(pt.REPO, REPO)
-        self.refuses("silkgate checkout", sg._mount_args, [f"{REPO}:/data:ro"])
+        self.refuses("silkgate checkout", mnt._mount_args, [f"{REPO}:/data:ro"])
 
     def test_guest_destination_guards(self):
         src = self.tmp / "src"
         src.mkdir()
-        self.refuses("not absolute", sg._mount_args, [f"{src}:data"])
-        self.refuses("not absolute", sg._mount_args, [f"{src}:./x"])
-        self.refuses("whole filesystem", sg._mount_args, [f"{src}:/"])
-        self.refuses("whole filesystem", sg._mount_args, [f"{src}:/data/.."])
+        self.refuses("not absolute", mnt._mount_args, [f"{src}:data"])
+        self.refuses("not absolute", mnt._mount_args, [f"{src}:./x"])
+        self.refuses("whole filesystem", mnt._mount_args, [f"{src}:/"])
+        self.refuses("whole filesystem", mnt._mount_args, [f"{src}:/data/.."])
         for reserved in ("/silkgate", "/silkgate/base.git", "/root/lfsstore",
                          "/root/lfsstore/objects"):
-            self.refuses("silkgate's own", sg._mount_args, [f"{src}:{reserved}"])
+            self.refuses("silkgate's own", mnt._mount_args, [f"{src}:{reserved}"])
 
     def test_duplicate_and_nested_destinations_are_refused(self):
         a, b = self.tmp / "a", self.tmp / "b"
         a.mkdir()
         b.mkdir()
-        self.refuses("duplicate mount destination", sg._mount_args,
+        self.refuses("duplicate mount destination", mnt._mount_args,
                      [f"{a}:/data", f"{b}:/data:rw"])
-        self.refuses("duplicate mount destination", sg._mount_args,
+        self.refuses("duplicate mount destination", mnt._mount_args,
                      [f"{a}:/data", f"{b}:/data/"])          # normalization, not spelling
         for specs in ([f"{a}:/data", f"{b}:/data/sub"],
                       [f"{a}:/data/sub", f"{b}:/data"]):     # either order
-            self.refuses("nest", sg._mount_args, specs)
-        two = sg._mount_args([f"{a}:/data", f"{b}:/database"])  # a shared prefix is no nest
+            self.refuses("nest", mnt._mount_args, specs)
+        two = mnt._mount_args([f"{a}:/data", f"{b}:/database"])  # a shared prefix is no nest
         self.assertEqual([guest for _, guest, _ in two], ["/data", "/database"])
 
     def test_destination_above_a_reserved_path_is_refused(self):
@@ -420,15 +421,15 @@ class TestMountGuards(CliCase):
         for dst in ("/root",                                # above lfsstore and gitdir
                     "/root/gitdir",                         # a branch session's clone
                     "/root/gitdir/objects"):
-            self.refuses("silkgate's own", sg._mount_args, [f"{src}:{dst}"])
-        ok = sg._mount_args([f"{src}:/root/caches"])        # a sibling shares no fate
+            self.refuses("silkgate's own", mnt._mount_args, [f"{src}:{dst}"])
+        ok = mnt._mount_args([f"{src}:/root/caches"])        # a sibling shares no fate
         self.assertEqual([guest for _, guest, _ in ok], ["/root/caches"])
 
     def test_allow_git_dir_without_a_rw_mount_is_refused(self):
         src = self.tmp / "src"
         src.mkdir()
         for specs in ([], [f"{src}:/data"], [f"{src}:/data:ro"]):
-            self.refuses("does nothing", sg._mount_args, specs, allow_git_dir=True)
+            self.refuses("does nothing", mnt._mount_args, specs, allow_git_dir=True)
 
     def test_run_and_up_wire_mounts_and_allow_git_dir(self):
         project = self.tmp / "project"
@@ -443,7 +444,7 @@ class TestMountGuards(CliCase):
                 raise SystemExit(42)                        # stop before any proxy/msb work
 
             with self.no_preflight(), \
-                    mock.patch.object(sg, "_mount_args", spy), \
+                    mock.patch.object(mnt, "_mount_args", spy), \
                     mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                     contextlib.redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit) as caught:
@@ -1551,8 +1552,8 @@ class TestBranchGuards(GitRepoCase):
         (repo / ".git").mkdir(parents=True)
         nested = repo / ".silkgate" / "sandboxes" / "x"
         nested.mkdir(parents=True)
-        self.refuses("refusing to mount", sg._mount_args, [f"{repo}:/workspace:rw"])
-        self.assertEqual(sg._mount_args([f"{nested}:/workspace:rw"]),
+        self.refuses("refusing to mount", mnt._mount_args, [f"{repo}:/workspace:rw"])
+        self.assertEqual(mnt._mount_args([f"{nested}:/workspace:rw"]),
                          [(str(nested.resolve()), "/workspace", "rw")])
 
     # --- meta as input ----------------------------------------------------------

@@ -4,7 +4,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import console, core, paths, sessions, vm
+from . import console, mount, paths, sessions, vm
 
 
 # --- checkout/branch sessions: a clone in the guest, from the host repo ---------
@@ -55,10 +55,10 @@ def _check_mount_flags(args):
     else:
         return
     for spec in args.mount or ():
-        parsed = core._split_mount(spec)
+        parsed = mount._split_mount(spec)
         if parsed is None:
             continue                        # argparse already refused it; _mount_args re-dies
-        dst = core._normalize_dst(parsed[1])
+        dst = mount._normalize_dst(parsed[1])
         if dst == "/workspace" or dst.startswith("/workspace/"):
             console.die(f"-v {spec} collides with {owner}, which owns /workspace in the guest")
 
@@ -153,7 +153,7 @@ def _branch_workspace(spec, name):
         console.die(f"leftover workspace {ws_dir} already exists — a previous session kept it; "
                     "review and remove it first")
     ws_dir.mkdir(parents=True)
-    ws, dst = core._mount_pair(str(ws_dir), "/workspace", "rw")
+    ws, dst = mount._mount_pair(str(ws_dir), "/workspace", "rw")
     mounts = [f"{ws}:{dst}:rw"]
     mounts.append(f"{spec['git_dir']}:/silkgate/base.git:ro")
     # The whole of .git/lfs, not objects/ alone: git-lfs stages under <storage>/tmp and

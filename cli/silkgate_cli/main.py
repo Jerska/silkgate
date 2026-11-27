@@ -16,7 +16,7 @@ import re
 import signal
 import sys
 
-from . import briefing, console, core, images, logs, mitm, profile, ui_server, verify
+from . import briefing, console, core, images, logs, mitm, mount, profile, ui_server, verify
 
 
 # The two argument types that reach a generated Dockerfile or an msb argv are checked by
@@ -26,7 +26,7 @@ from . import briefing, console, core, images, logs, mitm, profile, ui_server, v
 def _mount_arg(spec):
     """argparse type for -v/--mount: SRC:DST[:MODE] syntax alone — the path guards run at
     dispatch, where the mount list is checked as a whole (_mount_args)."""
-    if core._split_mount(spec) is None:
+    if mount._split_mount(spec) is None:
         raise argparse.ArgumentTypeError(
             f"invalid mount {spec!r} — expected SRC:DST[:ro|rw] (MODE defaults to ro)")
     return spec
