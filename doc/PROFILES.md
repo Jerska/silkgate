@@ -161,8 +161,7 @@ directory mounted at `/workspace`.
 
 - The result lands at each profile's `settings_path`.
 - A settings file that isn't valid JSON warns and counts as absent.
-- If your host model isn't available to the guest's credential, the guest fails with a model
-  error. Pass `--no-settings` to use Claude Code's default instead.
+- `--no-settings` skips the copy.
 
 Pinned by: `test/test_cli_settings.py` (the order and the two-key allowlist).
 

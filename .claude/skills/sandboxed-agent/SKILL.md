@@ -12,17 +12,17 @@ Read this to launch silkgate sandboxes, choose their policy, and judge what a ru
 **The workload runs in a microVM whose only way out is a proxy that allowlists each
 request. Both layers sit outside the guest, so nothing the guest does can widen them.**
 
-- From a checkout, run `./cli/silkgate` from the repo root, or use its absolute path.
-- Installed as the silkgate plugin, the CLI is `"${CLAUDE_PLUGIN_ROOT}"/cli/silkgate`.
+- Run `silkgate`. If it isn't on PATH, it's `cli/silkgate` in a checkout, or
+  `"${CLAUDE_PLUGIN_ROOT}"/cli/silkgate` under the silkgate plugin.
 - The host needs docker, mitmproxy, and microsandbox. Commands name whatever is missing.
-- `./cli/silkgate verify --full` checks containment on a live sandbox.
+- `silkgate verify --full` checks containment on a live sandbox.
 
 ## How to write an invocation
 
 **Name every sandbox, put one flag per line, and indent the guest command under `--`.**
 
 ```sh
-./cli/silkgate run \
+silkgate run \
     --name fix-tests \
     --with node \
     --with claude \
@@ -125,8 +125,8 @@ guest's report, not evidence.**
   policy:
 
   ```sh
-  ./cli/silkgate run --name check --with node -v ./test/mock:/workspace -- node --test
-  ./cli/silkgate run --name check-branch --with git --with node --checkout agent/fix-tests -- node --test
+  silkgate run --name check --with node -v ./test/mock:/workspace -- node --test
+  silkgate run --name check-branch --with git --with node --checkout agent/fix-tests -- node --test
   ```
 
 - Review the diff on the host before you push. Check that no test got weakened. For an
@@ -141,26 +141,26 @@ That's a `--resume`, an interactive `attach`, or a long batch on a machine that 
 A batch of one-shot tasks needs none: use `run`.
 
 ```sh
-./cli/silkgate up \
+silkgate up \
     --name foo \
     --with node \
     --with claude \
     -v ~/projects/foo/src:/workspace:rw
 
-./cli/silkgate exec foo \
+silkgate exec foo \
     --brief task.md \
     -- silkgate-claude \
         -p "Read /silkgate/BRIEF.md and do the task." \
         --output-format json                 # prints a session_id
 
-./cli/silkgate exec foo \
+silkgate exec foo \
     --brief followup.md \
     -- silkgate-claude \
         -p --resume <id> "Read /silkgate/BRIEF.md and do the task."
 
-./cli/silkgate logs foo --audit -f           # what it tries to reach
-./cli/silkgate attach foo                    # interactive
-./cli/silkgate down foo
+silkgate logs foo --audit -f           # what it tries to reach
+silkgate attach foo                    # interactive
+silkgate down foo
 ```
 
 ## Briefs
@@ -196,7 +196,7 @@ A batch of one-shot tasks needs none: use `run`.
 - No version means the pinned one. A version must be exact: `node@20.18.1` works,
   `node@22` fails.
 - A profile with an ARG pattern requires `:ARG`. Preview the result with
-  `./cli/silkgate profiles --render NAME:ARG`.
+  `silkgate profiles --render NAME:ARG`.
 - `--rule 'host/path GET'` adds one rule. Rules can't be removed, so a profile's rules are a
   floor. Pick the smallest set.
 - To add a capability, write a profile ([PROFILES.md](../../../doc/PROFILES.md)). Don't edit an
@@ -242,8 +242,9 @@ control.**
 
 - A deny isn't a crash. Plain HTTP gets a 403 with `no matching rule`. HTTPS fails at
   CONNECT: curl says `CONNECT tunnel failed, response 403`. The agent usually carries on.
-- `-t` hands the guest a real terminal: colors, cursor codes, and stdout merged into
-  stderr. That corrupts a JSON stream. Leave `-t` off for anything you parse.
+- A command gets a real terminal whenever your stdin is one: colors, cursor codes, and
+  stdout merged into stderr. That corrupts a JSON stream. Pass `--no-tty` for anything you
+  parse.
 - Exit 137 with a bare `Killed` is usually the guest's OOM killer. Give it more memory. A
   `--branch` teardown still harvests.
 - Nothing bounds a runaway agent. Wrap it in `timeout 600 …` if that matters. The clock
@@ -253,7 +254,8 @@ control.**
 - A guest `claude -p` waits at most 600 s for background subagents, then kills them. Set
   `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` in the guest command, or run them in the
   foreground.
-- A custom `--image` needs `sh` and `mkfifo` for the output relay. Without them, use `-t`.
+- A custom `--image` needs `sh` and `mkfifo` for the output relay (without them, use
+  `--tty`), and must trust the proxy's CA.
 - `--with git` opens nothing. Add `--with github` for public repos, or
   `github-read:OWNER/REPO` / `github-write:OWNER/REPO` with
   `SILKGATE_EGRESS_SECRET_GITHUB="Authorization: Basic <base64 of x-access-token:PAT>"`.

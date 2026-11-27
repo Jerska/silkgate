@@ -88,7 +88,8 @@ silkgate down foo                # the last session out stops the proxy
 - Each session gets its own proxy port, and its guest can reach only that port. The port
   is how the proxy knows which session sent a request.
 - Output streams live, with stdout and stderr apart, so a parent can parse `stream-json`.
-  `-t` gives a real terminal for a TUI, but merges both streams.
+- A command gets a terminal when your stdin is one, which merges both streams. Pass
+  `--no-tty` when you parse the output.
 - Each guest gets 1G of memory and half the host's CPUs. Change it with `--memory 2G` and
   `--cpus 4`.
 - Hand over a long task as a file: `--brief task.md` lands it at `/silkgate/BRIEF.md`.
@@ -170,6 +171,20 @@ Details: [doc/GIT.md](doc/GIT.md).
   hold tokens.
 - For a writable repo, use `--checkout` or `--branch`, not `-v`.
 
+## More flags
+
+**`run` and `up` take these too. `exec` takes `-e` and `--tty`.**
+
+| Flag | Does |
+|---|---|
+| `-e NAME=VALUE` | sets an env var in the guest. The journal keeps the name only. Proxy variables (`HTTPS_PROXY`, `NO_PROXY`, …) are refused. Secrets belong in `SILKGATE_EGRESS_SECRET_*`. |
+| `--tty`, `--no-tty` | gives the command a terminal, or not. The default follows your stdin. `exec` also takes `-t`. |
+| `--image REF` | runs that image as-is: nothing is built, and rules still come from `--with`. It needs `sh` and `mkfifo`, and must trust `~/.silkgate/ca/egress-ca.pem` for HTTPS. |
+| `--base IMAGE` | builds the profiles on another base than `debian:bookworm-slim`. Not with `--image`. |
+| `--port N` | where the proxy's 16-port pool starts, if this command starts the proxy (default 8090) |
+| `--memory SIZE`, `--cpus N` | guest resources: default 1G, and half the host's CPUs |
+| `--no-context`, `--no-settings` | skip the [guest context](doc/PROFILES.md#the-guest-context), or the [model settings](doc/PROFILES.md#model-settings) copy |
+
 ## Audit UI
 
 **`silkgate ui` serves a live table of every request at <http://127.0.0.1:8642/>.**
@@ -178,6 +193,17 @@ Details: [doc/GIT.md](doc/GIT.md).
   the URL, so you can share a view.
 - The ACTIONS column shows what the proxy did: `inj:<name>` swapped a credential,
   `q:<n>` and `h:<n>` stripped query params and headers.
+- A session's page shows its activity, tool calls, and files, and can act on it:
+
+  | Action | Effect |
+  |---|---|
+  | freeze | swaps in an empty ruleset: every request is denied, and the guest keeps running |
+  | resume | restores the ruleset |
+  | kill | stops one exec: TERM, then KILL after 5 s |
+  | diff | a live git session's working diff, or a harvested branch's diff on the host |
+  | down | tears the session down, like `silkgate down` |
+
+  The journal records freeze, resume, and kill.
 - It binds loopback only and has no auth. No guest can reach it.
 - `--port` changes the port.
 

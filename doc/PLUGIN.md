@@ -64,12 +64,13 @@ the plugin cache.**
 - Image tags hash content, not paths, so cached images survive plugin updates.
 - Its mount refusal covers its own directory, the plugin cache included.
 
-The skill still says `./cli/silkgate`, which only works from a checkout. Under a plugin
-install the path is `"${CLAUDE_PLUGIN_ROOT}"/cli/silkgate`. The skill needs one sentence
-that says so, in prose, because the same file still serves checkouts, where the placeholder
-stays literal. A `bin/silkgate → ../cli/silkgate` symlink would put `silkgate` on the Bash
-tool's `PATH`. Whether `bin/` symlinks and exec bits survive the cache copy is undocumented,
-and `python3 "${CLAUDE_PLUGIN_ROOT}/cli/silkgate"` needs neither.
+The skill says `silkgate`, and names `"${CLAUDE_PLUGIN_ROOT}"/cli/silkgate` for when it
+isn't on PATH. It says so in prose, because the same file serves checkouts, where the
+placeholder stays literal.
+
+A `bin/silkgate → ../cli/silkgate` symlink would put `silkgate` on the Bash tool's `PATH`.
+Whether `bin/` symlinks and exec bits survive the cache copy is undocumented, and
+`python3 "${CLAUDE_PLUGIN_ROOT}/cli/silkgate"` needs neither.
 
 ## Open checks
 

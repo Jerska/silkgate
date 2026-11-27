@@ -113,7 +113,7 @@ Primary:
 - Codex agent approvals and security: https://developers.openai.com/codex/agent-approvals-security
 - Codex sandboxing concepts: https://developers.openai.com/codex/concepts/sandboxing
 - NVIDIA, sandboxing agentic workflows: https://developer.nvidia.com/blog/practical-security-guidance-for-sandboxing-agentic-workflows-and-managing-execution-risk/
-- microsandbox: https://github.com/microsandbox/microsandbox
+- microsandbox: https://github.com/superradcompany/microsandbox
 - ContainAI security comparison (also the source of one refuted claim): https://github.com/novotnyllc/ContainAI/blob/main/docs/security-comparison.md
 - Firecracker: https://github.com/firecracker-microvm/firecracker
 - gVisor: https://gvisor.dev/docs/
