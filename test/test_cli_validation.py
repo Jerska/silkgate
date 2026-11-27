@@ -34,6 +34,7 @@ sg = pkg.core
 vf = pkg.verify
 gt = pkg.git
 pt = pkg.paths
+con = pkg.console
 
 
 def tearDownModule():
@@ -82,13 +83,13 @@ class CliCase(unittest.TestCase):
         # Bytes, not str: str.splitlines treats the mark (RS) itself as a line boundary,
         # which is exactly the invisibility the byte check exists to see through.
         for line in err.getvalue().encode().splitlines():   # argparse speaks as the host,
-            self.assertTrue(line.startswith(sg._ERR_TAG),   # so every line is marked
+            self.assertTrue(line.startswith(con._ERR_TAG),   # so every line is marked
                             f"unmarked host-voice line: {line!r}")
 
     def no_preflight(self):
         """Preflight stub for tests about what lies past it — this suite must pass on a
         machine with no docker/msb/mitmproxy installed."""
-        return mock.patch.object(sg, "preflight", lambda *binaries: None)
+        return mock.patch.object(con, "preflight", lambda *binaries: None)
 
     def provision_capture(self, argv):
         """Everything cmd_run/cmd_up hand _provision_session, captured at the call and
@@ -1102,7 +1103,7 @@ class TestVerifyScoring(CliCase):
 
 class TestPreflight(CliCase):
     """One failed run must name every absent tool with its install command, and which()
-    stays behind it as the per-use check. Hints come from sg._TOOL_HINTS rather than
+    stays behind it as the per-use check. Hints come from con._TOOL_HINTS rather than
     being spelled out again, so rewording a hint cannot leave these asserting stale text.
     """
 
@@ -1125,7 +1126,7 @@ class TestPreflight(CliCase):
         ca_path.unlink(missing_ok=True)                     # a prior call may have left one
         if ca:
             ca_path.write_text("not a real CA")
-        with mock.patch.object(sg, "preflight", spy), \
+        with mock.patch.object(con, "preflight", spy), \
                 mock.patch.object(pt, "MITM_CA", ca_path), \
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
@@ -1173,34 +1174,34 @@ class TestPreflight(CliCase):
         self.assertEqual(caught.exception.code, 1)
         # A plain run's toolchain — git is hinted too, but only --checkout/--branch demand it.
         for binary in ("docker", "msb", "mitmdump"):
-            self.assertIn(f"{binary} — {sg._TOOL_HINTS[binary]}", err.getvalue())
+            self.assertIn(f"{binary} — {con._TOOL_HINTS[binary]}", err.getvalue())
         # Bytes: str.splitlines would split on the (invisible) mark itself.
         for line in err.getvalue().encode().splitlines():    # host voice, so marked
-            self.assertTrue(line.startswith(sg._ERR_TAG), repr(line))
+            self.assertTrue(line.startswith(con._ERR_TAG), repr(line))
 
     def test_a_complete_toolchain_passes_silently(self):
         err = io.StringIO()
         with self.path_holding("docker", "msb", "mitmdump"), contextlib.redirect_stderr(err):
-            sg.preflight("docker", "msb", "mitmdump")
+            con.preflight("docker", "msb", "mitmdump")
         self.assertEqual(err.getvalue(), "")
 
     def test_which_stays_the_last_line_of_defence(self):
         with self.path_holding():
-            message = self.refuses("mitmdump not found", sg.which, "mitmdump",
+            message = self.refuses("mitmdump not found", con.which, "mitmdump",
                                    "pip install mitmproxy")
-            self.assertIn(sg._TOOL_HINTS["mitmdump"], message)
+            self.assertIn(con._TOOL_HINTS["mitmdump"], message)
 
     def test_the_table_owns_the_hint(self):
         # A call-site hint that drifted from the table is overridden by it; a binary the
         # table does not know still gets the hint it was called with.
         with self.path_holding():
-            message = self.refuses("docker not found", sg.which, "docker", "a stale hint")
-            self.assertIn(sg._TOOL_HINTS["docker"], message)
+            message = self.refuses("docker not found", con.which, "docker", "a stale hint")
+            self.assertIn(con._TOOL_HINTS["docker"], message)
             self.assertNotIn("a stale hint", message)
-            message = self.refuses("exotic not found", sg.which, "exotic", "install exotic")
+            message = self.refuses("exotic not found", con.which, "exotic", "install exotic")
             self.assertIn("install exotic", message)
         with self.path_holding("docker"):
-            self.assertEqual(sg.which("docker"), "/fake/bin/docker")
+            self.assertEqual(con.which("docker"), "/fake/bin/docker")
 
     def test_commands_needing_nothing_run_with_the_toolchain_absent(self):
         with self.path_holding():
@@ -1227,7 +1228,7 @@ class TestPreflight(CliCase):
                 mock.patch.object(sys, "argv",
                                   ["silkgate", "exec", "lazy1", "--no-tty", "--", "true"]):
             message = self.refuses("msb not found", pkg.main.main)
-        self.assertIn(sg._TOOL_HINTS["msb"], message)
+        self.assertIn(con._TOOL_HINTS["msb"], message)
 
 
 class TestDoctor(CliCase):
@@ -1252,33 +1253,33 @@ class TestDoctor(CliCase):
         with self.which_finding():
             out, err, code = self.doctor()
         self.assertNotEqual(code, 0)
-        for binary, hint in sg._TOOL_HINTS.items():
+        for binary, hint in con._TOOL_HINTS.items():
             self.assertIn(binary, out)
             self.assertIn(hint, out)
-        self.assertIn(f"missing {len(sg._TOOL_HINTS)} of {len(sg._TOOL_HINTS)}", err)
+        self.assertIn(f"missing {len(con._TOOL_HINTS)} of {len(con._TOOL_HINTS)}", err)
 
     def test_reports_paths_and_passes_when_complete(self):
-        with self.which_finding(*sg._TOOL_HINTS):
+        with self.which_finding(*con._TOOL_HINTS):
             out, err, code = self.doctor()
         self.assertEqual(code, 0)
-        for binary in sg._TOOL_HINTS:
+        for binary in con._TOOL_HINTS:
             self.assertIn(f"/fake/bin/{binary}", out)
         self.assertNotIn("missing", out)
         self.assertIn("toolchain complete", err)
 
     def test_a_partial_shortfall_is_counted(self):
-        with self.which_finding(*(set(sg._TOOL_HINTS) - {"msb"})):
+        with self.which_finding(*(set(con._TOOL_HINTS) - {"msb"})):
             out, err, code = self.doctor()
         self.assertNotEqual(code, 0)
-        self.assertIn(sg._TOOL_HINTS["msb"], out)
-        self.assertIn(f"missing 1 of {len(sg._TOOL_HINTS)}", err)
+        self.assertIn(con._TOOL_HINTS["msb"], out)
+        self.assertIn(f"missing 1 of {len(con._TOOL_HINTS)}", err)
 
 
 class TestMarkedArgparse(CliCase):
     """Task 2: argparse's usage/error lines are host voice, so every one of its stderr
     lines must open with the mark — asserted on bytes from a real subprocess, because
     the marker is invisible in a terminal by design. The expected byte is read from the
-    module (sg._ERR_TAG): argparse is held to say()'s convention, whatever that byte is.
+    module (con._ERR_TAG): argparse is held to say()'s convention, whatever that byte is.
     """
 
     def run_cli(self, *argv, path=None):
@@ -1291,7 +1292,7 @@ class TestMarkedArgparse(CliCase):
     def assert_marked(self, data):
         self.assertTrue(data, "expected something on stderr")
         for line in data.splitlines():
-            self.assertTrue(line.startswith(sg._ERR_TAG),
+            self.assertTrue(line.startswith(con._ERR_TAG),
                             f"unmarked host-voice line: {line!r}")
 
     def test_bad_subcommand_keeps_status_and_text_and_gains_the_mark(self):
@@ -1316,7 +1317,7 @@ class TestMarkedArgparse(CliCase):
         proc = self.run_cli("-h")
         self.assertEqual(proc.returncode, 0)
         self.assertIn(b"usage: silkgate", proc.stdout)
-        self.assertNotIn(sg._ERR_TAG, proc.stdout)   # stdout carries no claim of host voice
+        self.assertNotIn(con._ERR_TAG, proc.stdout)   # stdout carries no claim of host voice
         self.assertEqual(proc.stderr, b"")
 
     def test_preflight_shortfall_is_marked_end_to_end(self):
@@ -1327,7 +1328,7 @@ class TestMarkedArgparse(CliCase):
         self.assert_marked(proc.stderr)
         # A plain run's toolchain — git is in _TOOL_HINTS too, but only --checkout/--branch demand it.
         for binary in ("docker", "msb", "mitmdump"):
-            self.assertIn(f"{binary} — {sg._TOOL_HINTS[binary]}".encode(), proc.stderr)
+            self.assertIn(f"{binary} — {con._TOOL_HINTS[binary]}".encode(), proc.stderr)
 
 
 class GitRepoCase(CliCase):
@@ -1378,7 +1379,7 @@ class TestRunName(GitRepoCase):
 
     def test_invalid_name_dies_before_preflight(self):
         preflight = mock.Mock()
-        with mock.patch.object(sg, "preflight", preflight), \
+        with mock.patch.object(con, "preflight", preflight), \
                 mock.patch.object(sys, "argv",
                                   ["silkgate", "run", "--name", "a b", "--", "true"]):
             self.refuses("invalid session name", pkg.main.main)
@@ -1656,7 +1657,7 @@ class TestHarvestWiring(CliCase):
                                   lambda meta: calls.append("reap")), \
                 mock.patch.object(sg, "list_metas", lambda: []), \
                 mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
-                mock.patch.object(sg, "say", lambda *a, **k: None), \
+                mock.patch.object(con, "say", lambda *a, **k: None), \
                 self.assertRaises(SystemExit) as caught:
             pkg.main.main()
         return caught.exception.code, calls, seen.get("meta")
@@ -1704,7 +1705,7 @@ class TestHarvestWiring(CliCase):
                                   lambda m: calls.append("reap")), \
                 mock.patch.object(sg, "list_metas", lambda: []), \
                 mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
-                mock.patch.object(sg, "say", lambda *a, **k: None):
+                mock.patch.object(con, "say", lambda *a, **k: None):
             try:
                 pkg.main.main()
             except SystemExit as caught:
@@ -1760,7 +1761,7 @@ class TestCheckoutSessions(GitRepoCase):
                 seen.extend(binaries)
                 raise SystemExit(42)
 
-            with mock.patch.object(sg, "preflight", spy), \
+            with mock.patch.object(con, "preflight", spy), \
                     mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                     contextlib.redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit) as caught:

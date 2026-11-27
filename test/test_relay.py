@@ -29,23 +29,25 @@ import clipkg
 
 REPO = Path(__file__).resolve().parent.parent
 
-sg = clipkg.load("sg_relay").core
+pkg = clipkg.load("sg_relay")
+sg = pkg.core
+con = pkg.console
 
-RS = sg._ERR_TAG        # tags a stderr line; also the mark on the host's own voice
-US = sg._OUT_TAG        # tags a stdout line
+RS = con._ERR_TAG        # tags a stderr line; also the mark on the host's own voice
+US = con._OUT_TAG        # tags a stdout line
 
 # Runs in a child so the parent's stdout/stderr are real, separate pipes — the exact
 # thing a capturing consumer (or CI) sees. argv: cli-dir, mode, guest-sh-script.
 DRIVER = r"""
 import sys
 sys.path.insert(0, sys.argv[1])
-from silkgate_cli import core as sg
+from silkgate_cli import console as con, core as sg
 mode, script = sys.argv[2], sys.argv[3]
 if mode == "run":               # the default path: wrapper + demux
     sys.exit(sg.run_guest(lambda argv: argv, ["sh", "-c", script], tty=False))
 if mode == "run-say":           # a run followed by the host speaking for itself
     rc = sg.run_guest(lambda argv: argv, ["sh", "-c", script], tty=False)
-    sg.say("session demo up · proxy :8090")
+    con.say("session demo up · proxy :8090")
     sys.exit(rc)
 if mode == "tty":               # -t with stdout a pipe: passthrough, no demux
     sys.exit(sg.run_guest(lambda argv: argv, ["sh", "-c", script], tty=True))
@@ -140,20 +142,20 @@ class Voice(unittest.TestCase):
         return err.getvalue()
 
     def test_say_is_marked_and_otherwise_bare(self):
-        self.assertEqual(self.speak(sg.say, "session demo up"),
+        self.assertEqual(self.speak(con.say, "session demo up"),
                          RS.decode() + "silkgate: session demo up\n")
 
     def test_every_line_of_a_multiline_message_is_marked(self):
         # split on \n, not str.splitlines(): to the latter U+001E is itself a line
         # boundary — a consumer keying on the mark must split bytes or plain \n
-        text = self.speak(sg.say, "one\ntwo")
+        text = self.speak(con.say, "one\ntwo")
         self.assertTrue(all(ln.startswith(RS.decode())
                             for ln in text.rstrip("\n").split("\n")), repr(text))
 
     def test_die_speaks_the_same_way_and_exits_with_the_code(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
-            sg.die("no such session", 3)
+            con.die("no such session", 3)
         self.assertEqual(caught.exception.code, 3)
         self.assertEqual(err.getvalue(), RS.decode() + "silkgate: no such session\n")
 

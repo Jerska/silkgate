@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import core
+from . import console, core
 
 
 # --- logs: per-session observability ----------------------------------------
@@ -24,7 +24,7 @@ def _logs_guest(args, meta):
     if not args.follow:                              # one-shot: pass shaping straight to msb
         lines, err = core._run_msb_logs(sandbox, args.tail, args.since)
         if err is not None:
-            core.die(f"cannot read guest logs for {args.name!r}: {err}")
+            console.die(f"cannot read guest logs for {args.name!r}: {err}")
         _emit(lines)
         return
     # Follow: `printed` starts at the current log's length, and each poll re-fetches the
@@ -33,7 +33,7 @@ def _logs_guest(args, meta):
     # fetched, so nothing appended between the calls is lost or doubled.
     full, err = core._run_msb_logs(sandbox)
     if err is not None:
-        core.die(f"cannot read guest logs for {args.name!r}: {err}")
+        console.die(f"cannot read guest logs for {args.name!r}: {err}")
     start = 0
     if args.tail is not None:
         start = max(0, len(full) - args.tail)
@@ -46,13 +46,13 @@ def _logs_guest(args, meta):
     while True:
         time.sleep(args.interval)
         if not core.session_dir(args.name).exists():      # someone ran `silkgate down`
-            core.die(f"session {args.name!r} is gone — stopped following")
+            console.die(f"session {args.name!r} is gone — stopped following")
         lines, err = core._run_msb_logs(sandbox)
         if err is not None:                          # sandbox removed / msb unhappy
-            core.die(f"session {args.name!r}: {err} — stopped following")
+            console.die(f"session {args.name!r}: {err} — stopped following")
         n = len(lines)
         if n < printed:                              # rotation/truncation: resync, don't replay
-            core.say(f"guest log for {args.name!r} rotated — resyncing")
+            console.say(f"guest log for {args.name!r} rotated — resyncing")
             printed = n
         elif n > printed:
             _emit(lines[printed:])
@@ -95,15 +95,15 @@ def _read_from(path, offset):
 def _logs_audit(args):
     proxy = core.read_proxy()
     if not proxy or not proxy.get("log"):
-        core.die("shared proxy not running — no audit log (silkgate ls)")
+        console.die("shared proxy not running — no audit log (silkgate ls)")
     if args.since is not None:
-        core.say("--since applies to the guest log only — --audit starts from the whole "
-                 "file (--tail trims it)")
+        console.say("--since applies to the guest log only — --audit starts from the whole "
+                    "file (--tail trims it)")
     name = args.name
     path = Path(proxy["log"])
     lines, offset = _read_from(path, 0)              # first view = the whole file's history
     if lines is None:
-        core.die(f"cannot read audit log {path}")
+        console.die(f"cannot read audit log {path}")
     matched = [ln for ln in lines if _audit_match(ln, name)]
     if args.tail is not None:
         matched = matched[-args.tail:] if args.tail > 0 else []
@@ -113,26 +113,26 @@ def _logs_audit(args):
     while True:
         time.sleep(args.interval)
         if not core.session_dir(name).exists():
-            core.die(f"session {name!r} is gone — stopped following")
+            console.die(f"session {name!r} is gone — stopped following")
         p = core.read_proxy()
         # Identity, not pid liveness: after an unclean exit proxy.json survives and its
         # pid may be recycled, so only a proxy answering on the control socket counts.
         if not (p and core._proxy_running()):
-            core.die("shared proxy is gone — stopped following")
+            console.die("shared proxy is gone — stopped following")
         new_path = Path(p.get("log") or path)
         if new_path != path:                         # proxy restarted onto a fresh log file
-            core.say("audit log replaced — resyncing")
+            console.say("audit log replaced — resyncing")
             path, offset = new_path, 0
         try:
             size = path.stat().st_size
         except OSError:
-            core.die(f"audit log {path} vanished — stopped following")
+            console.die(f"audit log {path} vanished — stopped following")
         if size < offset:                            # truncated/rotated in place
-            core.say("audit log rotated — resyncing")
+            console.say("audit log rotated — resyncing")
             offset = 0
         new_lines, offset = _read_from(path, offset) # byte offset: only the new tail is read
         if new_lines is None:
-            core.die(f"audit log {path} vanished — stopped following")
+            console.die(f"audit log {path} vanished — stopped following")
         _emit([ln for ln in new_lines if _audit_match(ln, name)])
 
 
@@ -145,11 +145,11 @@ def cmd_logs(args):
     core._validate_name(args.name)
     meta = core.read_meta(args.name)
     if not meta:
-        core.die(f"no such session: {args.name!r} (silkgate ls)")
+        console.die(f"no such session: {args.name!r} (silkgate ls)")
     if args.tail is not None and args.tail < 0:
-        core.die("--tail must be >= 0")
+        console.die("--tail must be >= 0")
     if args.interval <= 0:
-        core.die("--interval must be > 0")
+        console.die("--interval must be > 0")
     try:
         if args.audit:
             _logs_audit(args)

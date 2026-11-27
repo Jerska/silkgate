@@ -35,6 +35,7 @@ pkg = clipkg.load("sg_cli_journal", home=_SCRATCH)
 sg = pkg.core
 gt = pkg.git
 pt = pkg.paths
+con = pkg.console
 
 for _knob in ("SILKGATE_LOG_RETAIN_DAYS", "SILKGATE_CAPTURE_RETAIN_DAYS",
               "SILKGATE_ARCHIVE_RETAIN_DAYS"):
@@ -395,7 +396,7 @@ class TestTeardownArchive(JournalCase):
                     str(self.tmp / "absolute-escape")):
             name = "esc" + str(abs(hash(bad)))[:4]
             self.write_session(name, sid=bad)
-            with mock.patch.object(sg, "preflight", lambda *a: None):
+            with mock.patch.object(con, "preflight", lambda *a: None):
                 self.refuses("refusing it", sg.cmd_down,
                              types.SimpleNamespace(name=name))
             self.assertTrue(sg.session_dir(name).exists(),
@@ -536,7 +537,7 @@ class TestMetaAdditions(JournalCase):
             seen.update(meta=meta_extra, brief=brief, rules_text=rules_text)
             raise SystemExit(42)
 
-        with mock.patch.object(sg, "preflight", lambda *a: None), \
+        with mock.patch.object(con, "preflight", lambda *a: None), \
                 mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
                 mock.patch.object(sg, "_proxy_running", lambda: True), \
                 mock.patch.object(sg, "ensure_proxy",
@@ -740,7 +741,7 @@ class TestExecBrief(JournalCase):
             self.assertIsNone(brief, "run's brief never rides the provision copy")
             self.write_session(name, **meta_extra)
 
-        with mock.patch.object(sg, "preflight", lambda *a: None), \
+        with mock.patch.object(con, "preflight", lambda *a: None), \
                 mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
                 mock.patch.object(sg, "_proxy_running", lambda: True), \
                 mock.patch.object(sg, "ensure_proxy",
@@ -1049,7 +1050,7 @@ class TestCaptureWiring(JournalCase):
             seen["env"] = kwargs.get("env")
             return self.fake_proc()
 
-        with mock.patch.object(sg, "which", return_value="mitmdump"), \
+        with mock.patch.object(con, "which", return_value="mitmdump"), \
                 mock.patch.object(sg.subprocess, "Popen", fake_popen), \
                 mock.patch.object(sg.socket, "create_connection", mock.MagicMock()):
             result = fn(*args)
@@ -1076,7 +1077,7 @@ class TestCaptureWiring(JournalCase):
             seen["env"] = kwargs.get("env")
             return proc
 
-        with mock.patch.object(sg, "which", return_value="mitmdump"), \
+        with mock.patch.object(con, "which", return_value="mitmdump"), \
                 mock.patch.object(sg.subprocess, "Popen", fake_popen), \
                 self.assertRaises(SystemExit):
             sg.cmd_proxy(types.SimpleNamespace(with_=None, rule=[RULE.strip()],

@@ -59,6 +59,7 @@ os.environ.pop("SILKGATE_PROXY_BIND", None)
 pkg = clipkg.load("sg_proxy_lifecycle")
 MOD = pkg.core
 PATHS = pkg.paths
+CONSOLE = pkg.console
 
 RULE = "api.anthropic.com/** GET\n"
 
@@ -490,7 +491,7 @@ class _FakeToolsCase(unittest.TestCase):
         the pre-fix behavior the port-collision tests demonstrate — kill whatever proxy
         it started, then fail."""
         msgs = []
-        with mock.patch.object(MOD, "say", msgs.append):
+        with mock.patch.object(CONSOLE, "say", msgs.append):
             try:
                 result = fn(*args)
             except SystemExit:
@@ -506,7 +507,7 @@ class _FakeToolsCase(unittest.TestCase):
         signature becomes _PortTheft for retry_port_theft to catch; any other die
         fails the test outright, with everything it said as the evidence."""
         msgs = []
-        with mock.patch.object(MOD, "say", msgs.append):
+        with mock.patch.object(CONSOLE, "say", msgs.append):
             try:
                 return fn(*args)
             except SystemExit:
@@ -1008,7 +1009,7 @@ class LifecycleTest(_FakeToolsCase):
             if not all(MOD._port_free(p) for p in range(base, 65536)):
                 self.skipTest(f"ports {base}..65535 not free here")
             msgs = []
-            with mock.patch.object(MOD, "say", msgs.append):
+            with mock.patch.object(CONSOLE, "say", msgs.append):
                 try:
                     pool = MOD._find_free_pool(base)
                 except SystemExit:
@@ -1218,7 +1219,7 @@ class InterruptSideEffectTest(_FakeToolsCase):
             def flush(self):
                 raise BrokenPipeError()
         with mock.patch.object(sys, "stderr", Dead()):
-            MOD.say("teardown progress")             # must not raise
+            CONSOLE.say("teardown progress")             # must not raise
 
     def test_deferred_interrupts_holds_sigint_and_restores(self):
         """Inside the guard a SIGINT is noted, never raised; outside, the previous

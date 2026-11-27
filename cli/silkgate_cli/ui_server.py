@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import core, git, logs, paths
+from . import console, core, git, logs, paths
 
 
 # --- ui: a local web view over the events files -------------------------------------
@@ -941,13 +941,13 @@ def cmd_ui(args):
     live-stream endpoints. Needs no running proxy — history and session listings work
     on their own, and the stream heartbeats until a proxy appears."""
     if not (UI_DIR / "index.html").is_file():
-        core.die(f"ui assets not found at {UI_DIR} — run from a complete checkout "
-                 "(the ui/ directory ships with the repo)")
+        console.die(f"ui assets not found at {UI_DIR} — run from a complete checkout "
+                    "(the ui/ directory ships with the repo)")
     try:
         server = _ui_server(args.port)
     except OSError:
-        core.die(f"cannot bind the ui at 127.0.0.1:{args.port} — "
-                 + core._port_in_use_error(args.port))
+        console.die(f"cannot bind the ui at 127.0.0.1:{args.port} — "
+                    + core._port_in_use_error(args.port))
     host, port = server.server_address[:2]
-    core.say(f"silkgate ui at http://{host}:{port}/ — Ctrl-C stops it")
+    console.say(f"silkgate ui at http://{host}:{port}/ — Ctrl-C stops it")
     server.serve_forever()

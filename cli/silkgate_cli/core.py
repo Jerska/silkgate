@@ -31,74 +31,10 @@ IMAGE_NS = "silkgate"                # generated images: silkgate/<slug>:<hash12
 TIER1_PROBE_TARGET = "1.1.1.1:443"   # must be a live public service: the probe passes only
                                      # when a connect that WOULD succeed is denied (tier1_fault)
 
-from . import git, paths
+from . import console, git, paths
 
 sys.path.insert(0, str(paths.REPO / "mitmaddon"))
 from rule_engine import RuleSet, _parse_secret
-
-
-def die(msg, code=1):
-    say(msg)
-    sys.exit(code)
-
-
-def say(msg):
-    # RS opens every line silkgate speaks as itself: it's the one byte relayed guest output
-    # can't carry (_relay spends a leading one on routing, _plain strips the rest). So a
-    # `silkgate:` line without it is a guest's imitation. Terminals draw nothing for RS.
-    # Under --tty the guest writes to the screen directly, and no mark holds.
-    mark = _ERR_TAG.decode()
-    try:
-        print(mark + f"silkgate: {msg}".replace("\n", "\n" + mark), file=sys.stderr)
-    except (OSError, ValueError):
-        # stderr can be a closed pipe or a vanished terminal by the time a teardown
-        # speaks; losing the line is fine, losing the rest of the cleanup is not.
-        pass
-
-
-# Every binary the toolchain can need, with its install hint. preflight() and which() both
-# read this table, so they can't name different remedies. A hint passed to which() loses
-# to the table for a binary the table knows.
-_TOOL_HINTS = {
-    "docker": "images are built with docker, then loaded into msb",
-    "msb": "curl -fsSL https://install.microsandbox.dev | sh",
-    "mitmdump": "pip install mitmproxy",
-    "git": "--checkout/--branch drive the host repository with it",
-}
-
-
-def which(binary, hint=None):
-    """Resolve one binary or die naming the remedy — the last line of defence, at the
-    moment of use, for a tool that vanished after preflight() let the command start."""
-    path = shutil.which(binary)
-    if path is None:
-        die(f"{binary} not found — {_TOOL_HINTS.get(binary, hint)}")
-    return path
-
-
-def preflight(*binaries):
-    """Die naming every absent tool at once, before a command does any work.
-
-    which() checks one tool when it's needed, so a user missing several would learn them
-    one failed run at a time. This reports them together, for one PATH lookup each.
-    Whether containment holds is `silkgate verify`'s question.
-    """
-    missing = [b for b in dict.fromkeys(binaries) if shutil.which(b) is None]
-    if not missing:
-        return
-    lines = "\n".join(f"  {b} — {_TOOL_HINTS[b]}" for b in missing)
-    die(f"missing {len(missing)} of the tools this command needs:\n{lines}")
-
-
-def _build_tools():
-    """What building an image dials: docker and msb (build_image), plus mitmdump while
-    the mitmproxy CA does not exist yet — write_build_context runs ensure_ca, which
-    shells out to mitmdump only to generate that CA."""
-    return ("docker", "msb") + (() if paths.MITM_CA.is_file() else ("mitmdump",))
-
-
-def tail(path, lines=10):
-    return "\n".join(path.read_text(errors="replace").splitlines()[-lines:])
 
 
 # --- profiles ----------------------------------------------------------------
@@ -183,7 +119,7 @@ class Profile:
         self.name, self.dir = name, paths.PROFILE_DIR / name
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) or not self.dir.is_dir():
             avail = ", ".join(sorted(p.name for p in paths.PROFILE_DIR.iterdir() if p.is_dir()))
-            die(f"unknown profile {name!r} (available: {avail})")
+            console.die(f"unknown profile {name!r} (available: {avail})")
         self.conf = _parse_conf(self.dir / "profile.conf")
         self.rules = _read_if(self.dir / "rules.txt")
         self.setup = _read_if(self.dir / "setup.sh")
@@ -195,46 +131,46 @@ class Profile:
         self.guest_credentials = {k.partition(".")[2].lower(): v for k, v in self.conf.items()
                                   if k.startswith("guest_credential.")}
         if self.conf.get("guest_credential") and not self.guest_credentials:
-            die(f"profile {name!r}: guest_credential names a secret but no "
-                "guest_credential.<header> line says what the guest holds")
+            console.die(f"profile {name!r}: guest_credential names a secret but no "
+                        "guest_credential.<header> line says what the guest holds")
         for header, pair in self.guest_credentials.items():
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S+", pair):
-                die(f"profile {name!r}: guest_credential.{header} must be KEY=VALUE, "
-                    f"got {pair!r}")
+                console.die(f"profile {name!r}: guest_credential.{header} must be KEY=VALUE, "
+                            f"got {pair!r}")
         default = self.conf.get("default_version")
         if version and not default:
-            die(f"profile {name!r} takes no version (it installs nothing versioned)")
+            console.die(f"profile {name!r} takes no version (it installs nothing versioned)")
         self.version = version or default
         if self.version:
             bad = _version_error(self.version)      # a profile.conf default is checked too
             if bad:
-                die(f"profile {name!r}: {bad}")
+                console.die(f"profile {name!r}: {bad}")
         # The arg contract, both halves load-checked: a declared arg_pattern must be a
         # usable full-match regex, and a {arg} placeholder without one is a line
         # nothing may ever fill — refused at load so `profiles` lists the defect too.
         self.arg_pattern = self.conf.get("arg_pattern")
         if self.arg_pattern is not None:
             if not self.arg_pattern:
-                die(f"profile {name!r}: empty arg_pattern — name a full-match pattern "
-                    "or drop the key")
+                console.die(f"profile {name!r}: empty arg_pattern — name a full-match pattern "
+                            "or drop the key")
             try:
                 re.compile(self.arg_pattern)
             except re.error as e:
-                die(f"profile {name!r}: bad arg_pattern {self.arg_pattern!r} — {e}")
+                console.die(f"profile {name!r}: bad arg_pattern {self.arg_pattern!r} — {e}")
         elif "{arg}" in self.rules or "{arg}" in self.context:
             where = "rules.txt" if "{arg}" in self.rules else "context.md"
-            die(f"profile {name!r}: {where} uses {{arg}} but profile.conf declares no "
-                "arg_pattern — declare one or drop the placeholder")
+            console.die(f"profile {name!r}: {where} uses {{arg}} but profile.conf declares no "
+                        "arg_pattern — declare one or drop the placeholder")
         if arg is not None:
             bad = _arg_error(arg)       # unconditional, wherever the arg came from
             if bad:
-                die(f"profile {name!r}: {bad}")
+                console.die(f"profile {name!r}: {bad}")
             if self.arg_pattern is None:
-                die(f"profile {name!r} takes no argument "
-                    "(its profile.conf declares no arg_pattern)")
+                console.die(f"profile {name!r} takes no argument "
+                            "(its profile.conf declares no arg_pattern)")
             if not re.fullmatch(self.arg_pattern, arg):
-                die(f"profile {name!r}: argument {arg!r} does not match its arg_pattern "
-                    f"{self.arg_pattern!r}")
+                console.die(f"profile {name!r}: argument {arg!r} does not match its arg_pattern "
+                            f"{self.arg_pattern!r}")
         self.arg = arg
 
     @property
@@ -274,7 +210,7 @@ def _parse_conf(path):
             continue
         key, sep, value = line.partition("=")
         if not sep:
-            die(f"{path}: expected 'key = value', got {line!r}")
+            console.die(f"{path}: expected 'key = value', got {line!r}")
         conf[key.strip()] = value.strip()
     return conf
 
@@ -295,14 +231,15 @@ def resolve_profiles(specs, *, allow_verify_only=False):
         try:
             name, version, arg = _parse_spec(spec)
         except ValueError as e:
-            die(str(e))
+            console.die(str(e))
         if name in _VERIFY_ONLY and not allow_verify_only:
-            die(f"profile {name!r} is for `silkgate verify` only — it opens the Debian mirrors "
-                "so the containment check can install its probe tools through the proxy")
+            console.die(f"profile {name!r} is for `silkgate verify` only — it opens the Debian "
+                        "mirrors so the containment check can install its probe tools through "
+                        "the proxy")
         p = Profile(name, version, arg)
         if p.arg_pattern is not None and p.arg is None:
-            die(f"profile {name!r} requires an argument — write {name}:ARG, with an ARG "
-                f"that fully matches its arg_pattern {p.arg_pattern!r}")
+            console.die(f"profile {name!r} requires an argument — write {name}:ARG, with an ARG "
+                        f"that fully matches its arg_pattern {p.arg_pattern!r}")
         if all((p.name, p.version, p.arg) != (q.name, q.version, q.arg) for q in profiles):
             profiles.append(p)
     # `supersedes = NAME` in profile.conf: an instance of the declaring profile drops
@@ -314,13 +251,13 @@ def resolve_profiles(specs, *, allow_verify_only=False):
             continue
         for q in [q for q in profiles if q is not p
                   and q.name == target and q.arg == p.arg]:
-            say(f"profile {p.spec} supersedes {q.spec} — dropping {q.spec}")
+            console.say(f"profile {p.spec} supersedes {q.spec} — dropping {q.spec}")
             profiles.remove(q)
     have = {p.name for p in profiles}
     for p in profiles:
         missing = [r for r in re.split(r"[,\s]+", p.conf.get("requires", "")) if r and r not in have]
         if missing:
-            die(f"profile {p.name!r} requires {', '.join(missing)} — add --with for them")
+            console.die(f"profile {p.name!r} requires {', '.join(missing)} — add --with for them")
     return profiles
 
 
@@ -358,7 +295,7 @@ def load_ruleset(text, where="rules"):
     try:
         return RuleSet.parse(text)
     except ValueError as e:
-        die(f"{where}: {e}")
+        console.die(f"{where}: {e}")
 
 
 # The other half of the proxy configuration: NO_PROXY/no_proxy is an exemption list every
@@ -373,18 +310,18 @@ def check_env(pairs):
     for pair in pairs:
         name, sep, value = pair.partition("=")
         if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-            die(f"bad -e argument {pair!r} (expected NAME=VALUE)")
+            console.die(f"bad -e argument {pair!r} (expected NAME=VALUE)")
         if name in PROXY_ENV_VARS:
-            die(f"-e {name} collides with the proxy configuration silkgate sets")
+            console.die(f"-e {name} collides with the proxy configuration silkgate sets")
         if name in _NO_PROXY_VARS:
-            die(f"-e {name} tells the guest's clients to bypass the proxy for the hosts it "
-                "names, and Tier 1 drops those connections — they fail instead of being "
-                "policed, and nothing in it widens the allowlist")
+            console.die(f"-e {name} tells the guest's clients to bypass the proxy for the hosts "
+                        "it names, and Tier 1 drops those connections — they fail instead of "
+                        "being policed, and nothing in it widens the allowlist")
         if "\n" in value:
             # msb aborts the guest (SIGABRT, before the agent relay comes up) on any env
             # value containing a newline, at any size. Fail here with a reason instead.
-            die(f"-e {name} value contains a newline, which microsandbox cannot pass; "
-                "write it to a file in the workspace instead")
+            console.die(f"-e {name} value contains a newline, which microsandbox cannot pass; "
+                        "write it to a file in the workspace instead")
 
 
 def check_secrets(ruleset):
@@ -404,7 +341,7 @@ def check_secrets(ruleset):
             continue
         msg = (f"SILKGATE_EGRESS_SECRET_{n.upper()} {reason} — "
                f"requests matching inject_auth={n} will be denied")
-        say(f"warning: {msg}")
+        console.say(f"warning: {msg}")
 
 
 # --- host processes ----------------------------------------------------------
@@ -487,8 +424,8 @@ def _find_free_pool(base_port):
     POOL_SIZE. Scans 5*POOL_SIZE ports, never past 65535, where bind() raises instead of
     reading as busy. Dies naming every blocker if no range is free."""
     if base_port + POOL_SIZE - 1 > 65535:
-        die(f"base port {base_port} leaves no room for a {POOL_SIZE}-port pool "
-            f"({base_port}..{base_port + POOL_SIZE - 1} runs past port 65535)")
+        console.die(f"base port {base_port} leaves no room for a {POOL_SIZE}-port pool "
+                    f"({base_port}..{base_port + POOL_SIZE - 1} runs past port 65535)")
     limit = min(base_port + 5 * POOL_SIZE, 65536)
     start = base_port
     blockers = []
@@ -499,9 +436,9 @@ def _find_free_pool(base_port):
             return list(range(start, start + POOL_SIZE))
         blockers.append(blocked)
         start = blocked + 1
-    die(f"no {POOL_SIZE}-port range free in {base_port}..{limit - 1} — blocked by "
-        f"listeners on {', '.join(str(p) for p in blockers)} "
-        f"(lsof -nP -iTCP:<port> -sTCP:LISTEN names each holder)")
+    console.die(f"no {POOL_SIZE}-port range free in {base_port}..{limit - 1} — blocked by "
+                f"listeners on {', '.join(str(p) for p in blockers)} "
+                f"(lsof -nP -iTCP:<port> -sTCP:LISTEN names each holder)")
 
 
 # How long a spawned mitmdump gets to answer on every advertised address.
@@ -522,10 +459,10 @@ def _wait_proxy_ready(proc, ports, log_path):
     addr = _probe_addr(ports[0])
     while True:
         if proc.poll() is not None:
-            die(f"proxy exited at startup — {log_path}:\n{tail(log_path)}")
+            console.die(f"proxy exited at startup — {log_path}:\n{console.tail(log_path)}")
         if _BIND_FAILURE in log_path.read_bytes().lower():
             stop(proc)
-            die(f"proxy failed to bind — {log_path}:\n{tail(log_path)}")
+            console.die(f"proxy failed to bind — {log_path}:\n{console.tail(log_path)}")
         try:
             for port in ports:
                 for addr in _probe_addrs(port):
@@ -536,8 +473,8 @@ def _wait_proxy_ready(proc, ports, log_path):
             pass
         if time.monotonic() >= deadline:
             stop(proc)
-            die(f"proxy did not answer at {addr[0]}:{addr[1]} within "
-                f"{PROXY_READY_TIMEOUT}s — {log_path}:\n{tail(log_path)}")
+            console.die(f"proxy did not answer at {addr[0]}:{addr[1]} within "
+                        f"{PROXY_READY_TIMEOUT}s — {log_path}:\n{console.tail(log_path)}")
         time.sleep(0.2)
 
 
@@ -605,10 +542,10 @@ def _prune_logs():
         for pattern in patterns:
             pruned += _prune_kind(pattern, cutoff, live)
     if pruned:
-        say(f"pruned {pruned} audit log file(s) past retention from {paths.LOG_DIR} "
-            f"(the {LOG_RETAIN_COUNT} newest of each kind always stay; "
-            "SILKGATE_LOG_RETAIN_DAYS=0 and SILKGATE_CAPTURE_RETAIN_DAYS=0 keep "
-            "everything)")
+        console.say(f"pruned {pruned} audit log file(s) past retention from {paths.LOG_DIR} "
+                    f"(the {LOG_RETAIN_COUNT} newest of each kind always stay; "
+                    "SILKGATE_LOG_RETAIN_DAYS=0 and SILKGATE_CAPTURE_RETAIN_DAYS=0 keep "
+                    "everything)")
 
 
 def start_proxy(rules_text, port):
@@ -618,9 +555,9 @@ def start_proxy(rules_text, port):
     (_port_free, _wait_proxy_ready), because a bare connect can't tell this proxy from a
     squatter. An orphaned proxy would answer while ours died, and a verify guest would run
     under the wrong ruleset."""
-    mitmdump = which("mitmdump", "pip install mitmproxy")
+    mitmdump = console.which("mitmdump", "pip install mitmproxy")
     if not _port_free(port):
-        die(_port_in_use_error(port))
+        console.die(_port_in_use_error(port))
     paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
@@ -714,7 +651,7 @@ class _deferred_interrupts:
             if not self._noted:
                 self._noted = True
                 try:
-                    os.write(2, _ERR_TAG + b"silkgate: interrupt noted "
+                    os.write(2, console._ERR_TAG + b"silkgate: interrupt noted "
                                 b"- finishing cleanup first (it is bounded)\n")
                 except OSError:
                     pass
@@ -733,7 +670,7 @@ class _deferred_interrupts:
 
 def msb_argv(image, cmd, port, *, pull_never=True, mounts=()):
     """One-shot `msb run` of a guest locked to one proxy port (the verify path)."""
-    argv = [which("msb", "curl -fsSL https://install.microsandbox.dev | sh"), "run", image]
+    argv = [console.which("msb", "curl -fsSL https://install.microsandbox.dev | sh"), "run", image]
     if pull_never:
         argv += ["--pull", "never"]
     for m in mounts:
@@ -756,8 +693,8 @@ def ensure_ca():
     with no rules.
     """
     if not paths.MITM_CA.is_file():
-        mitmdump = which("mitmdump", "pip install mitmproxy")
-        say("generating the mitmproxy CA (first run)…")
+        mitmdump = console.which("mitmdump", "pip install mitmproxy")
+        console.say("generating the mitmproxy CA (first run)…")
         with tempfile.TemporaryDirectory(prefix="silkgate-ca-") as tmp:
             addon = Path(tmp) / "shutdown_after_startup.py"
             addon.write_text("from mitmproxy import ctx\n"
@@ -769,11 +706,11 @@ def ensure_ca():
             try:
                 proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
             except subprocess.TimeoutExpired:
-                die(f"mitmdump did not finish generating {paths.MITM_CA} within 60s")
+                console.die(f"mitmdump did not finish generating {paths.MITM_CA} within 60s")
         if not paths.MITM_CA.is_file():
             detail = (proc.stderr or proc.stdout).strip().splitlines()
-            die(f"mitmdump did not create {paths.MITM_CA}"
-                + (f" — {detail[-1]}" if detail else ""))
+            console.die(f"mitmdump did not create {paths.MITM_CA}"
+                        + (f" — {detail[-1]}" if detail else ""))
     paths.CA_DIR.mkdir(parents=True, exist_ok=True)
     cert = paths.CA_DIR / "egress-ca.pem"
     shutil.copyfile(paths.MITM_CA, cert)
@@ -897,26 +834,27 @@ def docker_env():
 
 def build_image(profiles, *, base=BASE_IMAGE, platform_=None):
     """Build (and load into msb) the image these profiles describe; return its ref."""
-    docker = which("docker", "images are built with docker, then loaded into msb")
-    msb = which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
+    docker = console.which("docker", "images are built with docker, then loaded into msb")
+    msb = console.which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
     plat = platform_ or _DOCKER_PLATFORMS.get(platform.machine().lower())
     if plat is None:
-        die(f"unknown host arch {platform.machine()!r} — pass --platform (e.g. linux/amd64)")
+        console.die(f"unknown host arch {platform.machine()!r} — pass --platform (e.g. "
+                    "linux/amd64)")
     ref = image_ref(profiles, base)
     env = docker_env()
     with tempfile.TemporaryDirectory(prefix="silkgate-build-") as tmp:
         context = Path(tmp)
         write_build_context(context, profiles, base)
-        say(f"building {ref} "
-            f"({', '.join(p.image_spec for p in _image_profiles(profiles)) or 'base only'})")
+        specs = ", ".join(p.image_spec for p in _image_profiles(profiles))
+        console.say(f"building {ref} ({specs or 'base only'})")
         if subprocess.run([docker, "build", "--platform", plat, "-t", ref, str(context)],
                           env=env).returncode:
-            die(f"docker build failed for {ref}")
+            console.die(f"docker build failed for {ref}")
     save = subprocess.Popen([docker, "save", ref], env=env, stdout=subprocess.PIPE)
     load = subprocess.run([msb, "load"], stdin=save.stdout)
     save.stdout.close()
     if save.wait() or load.returncode:
-        die(f"docker save | msb load failed for {ref}")
+        console.die(f"docker save | msb load failed for {ref}")
     return ref
 
 
@@ -928,8 +866,8 @@ def ensure_image(profiles, image, *, base=BASE_IMAGE):
     that is accepted and then ignored reads as honoured."""
     if image:
         if base != BASE_IMAGE:
-            die("--image and --base together are contradictory: --image names the exact "
-                "image to run, so nothing is built for --base to shape — drop one")
+            console.die("--image and --base together are contradictory: --image names the exact "
+                        "image to run, so nothing is built for --base to shape — drop one")
         return image
     ref = image_ref(profiles, base)
     if image_in_msb(ref):
@@ -1153,7 +1091,7 @@ def _name_ok(name):
 def _validate_name(name):
     # Used as a dir name, an msb sandbox name (sg-<name>), and a net-rule component.
     if not _name_ok(name):
-        die(f"invalid session name {name!r} (letters, digits, '-', '_'; ≤32 chars)")
+        console.die(f"invalid session name {name!r} (letters, digits, '-', '_'; ≤32 chars)")
 
 
 # A session id outlives the session: it names the archive dir and threads through the
@@ -1214,7 +1152,7 @@ def _journal_into(sdir, event, **fields):
         finally:
             os.close(fd)
     except Exception as e:                     # never raise: bookkeeping, not enforcement
-        say(f"warning: could not journal {event!r} for {sdir.name}: {e}")
+        console.say(f"warning: could not journal {event!r} for {sdir.name}: {e}")
 
 
 def _end_exec(name, exec_id, rc):
@@ -1232,7 +1170,7 @@ def _end_exec(name, exec_id, rc):
     try:
         _write_json(mpath, {**meta, "last_rc": rc})
     except Exception as e:
-        say(f"warning: could not record last_rc for {name!r}: {e}")
+        console.say(f"warning: could not record last_rc for {name!r}: {e}")
 
 
 def _bracketed_exec(name, exec_id, run):
@@ -1323,10 +1261,11 @@ def read_meta(name):
     if meta is None:
         return None
     if meta.get("name") != name:
-        die(f"session {name!r}: its meta.json names session {meta.get('name')!r} — refusing it")
+        console.die(f"session {name!r}: its meta.json names session {meta.get('name')!r} — "
+                    "refusing it")
     bad = _check_meta_fields(meta)
     if bad:
-        die(f"session {name!r}: {bad} — refusing it")
+        console.die(f"session {name!r}: {bad} — refusing it")
     return meta
 
 
@@ -1350,16 +1289,16 @@ def read_archived_meta(sid):
     directory's sid, and every field is checked, because the UI's diff puts archived meta
     fields into git argv."""
     if not _SID_RE.fullmatch(sid or ""):
-        die(f"invalid archive sid {sid!r}")
+        console.die(f"invalid archive sid {sid!r}")
     meta = _read_json(paths.ARCHIVE_DIR / sid / "meta.json")
     if meta is None:
         return None
     if meta.get("sid") != sid:
-        die(f"archived session {sid!r}: its meta.json names sid {meta.get('sid')!r} — "
-            "refusing it")
+        console.die(f"archived session {sid!r}: its meta.json names sid {meta.get('sid')!r} — "
+                    "refusing it")
     bad = _check_meta_fields(meta)
     if bad:
-        die(f"archived session {sid!r}: {bad} — refusing it")
+        console.die(f"archived session {sid!r}: {bad} — refusing it")
     return meta
 
 
@@ -1480,7 +1419,7 @@ def start_shared_proxy(base_port, ports=None):
     (_pinned_pool). Either way, every port is checked free before the spawn, and ready
     means all of them answer, with the child and its log watched (see start_proxy).
     proxy.json appears only then, so it never records a proxy that didn't come up."""
-    mitmdump = which("mitmdump", "pip install mitmproxy")
+    mitmdump = console.which("mitmdump", "pip install mitmproxy")
     if ports is None:
         ports = _find_free_pool(base_port)
     paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1546,14 +1485,14 @@ def _pinned_pool(meta):
     strays = sorted(p for p in owners if p not in pool)
     if strays:
         held = ", ".join(f"{p} (session {owners[p]})" for p in strays)
-        die(f"sessions hold ports no proxy record names a pool for: {held} — "
-            f"`silkgate down` them before the proxy can start")
+        console.die(f"sessions hold ports no proxy record names a pool for: {held} — "
+                    f"`silkgate down` them before the proxy can start")
     for p in pool:
         if not _port_free(p):
             pin = (f"session {owners[p]} is frozen onto it" if owners.get(p) else
                    f"surviving sessions pin the pool to {pool[0]}..{pool[-1]}")
-            die(f"port {p} is already in use, but {pin} — "
-                f"lsof -nP -iTCP:{p} -sTCP:LISTEN names the holder")
+            console.die(f"port {p} is already in use, but {pin} — "
+                        f"lsof -nP -iTCP:{p} -sTCP:LISTEN names the holder")
     return pool
 
 
@@ -1563,8 +1502,8 @@ def _ensure_proxy_locked(base_port):
     ident = _proxy_ident()
     if ident is not None:                      # something live answers on our socket path
         if meta is None:
-            die(f"a proxy (pid {ident or 'unknown'}) holds {paths.PROXY_SOCK} but "
-                f"{paths.PROXY_JSON} is gone — kill that process and retry")
+            console.die(f"a proxy (pid {ident or 'unknown'}) holds {paths.PROXY_SOCK} but "
+                        f"{paths.PROXY_JSON} is gone — kill that process and retry")
         if ident and meta.get("pid") != ident:
             meta["pid"] = ident                # proxy.json outlived the proxy it described;
             _write_json(paths.PROXY_JSON, meta)      # the socket's owner is the identity
@@ -1699,11 +1638,11 @@ def pick_port(proxy, name):
                 fresh = _ensure_proxy_locked(proxy["base_port"])
                 if p not in (fresh.get("ports") or ()):
                     _release_port(name, p)
-                    die(f"the proxy pool moved across a restart: port {p} was claimed "
-                        f"from {proxy['ports'][0]}..{proxy['ports'][-1]} but the new "
-                        f"pool is {fresh['ports'][0]}..{fresh['ports'][-1]} — retry")
+                    console.die(f"the proxy pool moved across a restart: port {p} was claimed "
+                                f"from {proxy['ports'][0]}..{proxy['ports'][-1]} but the new "
+                                f"pool is {fresh['ports'][0]}..{fresh['ports'][-1]} — retry")
             return p
-    die(f"no free proxy ports (pool {proxy['ports'][0]}..{proxy['ports'][-1]} is full)")
+    console.die(f"no free proxy ports (pool {proxy['ports'][0]}..{proxy['ports'][-1]} is full)")
 
 
 # --- control socket ---------------------------------------------------------
@@ -1711,7 +1650,7 @@ def pick_port(proxy, name):
 def _sock_call(req):
     """One line-delimited JSON request/response against the proxy control socket."""
     if not paths.PROXY_SOCK.exists():
-        die("shared proxy control socket missing — is a session up?")
+        console.die("shared proxy control socket missing — is a session up?")
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(5)
@@ -1721,15 +1660,15 @@ def _sock_call(req):
             f.flush()
             line = f.readline()
     except OSError as e:
-        die(f"control socket error: {e}")
+        console.die(f"control socket error: {e}")
     if not line:
-        die("control socket closed without a response")
+        console.die("control socket closed without a response")
     try:
         resp = json.loads(line)
     except ValueError:
-        die("control socket sent a non-JSON response")
+        console.die("control socket sent a non-JSON response")
     if not resp.get("ok"):
-        die(f"control op {req.get('op')!r} failed: {resp.get('error', 'unknown error')}")
+        console.die(f"control op {req.get('op')!r} failed: {resp.get('error', 'unknown error')}")
     return resp
 
 
@@ -1744,10 +1683,10 @@ def _wait_control_sock(timeout, pid=None):
         if ident is not None:
             if pid is None or ident in (0, pid):
                 return
-            die(f"control socket {paths.PROXY_SOCK} is answered by pid {ident}, not the "
-                f"proxy just started (pid {pid})")
+            console.die(f"control socket {paths.PROXY_SOCK} is answered by pid {ident}, not the "
+                        f"proxy just started (pid {pid})")
         time.sleep(0.2)
-    die("shared proxy control socket did not become ready")
+    console.die("shared proxy control socket did not become ready")
 
 
 def _push_secrets(ruleset, session):
@@ -1761,12 +1700,13 @@ def _push_secrets(ruleset, session):
     for n in names:
         value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{n.upper()}")
         if not value:
-            say(f"warning: SILKGATE_EGRESS_SECRET_{n.upper()} is not set — "
-                f"requests matching inject_auth={n} will be denied")
+            console.say(f"warning: SILKGATE_EGRESS_SECRET_{n.upper()} is not set — "
+                        f"requests matching inject_auth={n} will be denied")
             continue
         if _parse_secret(value) is None:
-            say(f"warning: SILKGATE_EGRESS_SECRET_{n.upper()} is set but not a valid "
-                f'"<Header>: <value>" line — requests matching inject_auth={n} will be denied')
+            console.say(f"warning: SILKGATE_EGRESS_SECRET_{n.upper()} is set but not a valid "
+                        f'"<Header>: <value>" line — requests matching inject_auth={n} will be '
+                        "denied")
             continue
         _sock_call({"op": "set_secret", "name": n.lower(), "value": value,
                     "session": session})
@@ -1797,7 +1737,7 @@ def _guest_credential_env(profiles):
 # --- msb session guests -----------------------------------------------------
 
 def _msb():
-    return which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
+    return console.which("msb", "curl -fsSL https://install.microsandbox.dev | sh")
 
 
 def msb_create_argv(sandbox, image, port, *, mounts=(), env=(), copies=(),
@@ -1934,8 +1874,8 @@ def tier1_fault(sandbox, port):
                                   text=True, timeout=15)
         except subprocess.TimeoutExpired:
             return tier1_verdict("", port, error="msb exec did not return within 15s")
-        say("note: the first Tier-1 probe exec timed out — the msb relay race (msb 0.5.4 "
-            "swallows the first exec after create); a fresh exec client answered")
+        console.say("note: the first Tier-1 probe exec timed out — the msb relay race (msb 0.5.4 "
+                    "swallows the first exec after create); a fresh exec client answered")
     if proc.returncode:
         detail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
         return tier1_verdict(proc.stdout, port,
@@ -1958,9 +1898,6 @@ _ANSI = re.compile(rb"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]"        # CSI: params per EC
 def _plain(line):
     return _ANSI.sub(b"", line.rstrip(b"\r"))
 
-
-_ERR_TAG = b"\x1e"          # RS: a stderr line, and the mark on silkgate's own voice (say)
-_OUT_TAG = b"\x1f"          # US: a stdout line
 
 # msb streams output live only when its stdout is a terminal, so a run needs a PTY. But the
 # command must not hold it: it would turn interactive (colors, cursor codes) and merge its
@@ -2001,8 +1938,8 @@ def _exec_marker_sh(exec_id):
 
 _RELAY_SH = (_EXPORT_CONTEXT
              + 'd=$(mktemp -d); mkfifo "$d/o" "$d/e"; '
-             f'while IFS= read -r l || [ -n "$l" ]; do printf "\\{ord(_OUT_TAG):03o}%s\\n" "$l"; done <"$d/o" & po=$!; '
-             f'while IFS= read -r l || [ -n "$l" ]; do printf "\\{ord(_ERR_TAG):03o}%s\\n" "$l"; done <"$d/e" & pe=$!; '
+             f'while IFS= read -r l || [ -n "$l" ]; do printf "\\{ord(console._OUT_TAG):03o}%s\\n" "$l"; done <"$d/o" & po=$!; '
+             f'while IFS= read -r l || [ -n "$l" ]; do printf "\\{ord(console._ERR_TAG):03o}%s\\n" "$l"; done <"$d/e" & pe=$!; '
              '"$@" </dev/null >"$d/o" 2>"$d/e"; rc=$?; wait $po $pe; rm -rf "$d"; exit $rc')
 
 
@@ -2072,7 +2009,7 @@ def _pty_relay(argv, *, demux, on_line=None):
             if not chunk:
                 break
             if not demux:
-                sys.stdout.buffer.write(chunk.replace(_ERR_TAG, b""))
+                sys.stdout.buffer.write(chunk.replace(console._ERR_TAG, b""))
                 sys.stdout.buffer.flush()
                 continue
             buf += chunk
@@ -2097,8 +2034,8 @@ def _relay(line, *, newline, on_line=None):
     claims nothing. `on_line` sees the same cleaned text a reader does.
     """
     tag = line[:1]
-    stream = sys.stderr.buffer if tag == _ERR_TAG else sys.stdout.buffer
-    text = _plain(line[1:] if tag in (_ERR_TAG, _OUT_TAG) else line)
+    stream = sys.stderr.buffer if tag == console._ERR_TAG else sys.stdout.buffer
+    text = _plain(line[1:] if tag in (console._ERR_TAG, console._OUT_TAG) else line)
     stream.write(text + b"\n" if newline else text)
     stream.flush()
     if on_line is not None:
@@ -2168,44 +2105,45 @@ def _mount_pair(src, dst, mode, *, allow_git_dir=False):
     """
     w = Path(src).resolve()
     if not w.is_dir():
-        die(f"mount source is not a directory: {w}")
+        console.die(f"mount source is not a directory: {w}")
     if w.parent == w:
-        die(f"refusing to mount {w}: that is the whole filesystem")
+        console.die(f"refusing to mount {w}: that is the whole filesystem")
     for path, what in _forbidden_mounts():
         target = Path(path).resolve()
         if w == target or w in target.parents:
-            die(f"refusing to mount {w}: it is (or contains) {what} — credentials and "
-                "configuration there must not be exposed to the guest")
+            console.die(f"refusing to mount {w}: it is (or contains) {what} — credentials and "
+                        "configuration there must not be exposed to the guest")
     d = _normalize_dst(dst)
     if not d.startswith("/"):
-        die(f"mount destination {dst!r} is not absolute — guest paths start at /")
+        console.die(f"mount destination {dst!r} is not absolute — guest paths start at /")
     if d == "/":
-        die(f"refusing to mount {w} over the guest's whole filesystem")
+        console.die(f"refusing to mount {w} over the guest's whole filesystem")
     for reserved in _RESERVED_DSTS:
         if d == reserved or d.startswith(reserved + "/") or reserved.startswith(d + "/"):
-            die(f"refusing to mount at {d}: it is (or contains) {reserved}, silkgate's own "
-                "path in the guest")
+            console.die(f"refusing to mount at {d}: it is (or contains) {reserved}, silkgate's "
+                        "own path in the guest")
     if mode == "ro":
         if (w / ".git").is_file():
-            say(f"note: {w} is a linked git worktree — the .git pointer file is in the "
-                "read-only mount, but hooks and config live outside it")
+            console.say(f"note: {w} is a linked git worktree — the .git pointer file is in the "
+                        "read-only mount, but hooks and config live outside it")
         return str(w), d
     if allow_git_dir:
-        say(f"note: --allow-git-dir — {w} is mounted without the .git check, so hooks and "
-            "config of any repository inside are guest-writable: host code execution the "
-            "next time a human runs git there")
+        console.say(f"note: --allow-git-dir — {w} is mounted without the .git check, so hooks and "
+                    "config of any repository inside are guest-writable: host code execution the "
+                    "next time a human runs git there")
     else:
         dotgit = _find_git_dir(w)
         if dotgit is not None:
             where = "" if dotgit.parent == w else f" (at {dotgit.parent.relative_to(w)})"
-            die(f"refusing to mount {w} at {d} read-write: it holds a .git directory{where}, "
-                "so the guest would get read-write access to hooks and config — host code "
-                "execution the next time you run git there. Mount a linked worktree instead "
-                "(git worktree add), mount it read-only, or accept the risk explicitly with "
-                "--allow-git-dir.")
+            console.die(f"refusing to mount {w} at {d} read-write: it holds a .git "
+                        f"directory{where}, so the guest would get read-write access to hooks and "
+                        "config — host code execution the next time you run git there. Mount a "
+                        "linked worktree instead (git worktree add), mount it read-only, or "
+                        "accept the risk explicitly with --allow-git-dir.")
     if (w / ".git").is_file():
-        say(f"note: {w} is a linked git worktree — hooks and config live outside the mount and "
-            "are beyond the guest's reach, but the .git pointer file itself is not")
+        console.say(f"note: {w} is a linked git worktree — hooks and config live outside the "
+                    "mount and are beyond the guest's reach, but the .git pointer file itself is "
+                    "not")
     return str(w), d
 
 
@@ -2220,19 +2158,20 @@ def _mount_args(specs, *, allow_git_dir=False):
     for spec in specs or ():
         parsed = _split_mount(spec)
         if parsed is None:
-            die(f"invalid mount {spec!r} — expected SRC:DST[:ro|rw] (MODE defaults to ro)")
+            console.die(f"invalid mount {spec!r} — expected SRC:DST[:ro|rw] (MODE defaults to ro)")
         host, guest = _mount_pair(*parsed, allow_git_dir=allow_git_dir)
         for _, other, _ in mounts:
             if guest == other:
-                die(f"duplicate mount destination {guest} — one guest path takes one mount")
+                console.die(f"duplicate mount destination {guest} — one guest path takes one "
+                            "mount")
             inner, outer = sorted((guest, other), key=len)
             if outer.startswith(inner + "/"):
-                die(f"mount destinations {inner} and {outer} nest — nested virtiofs "
-                    "behavior is unverified, so it is refused rather than trusted")
+                console.die(f"mount destinations {inner} and {outer} nest — nested virtiofs "
+                            "behavior is unverified, so it is refused rather than trusted")
         mounts.append((host, guest, parsed[2]))
     if allow_git_dir and not any(mode == "rw" for _, _, mode in mounts):
-        die("--allow-git-dir does nothing here — the .git risk it accepts only exists "
-            "for a read-write -v mount")
+        console.die("--allow-git-dir does nothing here — the .git risk it accepts only exists "
+                    "for a read-write -v mount")
     return mounts
 
 
@@ -2246,7 +2185,7 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
     it, the port claim, any half-created sandbox, and the proxy if nothing else needs it."""
     sdir = session_dir(name)
     if sdir.exists():
-        die(f"session already exists: {sdir}")
+        console.die(f"session already exists: {sdir}")
     tmp = paths.SESSIONS_DIR / f".tmp-{name}"            # dot-prefixed: invisible to registries
     shutil.rmtree(tmp, ignore_errors=True)               # stale leftover from a crash
     tmp.mkdir(parents=True)
@@ -2271,7 +2210,7 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
             tmp.rename(sdir)                             # atomic claim; fails if name raced us
             owned = True
         except OSError:
-            die(f"session already exists: {sdir}")
+            console.die(f"session already exists: {sdir}")
         _push_secrets(ruleset, name)
         # The context goes into the rootfs, never the workspace: it must not appear in the
         # user's project, and a guest rewriting it changes nothing that matters. The
@@ -2286,7 +2225,7 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
         if subprocess.run(msb_create_argv(sandbox_name(name), image, port, mounts=mounts,
                                           env=env, copies=copies, memory=memory,
                                           cpus=cpus)).returncode:
-            die(f"msb create failed for session {name!r}")
+            console.die(f"msb create failed for session {name!r}")
     except BaseException:                                # incl. SystemExit from die()
         with _deferred_interrupts():                     # a Ctrl-C cannot halve the unwind
             if created:                                  # failed or cut short, a create
@@ -2360,13 +2299,13 @@ def _snapshot_output(sandbox, sdir):
     cap = _snapshot_cap("SILKGATE_SNAPSHOT_MAX_BYTES", _SNAPSHOT_MAX_BYTES)
     lines, err = _run_msb_logs(sandbox, tail_n=tail)
     if err is not None:
-        say(f"warning: no guest-output snapshot for {sandbox}: {err}")
+        console.say(f"warning: no guest-output snapshot for {sandbox}: {err}")
         return
     data = ("\n".join(lines) + "\n").encode("utf-8", "replace") if lines else b""
     try:
         (sdir / "output.log").write_bytes(data[-cap:])
     except OSError as e:
-        say(f"warning: could not write the guest-output snapshot: {e}")
+        console.say(f"warning: could not write the guest-output snapshot: {e}")
 
 
 # Retention for ~/.silkgate/archive, favouring keeping like the audit logs above: an
@@ -2403,9 +2342,9 @@ def _prune_archive():
         shutil.rmtree(d, ignore_errors=True)
         pruned += not d.exists()
     if pruned:
-        say(f"pruned {pruned} archived session(s) older than {days:g}d from {paths.ARCHIVE_DIR} "
-            f"(the {ARCHIVE_RETAIN_COUNT} newest always stay; SILKGATE_ARCHIVE_RETAIN_DAYS=0 "
-            "keeps everything)")
+        console.say(f"pruned {pruned} archived session(s) older than {days:g}d from "
+                    f"{paths.ARCHIVE_DIR} (the {ARCHIVE_RETAIN_COUNT} newest always stay; "
+                    "SILKGATE_ARCHIVE_RETAIN_DAYS=0 keeps everything)")
 
 
 def _teardown_session(meta, archive=True):
@@ -2429,8 +2368,8 @@ def _teardown_session(meta, archive=True):
     if archive and sandbox:
         _snapshot_output(sandbox, sdir)              # the guest's log dies with the VM
     if sandbox and not _remove_sandbox(sandbox):
-        die(f"msb rm {sandbox} failed — session {name!r} kept, its proxy port still "
-            f"reserved; remove the sandbox manually, then `silkgate down {name}`")
+        console.die(f"msb rm {sandbox} failed — session {name!r} kept, its proxy port still "
+                    f"reserved; remove the sandbox manually, then `silkgate down {name}`")
     if name:
         # The claim goes first, while meta.json still pins the port for pick_port; the
         # rename (or rmtree) is then what genuinely frees it.
@@ -2441,13 +2380,13 @@ def _teardown_session(meta, archive=True):
             try:
                 _write_json(sdir / "meta.json", {**meta, "sid": sid, "ended": now_iso()})
             except OSError as e:
-                say(f"warning: could not stamp 'ended' into {name!r}'s meta: {e}")
+                console.say(f"warning: could not stamp 'ended' into {name!r}'s meta: {e}")
             try:
                 paths.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
                 sdir.rename(paths.ARCHIVE_DIR / sid)
             except OSError as e:
-                say(f"warning: could not archive session {name!r} ({e}) — removing it "
-                    "instead")
+                console.say(f"warning: could not archive session {name!r} ({e}) — removing it "
+                            "instead")
                 shutil.rmtree(sdir, ignore_errors=True)
             _prune_archive()
         else:
@@ -2470,9 +2409,9 @@ def _maybe_stop_proxy():
 def cmd_build(args):
     profiles = resolve_profiles(args.with_ or [])
     load_ruleset(compose_rules(profiles))            # bad rules fail before a long build
-    preflight(*_build_tools())                       # every missing tool at once, pre-docker
+    console.preflight(*console._build_tools())       # every missing tool at once, pre-docker
     ref = build_image(profiles, base=args.base, platform_=args.platform)
-    say(f"loaded {ref} into msb")
+    console.say(f"loaded {ref} into msb")
     print(ref)
 
 
@@ -2536,7 +2475,7 @@ def cmd_doctor(args):
     call: whether containment actually holds is `silkgate verify`'s question."""
     rows = [("TOOL", "STATUS")]
     missing = []
-    for binary, hint in _TOOL_HINTS.items():
+    for binary, hint in console._TOOL_HINTS.items():
         path = shutil.which(binary)
         rows.append((binary, path or f"missing — {hint}"))
         if path is None:
@@ -2544,8 +2483,8 @@ def cmd_doctor(args):
     _print_table(rows)
     sys.stdout.flush()                    # the verdict goes to stderr; table first, even piped
     if missing:
-        die(f"missing {len(missing)} of {len(_TOOL_HINTS)} tools")
-    say("toolchain complete")
+        console.die(f"missing {len(missing)} of {len(console._TOOL_HINTS)} tools")
+    console.say("toolchain complete")
 
 
 def cmd_proxy(args):
@@ -2557,9 +2496,9 @@ def cmd_proxy(args):
     profiles = resolve_profiles(args.with_ or [])
     rules_text = compose_rules(profiles, args.rule or [])
     if not rules_text.strip():
-        die("no rules — pass --with PROFILE and/or --rule 'host/path GET'")
+        console.die("no rules — pass --with PROFILE and/or --rule 'host/path GET'")
     check_secrets(load_ruleset(rules_text))
-    mitmdump = which("mitmdump", "pip install mitmproxy")
+    mitmdump = console.which("mitmdump", "pip install mitmproxy")
     paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
@@ -2593,16 +2532,17 @@ def cmd_run(args):
     _read_brief(args.brief)     # per-exec brief: fail on it here, before any host process
     cmd = _strip_cmd_sep(args.cmd) or profile_command(profiles)
     if not cmd:
-        die("nothing to run — pass a command after -- (or --with a profile that names one)")
+        console.die("nothing to run — pass a command after -- (or --with a profile that names "
+                    "one)")
     name = args.name or uuid4().hex[:6]
     _validate_name(name)
     if session_dir(name).exists():
-        die(f"session {name!r} already exists")
+        console.die(f"session {name!r} already exists")
     # The ask is well-formed; now the whole toolchain shortfall in one report, before any
     # host process. An explicit --image is run as-is, never built, so docker is not its
     # business.
-    preflight(*(() if args.image else _build_tools()), "msb", "mitmdump",
-              *(("git",) if args.branch or args.checkout is not None else ()))
+    console.preflight(*(() if args.image else console._build_tools()), "msb", "mitmdump",
+                      *(("git",) if args.branch or args.checkout is not None else ()))
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
     if args.branch:
         spec = git._branch_spec(args.branch, profiles, args.env, args.checkout or "HEAD")
@@ -2640,13 +2580,13 @@ def cmd_run(args):
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
-            die(fault)                      # the finally below tears the session down
+            console.die(fault)                      # the finally below tears the session down
         if args.branch:
             git._setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
             branch_ready = True
         elif spec:
             git._setup_checkout_guest(sandbox_name(name), spec["base"], name)
-        say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
+        console.say(f"session {name} · proxy :{port} · audit: tail -f {proxy['log']}")
         exec_id = uuid4().hex[:8]
         brief_fields = _exec_brief_fields(name, sandbox_name(name), exec_id, args.brief)
         _journal(name, "exec_start", exec_id=exec_id, argv=list(cmd), tty=tty,
@@ -2695,7 +2635,7 @@ def _session_policy(args):
     rules_text = compose_rules(profiles, args.rule or [])
     ruleset = load_ruleset(rules_text)
     if not ruleset.rules:
-        say("empty allowlist — this guest can reach nothing; every request is denied")
+        console.say("empty allowlist — this guest can reach nothing; every request is denied")
     return profiles, rules_text, ruleset
 
 
@@ -2718,9 +2658,9 @@ def _read_brief(path):
     try:
         data = Path(path).read_bytes()
     except OSError as e:
-        die(f"cannot read --brief {path}: {e.strerror or e}")
+        console.die(f"cannot read --brief {path}: {e.strerror or e}")
     if len(data) > _BRIEF_MAX_BYTES:
-        die(f"--brief {path} is {len(data)} bytes — over the 1 MiB limit")
+        console.die(f"--brief {path} is {len(data)} bytes — over the 1 MiB limit")
     return data
 
 
@@ -2767,10 +2707,10 @@ def _exec_brief_fields(name, sandbox, exec_id, flag_path):
         bdir.mkdir(exist_ok=True)
         (bdir / f"{exec_id}.md").write_bytes(data)
     except OSError as e:
-        die(f"cannot store the exec brief under {bdir}: {e}")
+        console.die(f"cannot store the exec brief under {bdir}: {e}")
     err = _land_brief_in_guest(sandbox, data)
     if err is not None:
-        die(f"could not land the brief in the guest: {err}")
+        console.die(f"could not land the brief in the guest: {err}")
     return {"brief_sha256": hashlib.sha256(data).hexdigest(), "brief_source": source}
 
 
@@ -2835,10 +2775,10 @@ def _read_settings(path):
     try:
         data = json.loads(text)
     except ValueError:
-        say(f"warning: {path} is not valid JSON — the settings projection ignores it")
+        console.say(f"warning: {path} is not valid JSON — the settings projection ignores it")
         return {}
     if not isinstance(data, dict):
-        say(f"warning: {path} is not a JSON object — the settings projection ignores it")
+        console.say(f"warning: {path} is not a JSON object — the settings projection ignores it")
         return {}
     return data
 
@@ -2900,12 +2840,12 @@ def cmd_up(args):
     name = args.name or uuid4().hex[:6]
     _validate_name(name)
     if session_dir(name).exists():
-        die(f"session {name!r} already exists")
+        console.die(f"session {name!r} already exists")
     # The ask is well-formed; now the whole toolchain shortfall in one report, before any
     # host process. An explicit --image is run as-is, never built, so docker is not its
     # business.
-    preflight(*(() if args.image else _build_tools()), "msb", "mitmdump",
-              *(("git",) if args.branch or args.checkout is not None else ()))
+    console.preflight(*(() if args.image else console._build_tools()), "msb", "mitmdump",
+                      *(("git",) if args.branch or args.checkout is not None else ()))
     if args.branch:
         spec = git._branch_spec(args.branch, profiles, args.env, args.checkout or "HEAD")
     elif args.checkout is not None:
@@ -2941,7 +2881,7 @@ def cmd_up(args):
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
-            die(fault)
+            console.die(fault)
         if args.branch:
             git._setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
         elif spec:
@@ -2962,18 +2902,18 @@ def cmd_up(args):
                 shutil.rmtree(ws, ignore_errors=True)   # no commits can exist yet
             _maybe_stop_proxy()
         raise
-    say(f"session {name} up · proxy :{port} · audit: tail -f {proxy['log']}")
+    console.say(f"session {name} up · proxy :{port} · audit: tail -f {proxy['log']}")
     print(name)
 
 
 def cmd_exec(args):
     meta = read_meta(args.name)
     if not meta:
-        die(f"no such session: {args.name!r} (silkgate ls)")
+        console.die(f"no such session: {args.name!r} (silkgate ls)")
     check_env(args.env)
     cmd = _strip_cmd_sep(args.cmd) or meta.get("command")
     if not cmd:
-        die("nothing to run — usage: silkgate exec NAME [-t] [-e K=V]... -- CMD ...")
+        console.die("nothing to run — usage: silkgate exec NAME [-t] [-e K=V]... -- CMD ...")
     tty = args.tty if args.tty is not None else sys.stdin.isatty()
     exec_id = uuid4().hex[:8]
     brief_fields = _exec_brief_fields(args.name, meta["sandbox"], exec_id,
@@ -2990,10 +2930,11 @@ def cmd_exec(args):
 def cmd_attach(args):
     meta = read_meta(args.name)
     if not meta:
-        die(f"no such session: {args.name!r} (silkgate ls)")
+        console.die(f"no such session: {args.name!r} (silkgate ls)")
     cmd = meta.get("command")
     if not cmd:
-        die(f"session {args.name!r} has no default command — use: silkgate exec {args.name} -t -- CMD")
+        console.die(f"session {args.name!r} has no default command — use: silkgate exec "
+                    f"{args.name} -t -- CMD")
     exec_id = uuid4().hex[:8]
     # attach takes no --brief; the session default still covers it, like any exec.
     brief_fields = _exec_brief_fields(args.name, meta["sandbox"], exec_id, None)
@@ -3023,12 +2964,12 @@ def _down_session(meta):
 def cmd_down(args):
     meta = read_meta(args.name)
     if not meta:
-        die(f"no such session: {args.name!r} (silkgate ls)")
+        console.die(f"no such session: {args.name!r} (silkgate ls)")
     # Teardown needs msb to stop/rm the guest; without this, its absence surfaces as
     # "msb rm failed — session kept", which reads as a broken sandbox, not a missing tool.
-    preflight("msb", *(("git",) if meta.get("branch") else ()))
+    console.preflight("msb", *(("git",) if meta.get("branch") else ()))
     keep = _down_session(meta)
-    say(f"session {args.name} down")
+    console.say(f"session {args.name} down")
     if keep:
         sys.exit(1)
 
@@ -3038,10 +2979,10 @@ def cmd_harvest(args):
     the mid-session save point. No teardown, no workspace reaping."""
     meta = read_meta(args.name)
     if not meta:
-        die(f"no such session: {args.name!r} (silkgate ls)")
+        console.die(f"no such session: {args.name!r} (silkgate ls)")
     if not meta.get("branch"):
-        die(f"session {args.name!r} has no --branch — nothing to harvest")
-    preflight("msb", "git")
+        console.die(f"session {args.name!r} has no --branch — nothing to harvest")
+    console.preflight("msb", "git")
     sys.exit(0 if git._harvest_branch(meta) else 1)
 
 
@@ -3144,25 +3085,26 @@ def cmd_secret_set(args):
     name = args.name
     value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{name.upper()}")
     if not value:
-        die(f'missing secret: SILKGATE_EGRESS_SECRET_{name.upper()}="<header>: <value>"')
+        console.die(f'missing secret: SILKGATE_EGRESS_SECRET_{name.upper()}="<header>: <value>"')
     if _parse_secret(value) is None:
-        die(f'SILKGATE_EGRESS_SECRET_{name.upper()} is not a valid "<Header>: <value>" line — '
-            "expected a printable-ASCII header name (not a routing header) and a non-empty value")
+        console.die(f'SILKGATE_EGRESS_SECRET_{name.upper()} is not a valid "<Header>: <value>" '
+                    "line — expected a printable-ASCII header name (not a routing header) and a "
+                    "non-empty value")
     if not read_meta(args.session):
-        die(f"no such session: {args.session!r} (silkgate ls)")
+        console.die(f"no such session: {args.session!r} (silkgate ls)")
     if not _proxy_running():
-        die("shared proxy not running — start a session first (silkgate up)")
+        console.die("shared proxy not running — start a session first (silkgate up)")
     _sock_call({"op": "set_secret", "name": name.lower(), "value": value,
                 "session": args.session})
-    say(f"secret {name.lower()} set for session {args.session}")   # value never printed
+    console.say(f"secret {name.lower()} set for session {args.session}")   # value never printed
 
 
 def cmd_secret_ls(args):
     if not _proxy_running():
-        die("shared proxy not running — start a session first (silkgate up)")
+        console.die("shared proxy not running — start a session first (silkgate up)")
     if args.session:
         if not read_meta(args.session):
-            die(f"no such session: {args.session!r} (silkgate ls)")
+            console.die(f"no such session: {args.session!r} (silkgate ls)")
         for n in sorted(_sock_call({"op": "list_secrets",
                                     "session": args.session}).get("names", [])):
             print(n)

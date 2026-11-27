@@ -49,6 +49,7 @@ pkg = clipkg.load("sg_cli_logs")
 MOD = pkg.core
 LOGS = pkg.logs
 PATHS = pkg.paths
+CONSOLE = pkg.console
 
 RULE = "api.anthropic.com/** GET"
 
@@ -300,7 +301,7 @@ class CreationSitePruneTest(SilkgateTest):
 
     def test_start_proxy_applies_retention(self):
         doomed = self._overfull()
-        with mock.patch.object(MOD, "which", return_value="mitmdump"), \
+        with mock.patch.object(CONSOLE, "which", return_value="mitmdump"), \
              mock.patch.object(MOD.subprocess, "Popen", return_value=self.fake_proc()), \
              mock.patch.object(MOD.socket, "create_connection", mock.MagicMock()):
             proc, log_path = MOD.start_proxy(RULE + "\n", 18090)
@@ -311,7 +312,7 @@ class CreationSitePruneTest(SilkgateTest):
         live = self.log_file("proxy-00-live.log", age_days=90)
         self.proxy_meta(log=live)
         doomed = self._overfull()
-        with mock.patch.object(MOD, "which", return_value="mitmdump"), \
+        with mock.patch.object(CONSOLE, "which", return_value="mitmdump"), \
              mock.patch.object(MOD.subprocess, "Popen", return_value=self.fake_proc()), \
              mock.patch.object(MOD.socket, "create_connection", mock.MagicMock()):
             meta = MOD.start_shared_proxy(18090)
@@ -324,7 +325,7 @@ class CreationSitePruneTest(SilkgateTest):
         proc = self.fake_proc()
         proc.wait.return_value = 0
         proc.poll.return_value = 0
-        with mock.patch.object(MOD, "which", return_value="mitmdump"), \
+        with mock.patch.object(CONSOLE, "which", return_value="mitmdump"), \
              mock.patch.object(MOD.subprocess, "Popen", return_value=proc):
             with self.assertRaises(SystemExit):
                 MOD.cmd_proxy(types.SimpleNamespace(with_=None, rule=[RULE], port=18090))
@@ -339,7 +340,7 @@ class CmdProxyTest(SilkgateTest):
         proc = self.fake_proc()
         proc.wait.return_value = 0
         proc.poll.return_value = 0
-        with mock.patch.object(MOD, "which", return_value="mitmdump"), \
+        with mock.patch.object(CONSOLE, "which", return_value="mitmdump"), \
              mock.patch.object(MOD.subprocess, "Popen", return_value=proc) as popen:
             with self.assertRaises(SystemExit) as ctx:
                 MOD.cmd_proxy(types.SimpleNamespace(with_=None, rule=[RULE], port=port))

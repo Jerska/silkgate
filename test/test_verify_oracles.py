@@ -44,6 +44,7 @@ pkg = clipkg.load("sg_verify_oracles")
 sg = pkg.core
 vf = pkg.verify
 pt = pkg.paths
+con = pkg.console
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet                                          # noqa: E402
@@ -125,7 +126,7 @@ def _bind_or_skip(action, span=1, attempts=5, pick=None):
         port = pick(span)
         said = []
         try:
-            with mock.patch.object(sg, "say", said.append):
+            with mock.patch.object(con, "say", said.append):
                 result = action(port)
         except SystemExit:
             last = "\n".join(str(m) for m in said)
@@ -140,7 +141,7 @@ def _bind_or_skip(action, span=1, attempts=5, pick=None):
 def _die_message(fn, *args, **kwargs):
     """Run `fn` expecting die(); return everything it said."""
     said = []
-    with mock.patch.object(sg, "say", said.append):
+    with mock.patch.object(con, "say", said.append):
         try:
             fn(*args, **kwargs)
         except SystemExit:
@@ -781,7 +782,7 @@ class AuditOracle(unittest.TestCase):
     def test_a_control_probe_under_another_name_is_a_note_not_a_failure(self):
         text = self.healthy().replace("silkgate.invalid", "nowhere.invalid")
         said = []
-        with mock.patch.object(sg, "say", said.append):
+        with mock.patch.object(con, "say", said.append):
             found, _ = self.problems(text)
         self.assertEqual(found, [])
         self.assertIn("silkgate.invalid", " ".join(said))
@@ -951,7 +952,7 @@ class LeakedGuests(unittest.TestCase):
 
     def reap(self):
         said = []
-        with mock.patch.object(sg, "say", said.append):
+        with mock.patch.object(con, "say", said.append):
             vf._reap_leaked_verify_guests()
         return "\n".join(str(m) for m in said), self.log.read_text()
 
@@ -1306,7 +1307,7 @@ class VerifyWiring(unittest.TestCase):
         text = None
         for _ in range(5):
             said = []
-            with mock.patch.object(sg, "say", said.append):
+            with mock.patch.object(con, "say", said.append):
                 try:
                     vf.cmd_verify(_Args(**{"port": self.port, **kwargs}))
                 except SystemExit:

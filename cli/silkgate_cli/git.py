@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import core, paths
+from . import console, core, paths
 
 
 # --- checkout/branch sessions: a clone in the guest, from the host repo ---------
@@ -42,7 +42,7 @@ def _git(git_dir, *argv):
     """One bounded host-git call, or None on timeout. Its own session: harvest runs inside
     _deferred_interrupts after a Ctrl-C already hit the foreground group."""
     try:
-        return subprocess.run([core.which("git"), "--git-dir", str(git_dir), *argv],
+        return subprocess.run([console.which("git"), "--git-dir", str(git_dir), *argv],
                               capture_output=True, text=True, start_new_session=True,
                               timeout=_GIT_TIMEOUT, env=_host_git_env())
     except subprocess.TimeoutExpired:
@@ -65,7 +65,7 @@ def _check_mount_flags(args):
             continue                        # argparse already refused it; _mount_args re-dies
         dst = core._normalize_dst(parsed[1])
         if dst == "/workspace" or dst.startswith("/workspace/"):
-            core.die(f"-v {spec} collides with {owner}, which owns /workspace in the guest")
+            console.die(f"-v {spec} collides with {owner}, which owns /workspace in the guest")
 
 
 def _checkout_repo(flag, ref, profiles, env):
@@ -76,25 +76,26 @@ def _checkout_repo(flag, ref, profiles, env):
     it would point every guest git call away from the checkout.
     """
     if not any(p.name == "git" for p in profiles):
-        core.die(f"{flag} needs git in the guest — add --with git")
+        console.die(f"{flag} needs git in the guest — add --with git")
     for pair in env:
         if pair.partition("=")[0] in ("GIT_DIR", "GIT_WORK_TREE"):
-            core.die(f"-e {pair.partition('=')[0]} conflicts with {flag}, which owns the guest's "
-                     "git environment")
+            console.die(f"-e {pair.partition('=')[0]} conflicts with {flag}, which owns the "
+                        "guest's "
+                        "git environment")
     if ref.startswith("-") or any(c.isspace() or ord(c) < 0x20 for c in ref):
-        core.die(f"invalid ref {ref!r}")
-    probe = subprocess.run([core.which("git"), "rev-parse", "--path-format=absolute",
+        console.die(f"invalid ref {ref!r}")
+    probe = subprocess.run([console.which("git"), "rev-parse", "--path-format=absolute",
                             "--git-common-dir", "--show-toplevel"],
                            capture_output=True, text=True, env=_host_git_env())
     if probe.returncode:
-        core.die(f"{flag} needs the current directory to be inside a git work tree — cd into "
-                 "the repo this session should check out")
+        console.die(f"{flag} needs the current directory to be inside a git work tree — cd into "
+                    "the repo this session should check out")
     git_dir, repo_root = probe.stdout.splitlines()[:2]
-    base = subprocess.run([core.which("git"), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+    base = subprocess.run([console.which("git"), "rev-parse", "--verify", f"{ref}^{{commit}}"],
                           capture_output=True, text=True, env=_host_git_env())
     if base.returncode:
-        core.die(f"cannot resolve {ref!r} to a commit in this repository — {flag} needs a "
-                 "base commit")
+        console.die(f"cannot resolve {ref!r} to a commit in this repository — {flag} needs a "
+                    "base commit")
     return git_dir, repo_root, base.stdout.strip()
 
 
@@ -114,16 +115,17 @@ def _branch_spec(branch, profiles, env, ref="HEAD"):
     the branch is the deliverable.
     """
     if branch.startswith("-") or any(c.isspace() or ord(c) < 0x20 for c in branch):
-        core.die(f"invalid branch name {branch!r}")
+        console.die(f"invalid branch name {branch!r}")
     git_dir, repo_root, base = _checkout_repo("--branch", ref, profiles, env)
-    if subprocess.run([core.which("git"), "check-ref-format", "--branch", branch],
+    if subprocess.run([console.which("git"), "check-ref-format", "--branch", branch],
                       capture_output=True, env=_host_git_env()).returncode:
-        core.die(f"invalid branch name {branch!r} (git check-ref-format refused it)")
-    if not subprocess.run([core.which("git"), "--git-dir", git_dir, "show-ref", "--verify",
+        console.die(f"invalid branch name {branch!r} (git check-ref-format refused it)")
+    if not subprocess.run([console.which("git"), "--git-dir", git_dir, "show-ref", "--verify",
                            "--quiet", f"refs/heads/{branch}"], capture_output=True,
                           env=_host_git_env()).returncode:
-        core.die(f"branch {branch!r} already exists — the branch is this session's deliverable; "
-                 "pick a new name")
+        console.die(f"branch {branch!r} already exists — the branch is this session's "
+                    "deliverable; "
+                    "pick a new name")
     _exclude_silkgate(Path(git_dir))
     return {"branch": branch, "git_dir": git_dir, "base": base,
             "repo_root": repo_root, "workspace_derived": True}
@@ -149,11 +151,12 @@ def _branch_workspace(spec, name):
     ws_dir = Path(spec["repo_root"]) / ".silkgate" / "sandboxes" / name
     silk = Path(paths.SILK_DIR).resolve()
     if silk == ws_dir.resolve() or silk in ws_dir.resolve().parents:
-        core.die(f"refusing to keep branch workspaces under {ws_dir}: that is inside silkgate's "
-                 "own state — a repository rooted at your home directory cannot use --branch")
+        console.die(f"refusing to keep branch workspaces under {ws_dir}: that is inside "
+                    "silkgate's "
+                    "own state — a repository rooted at your home directory cannot use --branch")
     if ws_dir.exists():
-        core.die(f"leftover workspace {ws_dir} already exists — a previous session kept it; "
-                 "review and remove it first")
+        console.die(f"leftover workspace {ws_dir} already exists — a previous session kept it; "
+                    "review and remove it first")
     ws_dir.mkdir(parents=True)
     ws, dst = core._mount_pair(str(ws_dir), "/workspace", "rw")
     mounts = [f"{ws}:{dst}:rw"]
@@ -205,7 +208,7 @@ def _setup_branch_guest(sandbox, branch, base, session):
     rc = core.run_guest(lambda c: core.msb_exec_argv(sandbox, c),
                         ["sh", "-c", _BRANCH_SETUP_SH, "_", branch, base, session], tty=False)
     if rc:
-        core.die("guest git setup failed — session torn down")
+        console.die("guest git setup failed — session torn down")
 
 
 # Runs once per --checkout session, after the Tier 1 probe. /workspace isn't a mount here, so
@@ -231,7 +234,7 @@ def _setup_checkout_guest(sandbox, base, session):
     rc = core.run_guest(lambda c: core.msb_exec_argv(sandbox, c),
                         ["sh", "-c", _CHECKOUT_SETUP_SH, "_", base, session], tty=False)
     if rc:
-        core.die("guest git setup failed — session torn down")
+        console.die("guest git setup failed — session torn down")
 
 
 # The bundle range is always base..branch; only the nothing-new check moves with harvests.
@@ -283,7 +286,7 @@ def _ingest_bundle(meta, bundle, tip):
     kept = f"the bundle stays at {bundle}; the workspace is kept"
 
     def refuse(why):
-        core.say(f"branch {branch!r} not updated: {why} — {kept}")
+        console.say(f"branch {branch!r} not updated: {why} — {kept}")
         return False
 
     if not bundle.is_file():
@@ -317,7 +320,7 @@ def _ingest_bundle(meta, bundle, tip):
     _git(git_dir, "update-ref", "-d", staging, staged)          # best-effort tidy-up
     count = _git(git_dir, "rev-list", "--count", f"{meta['base']}..{staged}")
     n = count.stdout.strip() if count and not count.returncode else "?"
-    core.say(f"branch {branch}: {n} commit(s) since base, tip {staged[:12]}")
+    console.say(f"branch {branch}: {n} commit(s) since base, tip {staged[:12]}")
     mpath = core.session_dir(name) / "meta.json"
     if mpath.is_file():
         core._write_json(mpath, {**meta, "branch_ingested": staged})
@@ -331,21 +334,21 @@ def _harvest_branch(meta):
     tip = detail if token == "SILKGATE_BUNDLED" else None
     if token == "SILKGATE_NO_COMMITS":
         since = "the last harvest" if meta.get("branch_ingested") else "the base commit"
-        core.say(f"no commits since {since} — nothing to ingest")
+        console.say(f"no commits since {since} — nothing to ingest")
         ok, result = True, "no_commits"
     elif token == "SILKGATE_NO_BRANCH":
-        core.say(f"the guest deleted branch {meta['branch']!r} — nothing to ingest")
+        console.say(f"the guest deleted branch {meta['branch']!r} — nothing to ingest")
         ok, result = True, "no_branch"
     elif token == "SILKGATE_BUNDLED":
         ok = _ingest_bundle(meta, Path(meta["workspace"]) / ".silkgate.bundle", tip)
         result = "ingested" if ok else "failed"
     else:
         if meta.get("branch_ingested"):
-            core.say(f"could not reach the guest ({detail}); refs/heads/{meta['branch']} holds "
-                     f"the last harvested state — the workspace is kept")
+            console.say(f"could not reach the guest ({detail}); refs/heads/{meta['branch']} holds "
+                        f"the last harvested state — the workspace is kept")
         else:
-            core.say(f"could not harvest branch {meta['branch']!r}: {detail} — the workspace "
-                     "is kept")
+            console.say(f"could not harvest branch {meta['branch']!r}: {detail} — the workspace "
+                        "is kept")
         ok, result = False, "failed"
     # The verdict is settled before the record is cut, and _journal never raises, so a
     # journal failure cannot change what this harvest reports.
@@ -365,6 +368,6 @@ def _reap_derived_workspace(meta):
     if not ws.exists():
         return
     if ws.resolve() != expected.resolve():
-        core.say(f"not deleting {ws}: it is not this session's derived workspace")
+        console.say(f"not deleting {ws}: it is not this session's derived workspace")
         return
     shutil.rmtree(ws, ignore_errors=True)

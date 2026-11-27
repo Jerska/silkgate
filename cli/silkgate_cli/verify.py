@@ -9,7 +9,7 @@ import threading
 import time
 from uuid import uuid4
 
-from . import core, paths
+from . import console, core, paths
 
 
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
@@ -191,12 +191,12 @@ def _leaky_argv(argv):
     try:
         i = out.index("--net-default-egress")
     except ValueError:
-        core.die("cannot build the negative control: the verify guest's argv carries no "
-                 "--net-default-egress to flip, so nothing here would open egress — the guest "
-                 "would be contained and its passing checks would prove nothing")
+        console.die("cannot build the negative control: the verify guest's argv carries no "
+                    "--net-default-egress to flip, so nothing here would open egress — the guest "
+                    "would be contained and its passing checks would prove nothing")
     if out[i + 1] != "deny":
-        core.die(f"cannot build the negative control: --net-default-egress is {out[i + 1]!r}, "
-                 "not 'deny' — refusing to guess what would open egress")
+        console.die(f"cannot build the negative control: --net-default-egress is {out[i + 1]!r}, "
+                    "not 'deny' — refusing to guess what would open egress")
     out[i + 1] = "allow"
     return out
 
@@ -208,7 +208,7 @@ def _create_verify_guest(sandbox, port, *, mounts=(), leaky=False, why=""):
     argv = _verify_msb_argv(sandbox, port, mounts=mounts)
     if subprocess.run(_leaky_argv(argv) if leaky else argv).returncode:
         core._remove_sandbox(sandbox)              # a failed create can still register the name
-        core.die(f"msb create failed for verify guest {sandbox} (see msb's output above){why}")
+        console.die(f"msb create failed for verify guest {sandbox} (see msb's output above){why}")
 
 
 def _drop_verify_guest(sandbox, guests):
@@ -241,10 +241,10 @@ def _reap_leaked_verify_guests():
         match = _VERIFY_GUEST_RE.fullmatch(name)
         if not match or int(match[1]) == os.getpid() or core.proxy_alive(int(match[1])):
             continue
-        core.say(f"removing {name}: an interrupted verify left it behind (pid {match[1]} is "
-                 "gone), and it still holds a Tier-1 rule and a port allowance")
+        console.say(f"removing {name}: an interrupted verify left it behind (pid {match[1]} is "
+                    "gone), and it still holds a Tier-1 rule and a port allowance")
         if not core._remove_sandbox(name):
-            core.say(f"could not remove {name} — `msb stop {name} && msb rm {name}` by hand")
+            console.say(f"could not remove {name} — `msb stop {name} && msb rm {name}` by hand")
 
 
 def _oracle_port(proxy_port, offset):
@@ -291,8 +291,8 @@ def _oracle_bind(port, socktype, what):
             sock.close()
             for other in socks:
                 other.close()
-            core.die(f"cannot bind the {what} at {addr}:{port} ({e.strerror}) — "
-                     f"{_port_holder(port)}")
+            console.die(f"cannot bind the {what} at {addr}:{port} ({e.strerror}) — "
+                        f"{_port_holder(port)}")
         socks.append(sock)
     return socks
 
@@ -482,8 +482,8 @@ class _HeaderRecorder:
                 server = cls((addr, port), Handler)
             except OSError as e:
                 self.close()
-                core.die(f"cannot bind the Tier-2 recorder at {addr}:{port} ({e.strerror}) — "
-                         f"{_port_holder(port)}")
+                console.die(f"cannot bind the Tier-2 recorder at {addr}:{port} ({e.strerror}) — "
+                            f"{_port_holder(port)}")
             self._servers.append(server)
             threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -752,9 +752,9 @@ def _audit_problems(text, expectations, *, log_path):
         # Not fatal: the guest script owns that probe's URL, and a script that changed it is
         # not a containment finding. Worth a line, because this is the record that ties the
         # guest's `[OKAY] 0` to the proxy verify itself started.
-        core.say(f"note: no audit record names {_VERIFY_CONTROL_HOST} — control 0's probe host "
-                 "is not the one this oracle expects, so only the remaining records tie the "
-                 "guest to this proxy")
+        console.say(f"note: no audit record names {_VERIFY_CONTROL_HOST} — control 0's probe host "
+                    "is not the one this oracle expects, so only the remaining records tie the "
+                    "guest to this proxy")
     if _VERIFY_SENTINEL in text:
         problems.append(("observed",
                          f"the host's sentinel credential appears in {log_path} — the audit "
@@ -780,9 +780,9 @@ def _await_audit(log_path, expectations, timeout=3.0):
         except OSError as e:
             # No skip condition here, deliberately: the log is the host's half of the verdict,
             # and a run that cannot read it has no more evidence than the guest's word.
-            core.die(f"cannot read the audit log {log_path} ({e.strerror}) — the run's own "
-                     "record is what the guest's verdict has to agree with, so nothing here is "
-                     "proven")
+            console.die(f"cannot read the audit log {log_path} ({e.strerror}) — the run's own "
+                        "record is what the guest's verdict has to agree with, so nothing here is "
+                        "proven")
         records = _audit_records(text)
         settled = (records and not _audit_missing(records, expectations)
                    and any(rec["decision"] == "deny" for rec in records))
@@ -927,7 +927,7 @@ def _oracle_die(problems, log_path):
                      "reached.")
         lines += [f"  - {t}" for t in unproven]
     lines.append(f"audit log: {log_path}")
-    core.die("\n".join(lines))
+    console.die("\n".join(lines))
 
 
 def _verify_port(port):
@@ -939,7 +939,7 @@ def _verify_port(port):
 
 
 def cmd_verify(args):
-    core.preflight("msb", "mitmdump")
+    console.preflight("msb", "mitmdump")
     args.port = _verify_port(args.port)
     _reap_leaked_verify_guests()
     rules_text = core.compose_rules(core.resolve_profiles(["probe"], allow_verify_only=True))
@@ -969,7 +969,7 @@ def cmd_verify(args):
     guests, proxy = set(), None
     try:
         proxy, log_path = core.start_proxy(rules_text, args.port)
-        core.say(f"proxy :{args.port} · audit: tail -f {log_path}")
+        console.say(f"proxy :{args.port} · audit: tail -f {log_path}")
         guest = _verify_guest_name("main")
         with core._guarded_terminal():
             _create_verify_guest(guest, args.port, mounts=mounts)
@@ -983,16 +983,17 @@ def cmd_verify(args):
 
         result, checks = found.get("result"), found.get("checks")
         if result is None:
-            core.die("no RESULT line — the guest never ran verify_guest.sh "
-                     "(msb server started?)")
+            console.die("no RESULT line — the guest never ran verify_guest.sh "
+                        "(msb server started?)")
         if checks is None:
-            core.die("no CHECKS line — the guest did not report which checks ran, so nothing is "
-                     "proven")
+            console.die("no CHECKS line — the guest did not report which checks ran, so nothing "
+                        "is "
+                        "proven")
         passed, failed = result
         ran, skipped, unavailable = checks
         bad = _verify_shortfall(passed, failed, ran, skipped, unavailable, full=args.full)
         if bad:
-            core.die(bad)
+            console.die(bad)
 
         # The guest's own verdict holds. Now the host's record of the same run, which is the
         # half no guest can write.
@@ -1012,8 +1013,9 @@ def cmd_verify(args):
 
         if args.negative_control:
             leaky = _verify_guest_name("leaky")
-            core.say("negative control: booting a second guest with --net-default-egress allow, "
-                     "the setting that actually opens egress")
+            console.say("negative control: booting a second guest with --net-default-egress "
+                        "allow, "
+                        "the setting that actually opens egress")
             leaky_lines = []
             with core._guarded_terminal():
                 _create_verify_guest(leaky, args.port, mounts=mounts, leaky=True,
@@ -1026,23 +1028,25 @@ def cmd_verify(args):
             problem, summary = _negative_control_problem(_check_outcomes(lines),
                                                          _check_outcomes(leaky_lines))
             if problem:
-                core.die(problem)
+                console.die(problem)
             summaries.append(summary)
 
         left = sorted(guests)
         if left:
-            core.die(f"verify guest(s) {', '.join(left)} could not be removed — each still "
-                     f"holds a Tier-1 rule and a port allowance, and the next verify collides "
-                     f"with proxy port {args.port}. `msb stop NAME && msb rm NAME`, then re-run")
+            console.die(f"verify guest(s) {', '.join(left)} could not be removed — each still "
+                        "holds a Tier-1 rule and a port allowance, and the next verify collides "
+                        f"with proxy port {args.port}. `msb stop NAME && msb rm NAME`, then "
+                        "re-run")
         for summary in summaries:
-            core.say(summary)
+            console.say(summary)
         # _verify_shortfall already refused any unavailable id without a declared subject,
         # so the lookup below cannot miss; the guest's [UNAV] lines above carry the detail.
         absent = ", ".join(sorted({_VERIFY_SUBJECTS[i] for i in unavailable}))
-        core.say(f"containment holds ({passed} passed, 0 failed; checks {_ids(ran)} ran; "
-                 + (f"checks {_ids(unavailable)} had no subject — this guest has no {absent}, "
-                    "see their [UNAV] lines; " if unavailable else "")
-                 + ("host-side oracles agree" if oracles else "host-side oracles skipped") + ")")
+        console.say(f"containment holds ({passed} passed, 0 failed; checks {_ids(ran)} ran; "
+                    + (f"checks {_ids(unavailable)} had no subject — this guest has no {absent}, "
+                       "see their [UNAV] lines; " if unavailable else "")
+                    + ("host-side oracles agree" if oracles else "host-side oracles skipped")
+                    + ")")
     finally:
         if proxy is not None:
             core.stop(proxy)
@@ -1050,5 +1054,5 @@ def cmd_verify(args):
             oracles.close()
         for name in sorted(guests):
             if not core._remove_sandbox(name):
-                core.say(f"could not remove verify guest {name} — `msb stop {name} && msb rm "
-                         f"{name}` by hand; it holds a Tier-1 rule and a port allowance")
+                console.say(f"could not remove verify guest {name} — `msb stop {name} && msb rm "
+                            f"{name}` by hand; it holds a Tier-1 rule and a port allowance")

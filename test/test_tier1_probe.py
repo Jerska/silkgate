@@ -15,7 +15,9 @@ import clipkg
 
 REPO = Path(__file__).resolve().parent.parent
 
-sg = clipkg.load("sg_tier1_probe").core
+pkg = clipkg.load("sg_tier1_probe")
+sg = pkg.core
+con = pkg.console
 
 TARGET_HOST = sg.TIER1_PROBE_TARGET.partition(":")[0]
 
@@ -122,13 +124,13 @@ class Fault(unittest.TestCase):
 
     def setUp(self):
         self.runs, self.run_kwargs, self.notes = [], [], []
-        self._orig = (subprocess.run, sg._msb, sg.say)
+        self._orig = (subprocess.run, sg._msb, con.say)
         sg._msb = lambda: "msb"
-        sg.say = self.notes.append
+        con.say = self.notes.append
         self.addCleanup(self._restore)
 
     def _restore(self):
-        subprocess.run, sg._msb, sg.say = self._orig
+        subprocess.run, sg._msb, con.say = self._orig
 
     def fault(self, outcomes):
         """Run tier1_fault with subprocess.run scripted: each entry is either an

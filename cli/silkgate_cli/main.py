@@ -16,7 +16,7 @@ import re
 import signal
 import sys
 
-from . import core, logs, ui_server, verify
+from . import console, core, logs, ui_server, verify
 
 
 # The two argument types that reach a generated Dockerfile or an msb argv are checked by
@@ -81,7 +81,7 @@ class _MarkedParser(argparse.ArgumentParser):
         # argparse passes a message here only on the error path; help and version print
         # to stdout elsewhere and call this bare.
         if message:
-            mark = core._ERR_TAG.decode()
+            mark = console._ERR_TAG.decode()
             sys.stderr.write("".join(mark + ln for ln in message.splitlines(keepends=True)))
             sys.stderr.flush()
         sys.exit(status)

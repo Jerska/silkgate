@@ -31,6 +31,7 @@ _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-settings-tests-"))
 pkg = clipkg.load("sg_cli_settings", home=_SCRATCH)
 sg = pkg.core
 pt = pkg.paths
+con = pkg.console
 
 
 def tearDownModule():
@@ -231,7 +232,7 @@ class TestRunUpWiring(SettingsCase):
             seen.update(settings=settings, settings_paths=settings_paths)
             raise SystemExit(42)
 
-        with mock.patch.object(sg, "preflight", lambda *binaries: None), \
+        with mock.patch.object(con, "preflight", lambda *binaries: None), \
                 mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
                 mock.patch.object(sg, "_proxy_running", lambda: True), \
                 mock.patch.object(sg, "ensure_proxy",
