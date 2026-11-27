@@ -62,6 +62,7 @@ MOD = pkg.core
 UI = pkg.ui_server
 GIT = pkg.git
 PATHS = pkg.paths
+MITM = pkg.mitm
 
 
 def event(**kw):
@@ -152,7 +153,7 @@ class UiTest(unittest.TestCase):
 
     def proxy_meta(self, events=None, **extra):
         meta = {"pid": os.getpid(), "base_port": 8090,
-                "ports": list(range(8090, 8090 + MOD.POOL_SIZE)),
+                "ports": list(range(8090, 8090 + MITM.POOL_SIZE)),
                 "log": str(PATHS.LOG_DIR / "proxy-live.log"),
                 "sock": str(PATHS.PROXY_SOCK), "started": "2026-08-04T11:00:00+00:00"}
         if events is not None:

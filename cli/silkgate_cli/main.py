@@ -16,7 +16,7 @@ import re
 import signal
 import sys
 
-from . import console, core, logs, profile, ui_server, verify
+from . import console, core, logs, mitm, profile, ui_server, verify
 
 
 # The two argument types that reach a generated Dockerfile or an msb argv are checked by
@@ -138,7 +138,7 @@ def main():
                        help="guest memory, e.g. 512M or 2G (default: %(default)s)")
         p.add_argument("--cpus", metavar="COUNT", type=_cpus_arg, default=default_cpus,
                        help="guest CPUs (default: %(default)s, half the host's)")
-        p.add_argument("--port", type=int, default=core.DEFAULT_BASE_PORT,
+        p.add_argument("--port", type=int, default=mitm.DEFAULT_BASE_PORT,
                        help="where the proxy's 16-port pool starts, if this command starts "
                             "the proxy (default: %(default)s)")
         p.add_argument("-v", "--mount", action="append", default=[], metavar="SRC:DST[:ro|rw]",

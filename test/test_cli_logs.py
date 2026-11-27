@@ -50,6 +50,7 @@ MOD = pkg.core
 LOGS = pkg.logs
 PATHS = pkg.paths
 CONSOLE = pkg.console
+MITM = pkg.mitm
 
 RULE = "api.anthropic.com/** GET"
 
@@ -158,7 +159,7 @@ class SilkgateTest(unittest.TestCase):
 
     def proxy_meta(self, pid=None, log=None, events=None, base=8090):
         meta = {"pid": pid or os.getpid(), "base_port": base,
-                "ports": list(range(base, base + MOD.POOL_SIZE)),
+                "ports": list(range(base, base + MITM.POOL_SIZE)),
                 "log": str(log or (PATHS.LOG_DIR / "proxy-live.log")),
                 "sock": str(PATHS.PROXY_SOCK)}
         if events is not None:
@@ -197,15 +198,15 @@ class SilkgateTest(unittest.TestCase):
 class PruneLogsTest(SilkgateTest):
 
     def test_removal_needs_both_beyond_count_and_beyond_age(self):
-        n = MOD.LOG_RETAIN_COUNT + 5
+        n = MITM.LOG_RETAIN_COUNT + 5
         for i in range(n):                       # i=0 newest; all older than the age
-            self.log_file(f"proxy-{i:02d}.log", age_days=MOD.LOG_RETAIN_DAYS + 10 + i)
+            self.log_file(f"proxy-{i:02d}.log", age_days=MITM.LOG_RETAIN_DAYS + 10 + i)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            MOD._prune_logs()
+            MITM._prune_logs()
         kept = self.log_names()
-        self.assertEqual(len(kept), MOD.LOG_RETAIN_COUNT)
-        for i in range(MOD.LOG_RETAIN_COUNT):
+        self.assertEqual(len(kept), MITM.LOG_RETAIN_COUNT)
+        for i in range(MITM.LOG_RETAIN_COUNT):
             self.assertIn(f"proxy-{i:02d}.log", kept)
         self.assertIn("pruned 5", err.getvalue(), "removals must be announced, not silent")
         self.assertIn("SILKGATE_LOG_RETAIN_DAYS=0", err.getvalue(),
@@ -215,44 +216,44 @@ class PruneLogsTest(SilkgateTest):
         """Ancient but within the newest-N: the last runs stay reviewable after a gap."""
         for i in range(5):
             self.log_file(f"proxy-{i}.log", age_days=400 + i)
-        MOD._prune_logs()
+        MITM._prune_logs()
         self.assertEqual(len(self.log_names()), 5)
 
     def test_count_alone_never_prunes(self):
         """A burst of recent starts is history the age guard protects."""
-        for i in range(MOD.LOG_RETAIN_COUNT + 10):
+        for i in range(MITM.LOG_RETAIN_COUNT + 10):
             self.log_file(f"proxy-{i:02d}.log")
-        MOD._prune_logs()
-        self.assertEqual(len(self.log_names()), MOD.LOG_RETAIN_COUNT + 10)
+        MITM._prune_logs()
+        self.assertEqual(len(self.log_names()), MITM.LOG_RETAIN_COUNT + 10)
 
     def test_live_log_survives_a_full_prune(self):
         """The oldest file of all is the one the live proxy is writing (proxy.json names
         it): everything beyond count+age goes except that one."""
         live = self.log_file("proxy-00-live.log", age_days=90)
         self.proxy_meta(log=live)
-        for i in range(1, MOD.LOG_RETAIN_COUNT + 6):
+        for i in range(1, MITM.LOG_RETAIN_COUNT + 6):
             self.log_file(f"proxy-{i:02d}.log", age_days=40 + i)
-        MOD._prune_logs()
+        MITM._prune_logs()
         self.assertTrue(live.exists(), "pruned the log a live proxy is writing")
-        self.assertEqual(len(self.log_names()), MOD.LOG_RETAIN_COUNT + 1,
+        self.assertEqual(len(self.log_names()), MITM.LOG_RETAIN_COUNT + 1,
                          "the live log must not displace or spare other candidates")
 
     def test_retention_zero_keeps_everything(self):
-        for i in range(MOD.LOG_RETAIN_COUNT + 10):
+        for i in range(MITM.LOG_RETAIN_COUNT + 10):
             self.log_file(f"proxy-{i:02d}.log", age_days=400 + i)
         os.environ["SILKGATE_LOG_RETAIN_DAYS"] = "0"
-        MOD._prune_logs()
-        self.assertEqual(len(self.log_names()), MOD.LOG_RETAIN_COUNT + 10)
+        MITM._prune_logs()
+        self.assertEqual(len(self.log_names()), MITM.LOG_RETAIN_COUNT + 10)
 
     def test_every_kind_pruned_and_foreign_files_untouched(self):
-        n = MOD.LOG_RETAIN_COUNT + 2
+        n = MITM.LOG_RETAIN_COUNT + 2
         for i in range(n):
-            age = MOD.LOG_RETAIN_DAYS + 10 + i
+            age = MITM.LOG_RETAIN_DAYS + 10 + i
             self.log_file(f"proxy-{i:02d}.log", age_days=age)
             self.log_file(f"proxy-{i:02d}.rules", age_days=age)
             self.log_file(f"standalone-{i:02d}.rules", age_days=age)
         self.log_file("NOTES.log", age_days=999)         # a user's file, not our pattern
-        MOD._prune_logs()
+        MITM._prune_logs()
         names = self.log_names()
         self.assertIn("NOTES.log", names)
         for kind in ("proxy-{:02d}.log", "proxy-{:02d}.rules", "standalone-{:02d}.rules"):
@@ -261,12 +262,12 @@ class PruneLogsTest(SilkgateTest):
 
     def test_events_jsonl_pruned_as_own_kind(self):
         """events-*.jsonl has its own newest-20 bucket, independent of proxy-*.log."""
-        n = MOD.LOG_RETAIN_COUNT + 2
+        n = MITM.LOG_RETAIN_COUNT + 2
         for i in range(n):
-            age = MOD.LOG_RETAIN_DAYS + 10 + i
+            age = MITM.LOG_RETAIN_DAYS + 10 + i
             self.log_file(f"events-{i:02d}.jsonl", age_days=age)
             self.log_file(f"proxy-{i:02d}.log", age_days=age)
-        MOD._prune_logs()
+        MITM._prune_logs()
         names = self.log_names()
         # The newest LOG_RETAIN_COUNT of each kind survive.
         self.assertIn("events-00.jsonl", names)
@@ -279,11 +280,11 @@ class PruneLogsTest(SilkgateTest):
         live_log = self.log_file("proxy-00-live.log", age_days=90)
         live_events = self.log_file("events-00-live.jsonl", age_days=90)
         self.proxy_meta(log=live_log, events=live_events)
-        for i in range(1, MOD.LOG_RETAIN_COUNT + 6):
+        for i in range(1, MITM.LOG_RETAIN_COUNT + 6):
             age = 40 + i
             self.log_file(f"proxy-{i:02d}.log", age_days=age)
             self.log_file(f"events-{i:02d}.jsonl", age_days=age)
-        MOD._prune_logs()
+        MITM._prune_logs()
         self.assertTrue(live_events.exists(), "pruned the events file a live proxy is writing")
         self.assertTrue(live_log.exists(), "pruned the log a live proxy is writing")
 
@@ -294,17 +295,17 @@ class CreationSitePruneTest(SilkgateTest):
 
     def _overfull(self):
         """More beyond-count-and-age logs than retention keeps; returns the doomed one."""
-        n = MOD.LOG_RETAIN_COUNT + 3
+        n = MITM.LOG_RETAIN_COUNT + 3
         for i in range(n):
-            self.log_file(f"proxy-{i:02d}.log", age_days=MOD.LOG_RETAIN_DAYS + 10 + i)
+            self.log_file(f"proxy-{i:02d}.log", age_days=MITM.LOG_RETAIN_DAYS + 10 + i)
         return PATHS.LOG_DIR / f"proxy-{n - 1:02d}.log"
 
     def test_start_proxy_applies_retention(self):
         doomed = self._overfull()
         with mock.patch.object(CONSOLE, "which", return_value="mitmdump"), \
              mock.patch.object(MOD.subprocess, "Popen", return_value=self.fake_proc()), \
-             mock.patch.object(MOD.socket, "create_connection", mock.MagicMock()):
-            proc, log_path = MOD.start_proxy(RULE + "\n", 18090)
+             mock.patch.object(MITM.socket, "create_connection", mock.MagicMock()):
+            proc, log_path = MITM.start_proxy(RULE + "\n", 18090)
         self.assertFalse(doomed.exists(), "start_proxy did not prune old logs")
         self.assertTrue(log_path.exists() and log_path.name.startswith("proxy-"))
 
@@ -314,8 +315,8 @@ class CreationSitePruneTest(SilkgateTest):
         doomed = self._overfull()
         with mock.patch.object(CONSOLE, "which", return_value="mitmdump"), \
              mock.patch.object(MOD.subprocess, "Popen", return_value=self.fake_proc()), \
-             mock.patch.object(MOD.socket, "create_connection", mock.MagicMock()):
-            meta = MOD.start_shared_proxy(18090)
+             mock.patch.object(MITM.socket, "create_connection", mock.MagicMock()):
+            meta = MITM.start_shared_proxy(18090)
         self.assertFalse(doomed.exists(), "start_shared_proxy did not prune old logs")
         self.assertTrue(live.exists(), "pruned the previous proxy's still-live log")
         self.assertTrue(Path(meta["log"]).exists())
@@ -364,7 +365,7 @@ class CmdProxyTest(SilkgateTest):
     def test_bind_override_reaches_the_argv(self):
         """A guest on another machine opts in through SILKGATE_PROXY_BIND (read into
         PROXY_BINDS at import), naming the one interface it can route to."""
-        with mock.patch.object(MOD, "PROXY_BINDS", ("10.0.0.2",)):
+        with mock.patch.object(MITM, "PROXY_BINDS", ("10.0.0.2",)):
             argv, _ = self.run_cmd_proxy(port=19000)
         modes = [m for f, m in zip(argv, argv[1:]) if f == "--mode"]
         self.assertEqual(modes, ["regular@10.0.0.2:19000"])
@@ -406,7 +407,7 @@ class EnsureCaTest(SilkgateTest):
     def test_first_run_generates_one_shot_with_no_server(self):
         """CA generation on first run starts no listening mitmdump: a rule-less server on
         a wildcard port would be open while it runs. The fake refuses to run as a server."""
-        cert = MOD.ensure_ca()
+        cert = MITM.ensure_ca()
         self.assertEqual(cert, PATHS.CA_DIR / "egress-ca.pem")
         self.assertEqual(cert.read_text(), "CERT\n")
         argv = json.loads(self.argv_rec.read_text())
@@ -420,7 +421,7 @@ class EnsureCaTest(SilkgateTest):
     def test_existing_ca_starts_nothing(self):
         PATHS.MITM_CA.parent.mkdir(parents=True)
         PATHS.MITM_CA.write_text("EXISTING\n")
-        cert = MOD.ensure_ca()
+        cert = MITM.ensure_ca()
         self.assertEqual(cert.read_text(), "EXISTING\n")
         self.assertFalse(self.argv_rec.exists(), "mitmdump ran though the CA exists")
 

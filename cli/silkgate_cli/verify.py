@@ -9,7 +9,7 @@ import threading
 import time
 from uuid import uuid4
 
-from . import console, core, foreground, paths, profile
+from . import console, core, foreground, mitm, paths, profile
 
 
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
@@ -172,8 +172,8 @@ def _verify_msb_argv(sandbox, port, *, mounts=()):
     argv = [core._msb(), "create", _VERIFY_IMAGE, "--name", sandbox]
     for m in mounts:
         argv += ["-v", m]
-    url = f"http://{core.PROXY_ALIAS}:{port}"
-    for var in core.PROXY_ENV_VARS:
+    url = f"http://{mitm.PROXY_ALIAS}:{port}"
+    for var in mitm.PROXY_ENV_VARS:
         argv += ["-e", f"{var}={url}"]
     argv += ["--net-default-egress", "deny", "--net-rule", f"allow@host:tcp:{port}"]
     return argv
@@ -239,7 +239,7 @@ def _reap_leaked_verify_guests():
     for line in listed.stdout.splitlines()[1:]:
         name = (line.split() or [""])[0]
         match = _VERIFY_GUEST_RE.fullmatch(name)
-        if not match or int(match[1]) == os.getpid() or core.proxy_alive(int(match[1])):
+        if not match or int(match[1]) == os.getpid() or mitm.proxy_alive(int(match[1])):
             continue
         console.say(f"removing {name}: an interrupted verify left it behind (pid {match[1]} is "
                     "gone), and it still holds a Tier-1 rule and a port allowance")
@@ -280,7 +280,7 @@ def _oracle_bind(port, socktype, what):
     look exactly like containment.
     """
     socks = []
-    for addr in core.PROXY_BINDS or ("127.0.0.1",):
+    for addr in mitm.PROXY_BINDS or ("127.0.0.1",):
         sock = socket.socket(socket.AF_INET6 if ":" in addr else socket.AF_INET, socktype)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -476,7 +476,7 @@ class _HeaderRecorder:
             address_family = socket.AF_INET6
 
         self._servers = []
-        for addr in core.PROXY_BINDS or ("127.0.0.1",):
+        for addr in mitm.PROXY_BINDS or ("127.0.0.1",):
             cls = V6Server if ":" in addr else V4Server
             try:
                 server = cls((addr, port), Handler)
@@ -577,7 +577,7 @@ def _oracle_guest_script(*, proxy_port, observer_port, recorder_port, token):
     stripped, a dummy where the sentinel must replace it, no credential where none may be
     added, and a forbidden method.
     """
-    alias, req = core.PROXY_ALIAS, f"http://{_RECORDER_HOST}:{recorder_port}{_RECORDER_PATH}"
+    alias, req = mitm.PROXY_ALIAS, f"http://{_RECORDER_HOST}:{recorder_port}{_RECORDER_PATH}"
     host_hdr = f"Host: {_RECORDER_HOST}:{recorder_port}"
 
     def request(method, leaf, *headers):
@@ -935,7 +935,7 @@ def _verify_port(port):
     else the base of the first free POOL_SIZE range. Verify needs three ports, the proxy's
     and the two oracles' after it, and the pool scan proves them free. It also skips past a
     shared proxy's pool, so verify never contends with live sessions."""
-    return port if port is not None else core._find_free_pool(core.DEFAULT_BASE_PORT)[0]
+    return port if port is not None else mitm._find_free_pool(mitm.DEFAULT_BASE_PORT)[0]
 
 
 def cmd_verify(args):
@@ -950,7 +950,7 @@ def cmd_verify(args):
     script = "bash /mnt/poc/test/verify_guest.sh"
     mounts = [f"{paths.REPO}:/mnt/poc:ro"]
     if args.full:
-        mounts.append(f"{core.ensure_ca().parent}:/mnt/ca:ro")
+        mounts.append(f"{mitm.ensure_ca().parent}:/mnt/ca:ro")
         script = FULL_SETUP + script
 
     # The same relay as every guest command: msb streams live only with a terminal, and a
@@ -968,7 +968,7 @@ def cmd_verify(args):
 
     guests, proxy = set(), None
     try:
-        proxy, log_path = core.start_proxy(rules_text, args.port)
+        proxy, log_path = mitm.start_proxy(rules_text, args.port)
         console.say(f"proxy :{args.port} · audit: tail -f {log_path}")
         guest = _verify_guest_name("main")
         with foreground._guarded_terminal():

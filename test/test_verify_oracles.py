@@ -46,6 +46,7 @@ vf = pkg.verify
 pt = pkg.paths
 con = pkg.console
 prof = pkg.profile
+mt = pkg.mitm
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet                                          # noqa: E402
@@ -108,10 +109,10 @@ _CANNOT_BIND = "cannot bind the"
 
 def _collided(text):
     # The third surface has a named constant already: a proxy that loses its bind after
-    # start_proxy's probe dies with the log's tail in the refusal, and sg._BIND_FAILURE
+    # start_proxy's probe dies with the log's tail in the refusal, and mt._BIND_FAILURE
     # is the fragment _wait_proxy_ready itself reads that tail for.
     return (_IN_USE in text or _CANNOT_BIND in text
-            or sg._BIND_FAILURE.decode() in text.lower())
+            or mt._BIND_FAILURE.decode() in text.lower())
 
 
 def _bind_or_skip(action, span=1, attempts=5, pick=None):
@@ -563,7 +564,7 @@ class GuestProbeScript(unittest.TestCase):
     def run_script(self):
         # PROXY_ALIAS is the only thing standing between this script and loopback: the guest
         # reaches the host by that name, and here the host is 127.0.0.1.
-        with mock.patch.object(sg, "PROXY_ALIAS", "127.0.0.1"):
+        with mock.patch.object(mt, "PROXY_ALIAS", "127.0.0.1"):
             script = vf._oracle_guest_script(proxy_port=self.proxy.port,
                                              observer_port=self.observer.port,
                                              recorder_port=self.recorder_port,
@@ -856,8 +857,8 @@ class GuestArgv(unittest.TestCase):
 
     def test_the_proxy_is_named_to_the_guest_the_way_every_session_names_it(self):
         pairs = self.pairs(self.argv())
-        for var in sg.PROXY_ENV_VARS:
-            self.assertIn(("-e", f"{var}=http://{sg.PROXY_ALIAS}:8090"), pairs)
+        for var in mt.PROXY_ENV_VARS:
+            self.assertIn(("-e", f"{var}=http://{mt.PROXY_ALIAS}:8090"), pairs)
 
     def test_mounts_are_passed_through(self):
         pairs = self.pairs(self.argv(mounts=[f"{REPO}:/mnt/poc:ro"]))
@@ -1081,10 +1082,10 @@ class VerifyPortSelection(unittest.TestCase):
         # landing inside the scanned window shifts the landing further — not this test's
         # claim, and a neighbor breaks at most one arrangement: re-arrange and retry.
         for _ in range(5):
-            base, _ = _bind_or_skip(lambda port: _squat(self, port), span=sg.POOL_SIZE + 1)
-            with mock.patch.object(sg, "DEFAULT_BASE_PORT", base):
+            base, _ = _bind_or_skip(lambda port: _squat(self, port), span=mt.POOL_SIZE + 1)
+            with mock.patch.object(mt, "DEFAULT_BASE_PORT", base):
                 chosen = vf._verify_port(None)
-            if chosen == base + 1 and all(sg._port_free(p) for p in self.needed(chosen)):
+            if chosen == base + 1 and all(mt._port_free(p) for p in self.needed(chosen)):
                 return
         self.fail(f"the scan landed at {chosen}, not one past the blocker at {base}, "
                   "on 5 arrangements")
@@ -1293,7 +1294,7 @@ class VerifyWiring(unittest.TestCase):
                       mock.patch.object(pt, "SILK_DIR", self.tmp / "silk"),
                       mock.patch.object(pt, "PROXY_JSON", self.tmp / "silk" / "proxy.json"),
                       # The guest reaches the host by the alias; here the host is loopback.
-                      mock.patch.object(sg, "PROXY_ALIAS", "127.0.0.1")):
+                      mock.patch.object(mt, "PROXY_ALIAS", "127.0.0.1")):
             patch.start()
             self.addCleanup(patch.stop)
 
@@ -1442,9 +1443,9 @@ class VerifyWiring(unittest.TestCase):
         # neighbor landing inside the scanned window shifts the landing further — not
         # this test's claim, and a neighbor breaks at most one arrangement: re-arrange.
         for _ in range(5):
-            floor, _ = _bind_or_skip(lambda port: _squat(self, port), span=sg.POOL_SIZE + 1)
-            self.aim_probes_at(self.dead_port(*range(floor, floor + sg.POOL_SIZE + 1)))
-            with mock.patch.object(sg, "DEFAULT_BASE_PORT", floor):
+            floor, _ = _bind_or_skip(lambda port: _squat(self, port), span=mt.POOL_SIZE + 1)
+            self.aim_probes_at(self.dead_port(*range(floor, floor + mt.POOL_SIZE + 1)))
+            with mock.patch.object(mt, "DEFAULT_BASE_PORT", floor):
                 said, refused = self.verify(port=None)
             self.assertFalse(refused, said)
             if f"proxy :{floor + 1} ·" in said:

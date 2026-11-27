@@ -37,6 +37,7 @@ gt = pkg.git
 pt = pkg.paths
 con = pkg.console
 prof = pkg.profile
+mt = pkg.mitm
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -542,13 +543,13 @@ class TestMetaAdditions(JournalCase):
 
         with mock.patch.object(con, "preflight", lambda *a: None), \
                 mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
-                mock.patch.object(sg, "_proxy_running", lambda: True), \
-                mock.patch.object(sg, "ensure_proxy",
+                mock.patch.object(mt, "_proxy_running", lambda: True), \
+                mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
-                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
                 mock.patch.object(sg, "_provision_session", spy), \
-                mock.patch.object(sg, "_release_port", lambda *a, **k: None), \
-                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
+                mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:
@@ -746,10 +747,10 @@ class TestExecBrief(JournalCase):
 
         with mock.patch.object(con, "preflight", lambda *a: None), \
                 mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
-                mock.patch.object(sg, "_proxy_running", lambda: True), \
-                mock.patch.object(sg, "ensure_proxy",
+                mock.patch.object(mt, "_proxy_running", lambda: True), \
+                mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
-                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
                 mock.patch.object(sg, "_provision_session", fake_provision), \
                 mock.patch.object(sg, "tier1_fault", lambda *a, **k: None), \
                 mock.patch.object(sg, "_land_brief_in_guest",
@@ -757,8 +758,8 @@ class TestExecBrief(JournalCase):
                 mock.patch.object(sg, "run_guest", lambda *a, **k: 0), \
                 mock.patch.object(sg, "_teardown_session",
                                   lambda meta, archive=True: None), \
-                mock.patch.object(sg, "_release_port", lambda *a, **k: None), \
-                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
+                mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(sys, "argv",
                                   ["silkgate", "run", "--brief", str(f),
                                    "--no-tty", "--", "true"]), \
@@ -1055,18 +1056,18 @@ class TestCaptureWiring(JournalCase):
 
         with mock.patch.object(con, "which", return_value="mitmdump"), \
                 mock.patch.object(sg.subprocess, "Popen", fake_popen), \
-                mock.patch.object(sg.socket, "create_connection", mock.MagicMock()):
+                mock.patch.object(mt.socket, "create_connection", mock.MagicMock()):
             result = fn(*args)
         return result, seen["env"]
 
     def test_start_proxy_names_a_capture_file(self):
-        (_, log_path), env = self.spawn(sg.start_proxy, RULE, 18090)
+        (_, log_path), env = self.spawn(mt.start_proxy, RULE, 18090)
         capture = env["SILKGATE_EGRESS_CAPTURE_FILE"]
         self.assertEqual(Path(capture).parent, pt.LOG_DIR)
         self.assertRegex(Path(capture).name, r"^capture-.*\.jsonl$")
 
     def test_start_shared_proxy_records_capture_in_its_meta(self):
-        meta, env = self.spawn(sg.start_shared_proxy, 18090)
+        meta, env = self.spawn(mt.start_shared_proxy, 18090)
         self.assertEqual(meta["capture"], env["SILKGATE_EGRESS_CAPTURE_FILE"])
         self.assertRegex(Path(meta["capture"]).name, r"^capture-.*\.jsonl$")
 
@@ -1095,13 +1096,13 @@ class TestCaptureWiring(JournalCase):
         return p
 
     def test_capture_prunes_on_its_own_week_knob(self):
-        n = sg.LOG_RETAIN_COUNT + 2
+        n = mt.LOG_RETAIN_COUNT + 2
         for i in range(n):
             age = 8 + i * 0.5                            # every file > 7d and < 30d old
             self.log_file(f"capture-{i:02d}.jsonl", age_days=age)
             self.log_file(f"events-{i:02d}.jsonl", age_days=age)
         with contextlib.redirect_stderr(io.StringIO()):
-            sg._prune_logs()
+            mt._prune_logs()
         names = sorted(p.name for p in pt.LOG_DIR.iterdir())
         self.assertIn("capture-00.jsonl", names)
         self.assertNotIn(f"capture-{n - 1:02d}.jsonl", names,
@@ -1110,14 +1111,14 @@ class TestCaptureWiring(JournalCase):
                       "events keep the 30-day knob")
 
     def test_capture_knob_zero_keeps_captures_only(self):
-        n = sg.LOG_RETAIN_COUNT + 2
+        n = mt.LOG_RETAIN_COUNT + 2
         for i in range(n):
-            self.log_file(f"capture-{i:02d}.jsonl", age_days=sg.LOG_RETAIN_DAYS + 10 + i)
-            self.log_file(f"proxy-{i:02d}.log", age_days=sg.LOG_RETAIN_DAYS + 10 + i)
+            self.log_file(f"capture-{i:02d}.jsonl", age_days=mt.LOG_RETAIN_DAYS + 10 + i)
+            self.log_file(f"proxy-{i:02d}.log", age_days=mt.LOG_RETAIN_DAYS + 10 + i)
         os.environ["SILKGATE_CAPTURE_RETAIN_DAYS"] = "0"
         self.addCleanup(os.environ.pop, "SILKGATE_CAPTURE_RETAIN_DAYS", None)
         with contextlib.redirect_stderr(io.StringIO()):
-            sg._prune_logs()
+            mt._prune_logs()
         names = sorted(p.name for p in pt.LOG_DIR.iterdir())
         self.assertIn(f"capture-{n - 1:02d}.jsonl", names,
                       "the capture knob at 0 keeps every capture file")
@@ -1128,10 +1129,10 @@ class TestCaptureWiring(JournalCase):
         live = self.log_file("capture-00-live.jsonl", age_days=90)
         sg._write_json(pt.PROXY_JSON, {"pid": os.getpid(), "capture": str(live)})
         self.addCleanup(pt.PROXY_JSON.unlink)
-        for i in range(1, sg.LOG_RETAIN_COUNT + 6):
+        for i in range(1, mt.LOG_RETAIN_COUNT + 6):
             self.log_file(f"capture-{i:02d}.jsonl", age_days=40 + i)
         with contextlib.redirect_stderr(io.StringIO()):
-            sg._prune_logs()
+            mt._prune_logs()
         self.assertTrue(live.exists(), "pruned the capture file a live proxy is writing")
 
 

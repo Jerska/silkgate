@@ -33,6 +33,7 @@ sg = pkg.core
 pt = pkg.paths
 con = pkg.console
 prof = pkg.profile
+mt = pkg.mitm
 
 
 def tearDownModule():
@@ -235,13 +236,13 @@ class TestRunUpWiring(SettingsCase):
 
         with mock.patch.object(con, "preflight", lambda *binaries: None), \
                 mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
-                mock.patch.object(sg, "_proxy_running", lambda: True), \
-                mock.patch.object(sg, "ensure_proxy",
+                mock.patch.object(mt, "_proxy_running", lambda: True), \
+                mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
-                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
                 mock.patch.object(sg, "_provision_session", spy), \
-                mock.patch.object(sg, "_release_port", lambda *a, **k: None), \
-                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
+                mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(sg, "CLAUDE_SETTINGS", self.user_file), \
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
@@ -292,7 +293,7 @@ class TestProvisionStaging(SettingsCase):
             calls["argv"] = list(argv)
             return types.SimpleNamespace(returncode=0)
 
-        with mock.patch.object(sg, "_push_secrets", lambda *a, **k: None), \
+        with mock.patch.object(mt, "_push_secrets", lambda *a, **k: None), \
                 mock.patch.object(sg, "_msb", lambda: "/fake/bin/msb"), \
                 mock.patch.object(sg.subprocess, "run", fake_run):
             sg._provision_session(name, "img:1", 8090, "", prof.load_ruleset(""),

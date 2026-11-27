@@ -36,6 +36,7 @@ gt = pkg.git
 pt = pkg.paths
 con = pkg.console
 prof = pkg.profile
+mt = pkg.mitm
 
 
 def tearDownModule():
@@ -107,13 +108,13 @@ class CliCase(unittest.TestCase):
 
         with self.no_preflight(), \
                 mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
-                mock.patch.object(sg, "_proxy_running", lambda: True), \
-                mock.patch.object(sg, "ensure_proxy",
+                mock.patch.object(mt, "_proxy_running", lambda: True), \
+                mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
-                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
                 mock.patch.object(sg, "_provision_session", spy), \
-                mock.patch.object(sg, "_release_port", lambda *a, **k: None), \
-                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
+                mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:
@@ -249,7 +250,7 @@ class TestGuestCaEnv(CliCase):
         cert.write_text("-----BEGIN CERTIFICATE-----\nnot-a-real-ca\n-----END CERTIFICATE-----\n")
         context = self.tmp / "context"
         context.mkdir()
-        with mock.patch.object(sg, "ensure_ca", lambda: cert):
+        with mock.patch.object(mt, "ensure_ca", lambda: cert):
             sg.write_build_context(context, [], "debian:bookworm-slim")
         dockerfile = (context / "Dockerfile").read_text()
         self.assertTrue(dockerfile.startswith("FROM debian:bookworm-slim\n"))
@@ -701,7 +702,7 @@ class TestProfileArgExpansion(ArgProfileCase):
         cert.write_text("cert")
         context = self.tmp / "ctx"
         context.mkdir()
-        with mock.patch.object(sg, "ensure_ca", lambda: cert):
+        with mock.patch.object(mt, "ensure_ca", lambda: cert):
             sg.write_build_context(context, [p], sg.BASE_IMAGE)
         self.assertEqual((context / "setup-holey.sh").read_text(), "echo {arg}\n")
         self.assertIn("X={arg}", (context / "Dockerfile").read_text())
@@ -727,7 +728,7 @@ class TestImageIdentityExcludesArg(ArgProfileCase):
         cert.write_text("cert")
         context = self.tmp / "ctx"
         context.mkdir()
-        with mock.patch.object(sg, "ensure_ca", lambda: cert):
+        with mock.patch.object(mt, "ensure_ca", lambda: cert):
             sg.write_build_context(context, profiles, sg.BASE_IMAGE)
         dockerfile = (context / "Dockerfile").read_text()
         self.assertEqual(dockerfile.count("COPY setup-tmpl.sh"), 1, dockerfile)
@@ -895,7 +896,7 @@ class TestGuestCredential(ArgProfileCase):
         if secret is not None:
             env["SILKGATE_EGRESS_SECRET_ANTHROPIC"] = secret
         with mock.patch.dict(os.environ, env, clear=True):
-            return sg._guest_credential_env([prof.Profile("claude")])
+            return mt._guest_credential_env([prof.Profile("claude")])
 
     def test_an_api_key_secret_plants_a_dummy_api_key(self):
         self.assertEqual(self.env_for("x-api-key: sk-ant-api03-real"), [self.API_KEY])
@@ -920,7 +921,7 @@ class TestGuestCredential(ArgProfileCase):
 
     def test_a_profile_without_the_key_plants_nothing(self):
         self.profile_dir({"plain": {"profile.conf": "description = x\n"}})
-        self.assertEqual(sg._guest_credential_env([prof.Profile("plain")]), [])
+        self.assertEqual(mt._guest_credential_env([prof.Profile("plain")]), [])
 
     def test_a_secret_name_without_header_lines_is_refused_at_load(self):
         self.profile_dir({"bad": {"profile.conf": "guest_credential = anthropic\n"}})
@@ -1642,10 +1643,10 @@ class TestHarvestWiring(CliCase):
                 mock.patch.object(gt, "_branch_spec", lambda *a: dict(self.FAKE_SPEC)), \
                 mock.patch.object(gt, "_branch_workspace", lambda spec, name: (ws, [])), \
                 mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
-                mock.patch.object(sg, "_proxy_running", lambda: True), \
-                mock.patch.object(sg, "ensure_proxy",
+                mock.patch.object(mt, "_proxy_running", lambda: True), \
+                mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
-                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
                 mock.patch.object(sg, "_provision_session", lambda *a, **k: None), \
                 mock.patch.object(sg, "tier1_fault", lambda *a: None), \
                 mock.patch.object(gt, "_setup_branch_guest", lambda *a: None), \
@@ -1657,7 +1658,7 @@ class TestHarvestWiring(CliCase):
                 mock.patch.object(gt, "_reap_derived_workspace",
                                   lambda meta: calls.append("reap")), \
                 mock.patch.object(sg, "list_metas", lambda: []), \
-                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(con, "say", lambda *a, **k: None), \
                 self.assertRaises(SystemExit) as caught:
             pkg.main.main()
@@ -1705,7 +1706,7 @@ class TestHarvestWiring(CliCase):
                 mock.patch.object(gt, "_reap_derived_workspace",
                                   lambda m: calls.append("reap")), \
                 mock.patch.object(sg, "list_metas", lambda: []), \
-                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(con, "say", lambda *a, **k: None):
             try:
                 pkg.main.main()
@@ -2255,14 +2256,14 @@ class TestMemoryFlag(CliCase):
         with self.no_preflight(), \
                 mock.patch.object(sg, "_msb", lambda: "msb"), \
                 mock.patch.object(sg, "ensure_image", lambda *a, **k: "img:1"), \
-                mock.patch.object(sg, "_proxy_running", lambda: True), \
-                mock.patch.object(sg, "ensure_proxy",
+                mock.patch.object(mt, "_proxy_running", lambda: True), \
+                mock.patch.object(mt, "ensure_proxy",
                                   lambda port: {"log": "/dev/null", "ports": [8090]}), \
-                mock.patch.object(sg, "pick_port", lambda proxy, name: 8090), \
+                mock.patch.object(mt, "pick_port", lambda proxy, name: 8090), \
                 mock.patch.object(sg, "msb_create_argv", spy), \
                 mock.patch.object(sg, "_remove_sandbox", lambda *a, **k: True), \
-                mock.patch.object(sg, "_release_port", lambda *a, **k: None), \
-                mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
+                mock.patch.object(mt, "_release_port", lambda *a, **k: None), \
+                mock.patch.object(mt, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:

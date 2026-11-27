@@ -18,6 +18,7 @@ REPO = Path(__file__).resolve().parent.parent
 pkg = clipkg.load("sg_tier1_probe")
 sg = pkg.core
 con = pkg.console
+mt = pkg.mitm
 
 TARGET_HOST = sg.TIER1_PROBE_TARGET.partition(":")[0]
 
@@ -29,7 +30,7 @@ class ProbeCmd(unittest.TestCase):
         script = cmd[2]
         host, _, port = sg.TIER1_PROBE_TARGET.partition(":")
         self.assertIn(f"/dev/tcp/{host}/{port}", script)
-        self.assertIn(f"/dev/tcp/{sg.PROXY_ALIAS}/8093", script)
+        self.assertIn(f"/dev/tcp/{mt.PROXY_ALIAS}/8093", script)
         # every connect is timeout-bounded: this runs on the hot path of every up/run
         self.assertEqual(script.count("timeout 1 bash"), 2)
 
@@ -96,7 +97,7 @@ class Verdict(unittest.TestCase):
 
     def test_noproxy_refuses_and_names_the_proxy(self):
         msg = sg.tier1_verdict("TIER1_NOPROXY\n", 8093)
-        self.assertIn(f"{sg.PROXY_ALIAS}:8093", msg)
+        self.assertIn(f"{mt.PROXY_ALIAS}:8093", msg)
 
     def test_untestable_refuses_and_names_the_missing_tool(self):
         msg = sg.tier1_verdict("TIER1_UNTESTABLE:bash\n", 8093)

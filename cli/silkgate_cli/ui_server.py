@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import console, core, git, logs, paths
+from . import console, core, git, logs, mitm, paths
 
 
 # --- ui: a local web view over the events files -------------------------------------
@@ -694,8 +694,8 @@ def _ui_server(port):
             self._reply(200, ctype, body)
 
         def _sessions(self):
-            meta = core.read_proxy() or {}
-            ident = core._proxy_ident()          # identity via the control socket, as ever:
+            meta = mitm.read_proxy() or {}
+            ident = mitm._proxy_ident()          # identity via the control socket, as ever:
             running = ident is not None          # a recycled pid must not read as "running"
             # Archived rows carry the keys a listing needs; /api/session/<sid> has
             # the rest. last_rc rides along only where an exec_end recorded one.
@@ -734,7 +734,7 @@ def _ui_server(port):
             and the stream — the client dedupes on (id, decision) — where a size read
             after would show it in neither."""
             cursor = None
-            live = (core.read_proxy() or {}).get(meta_key)
+            live = (mitm.read_proxy() or {}).get(meta_key)
             if live:
                 try:
                     cursor = f"{Path(live).name}:{Path(live).stat().st_size}"
@@ -794,7 +794,7 @@ def _ui_server(port):
                                                        errors="replace")
             except OSError:
                 rules = ""
-            proxy = core.read_proxy() or {}
+            proxy = mitm.read_proxy() or {}
             # A live session can be frozen. Only the reported state says so:
             # `state` is placement (live vs archived) and keeps driving the
             # briefs map — a frozen VM still runs, so it reads as live there.
@@ -914,7 +914,7 @@ def _ui_server(port):
             beat = time.monotonic()              # sits in the buffer, never on the wire
             while True:
                 try:
-                    for kind, payload, cursor in tailer.poll(core.read_proxy()):
+                    for kind, payload, cursor in tailer.poll(mitm.read_proxy()):
                         if kind == "reset":
                             frame = f"id: {cursor}\nevent: reset\ndata: {{}}\n\n"
                         else:
@@ -947,7 +947,7 @@ def cmd_ui(args):
         server = _ui_server(args.port)
     except OSError:
         console.die(f"cannot bind the ui at 127.0.0.1:{args.port} — "
-                    + core._port_in_use_error(args.port))
+                    + mitm._port_in_use_error(args.port))
     host, port = server.server_address[:2]
     console.say(f"silkgate ui at http://{host}:{port}/ — Ctrl-C stops it")
     server.serve_forever()

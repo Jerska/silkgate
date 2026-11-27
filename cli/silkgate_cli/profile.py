@@ -4,7 +4,7 @@ import re
 
 import rule_engine
 
-from . import console, core, paths
+from . import console, mitm, paths
 
 
 # --- profiles ----------------------------------------------------------------
@@ -281,7 +281,7 @@ def check_env(pairs):
         name, sep, value = pair.partition("=")
         if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             console.die(f"bad -e argument {pair!r} (expected NAME=VALUE)")
-        if name in core.PROXY_ENV_VARS:
+        if name in mitm.PROXY_ENV_VARS:
             console.die(f"-e {name} collides with the proxy configuration silkgate sets")
         if name in _NO_PROXY_VARS:
             console.die(f"-e {name} tells the guest's clients to bypass the proxy for the hosts "

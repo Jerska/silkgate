@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import console, core
+from . import console, core, mitm
 
 
 # --- logs: per-session observability ----------------------------------------
@@ -93,7 +93,7 @@ def _read_from(path, offset):
 
 
 def _logs_audit(args):
-    proxy = core.read_proxy()
+    proxy = mitm.read_proxy()
     if not proxy or not proxy.get("log"):
         console.die("shared proxy not running — no audit log (silkgate ls)")
     if args.since is not None:
@@ -114,10 +114,10 @@ def _logs_audit(args):
         time.sleep(args.interval)
         if not core.session_dir(name).exists():
             console.die(f"session {name!r} is gone — stopped following")
-        p = core.read_proxy()
+        p = mitm.read_proxy()
         # Identity, not pid liveness: after an unclean exit proxy.json survives and its
         # pid may be recycled, so only a proxy answering on the control socket counts.
-        if not (p and core._proxy_running()):
+        if not (p and mitm._proxy_running()):
             console.die("shared proxy is gone — stopped following")
         new_path = Path(p.get("log") or path)
         if new_path != path:                         # proxy restarted onto a fresh log file

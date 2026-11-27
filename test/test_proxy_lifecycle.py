@@ -61,6 +61,7 @@ MOD = pkg.core
 PATHS = pkg.paths
 CONSOLE = pkg.console
 FOREGROUND = pkg.foreground
+MITM = pkg.mitm
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -347,7 +348,7 @@ def _race_worker(barrier, q, proxy, name):
     """One concurrent `up`: pick a port, dawdle like provisioning does, land the meta."""
     try:
         barrier.wait(timeout=20)
-        port = MOD.pick_port(proxy, name)
+        port = MITM.pick_port(proxy, name)
         time.sleep(0.05)                      # the window before meta.json becomes visible
         sdir = MOD.session_dir(name)
         sdir.mkdir(parents=True)
@@ -437,7 +438,7 @@ class _FakeToolsCase(unittest.TestCase):
                         {"name": name, "sandbox": "sg-" + name, "port": port})
 
     def proxy_meta(self, pid, base=8090):
-        meta = {"pid": pid, "base_port": base, "ports": list(range(base, base + MOD.POOL_SIZE)),
+        meta = {"pid": pid, "base_port": base, "ports": list(range(base, base + MITM.POOL_SIZE)),
                 "log": str(PATHS.LOG_DIR / "proxy.log"), "sock": str(PATHS.PROXY_SOCK)}
         MOD._write_json(PATHS.PROXY_JSON, meta)
         return meta
@@ -524,7 +525,7 @@ class _FakeToolsCase(unittest.TestCase):
         """start_shared_proxy via run_or_theft, plus the theft that crashes nothing: a
         thief inside the probed range just shifts the pool. So a pool that starts anywhere
         but `first` is interference: the proxy is stopped, and _PortTheft retries."""
-        meta = self.run_or_theft(MOD.start_shared_proxy, base)
+        meta = self.run_or_theft(MITM.start_shared_proxy, base)
         _autoreap(meta["pid"])
         self.addCleanup(self._kill_pid, meta["pid"])
         if meta["base_port"] != first:
@@ -615,14 +616,14 @@ class LifecycleTest(_FakeToolsCase):
         stub = self.start_stub_sock()
         proxy = self.proxy_meta(pid=stub.pid)
         self.write_claim(8090, "other", os.getpid())
-        self.assertEqual(MOD.pick_port(proxy, "me"), 8091)
+        self.assertEqual(MITM.pick_port(proxy, "me"), 8091)
 
     def test_pick_port_reaps_crashed_claim(self):
         """A claim whose maker died with no session dir is a leftover, not a full pool."""
         stub = self.start_stub_sock()
         proxy = self.proxy_meta(pid=stub.pid)
         self.write_claim(8090, "ghost", _dead_pid())
-        self.assertEqual(MOD.pick_port(proxy, "me"), 8090)
+        self.assertEqual(MITM.pick_port(proxy, "me"), 8090)
 
     def test_pick_port_respects_session_of_dead_provisioner(self):
         """Once the session dir exists the guest may be live: only `down` frees the port."""
@@ -630,7 +631,7 @@ class LifecycleTest(_FakeToolsCase):
         proxy = self.proxy_meta(pid=stub.pid)
         self.write_session("crashed", 8090)
         self.write_claim(8090, "crashed", _dead_pid())
-        self.assertEqual(MOD.pick_port(proxy, "me"), 8091)
+        self.assertEqual(MITM.pick_port(proxy, "me"), 8091)
 
     def test_pick_port_full_pool_dies(self):
         stub = self.start_stub_sock()
@@ -638,16 +639,16 @@ class LifecycleTest(_FakeToolsCase):
         for i, port in enumerate(proxy["ports"]):
             self.write_session(f"s{i}", port)
         with self.assertRaises(SystemExit):
-            MOD.pick_port(proxy, "me")
+            MITM.pick_port(proxy, "me")
 
     def test_pick_port_revives_proxy_stopped_under_it(self):
         """If a `down <last>` stops the proxy right after our ensure_proxy, picking a port
         still leaves a live proxy, never a session nothing polices."""
         def body():
-            base = _free_pool_base(MOD.POOL_SIZE)
+            base = _free_pool_base(MITM.POOL_SIZE)
             proxy = self.proxy_meta(pid=_dead_pid(), base=base)
-            port = self.run_or_theft(MOD.pick_port, proxy, "me")
-            started = MOD.read_proxy()
+            port = self.run_or_theft(MITM.pick_port, proxy, "me")
+            started = MITM.read_proxy()
             if started and started.get("pid"):
                 _autoreap(started["pid"])
                 self.addCleanup(self._kill_pid, started["pid"])
@@ -662,7 +663,7 @@ class LifecycleTest(_FakeToolsCase):
         """A live unrelated process on the recorded pid is not the proxy."""
         sleeper = self.start_sleeper()
         self.proxy_meta(pid=sleeper.pid)
-        self.assertFalse(MOD._proxy_running(),
+        self.assertFalse(MITM._proxy_running(),
                          "an unrelated process holding the pid counted as the proxy")
 
     def test_stop_proxy_spares_recycled_pid(self):
@@ -670,7 +671,7 @@ class LifecycleTest(_FakeToolsCase):
         sleeper = self.start_sleeper()
         _autoreap(sleeper.pid)
         meta = self.proxy_meta(pid=sleeper.pid)
-        MOD.stop_proxy(meta)
+        MITM.stop_proxy(meta)
         self.assertIsNone(sleeper.poll(), "SIGTERM/SIGKILL went to a recycled pid")
         self.assertFalse(PATHS.PROXY_JSON.exists(), "stale proxy.json not cleared")
 
@@ -681,7 +682,7 @@ class LifecycleTest(_FakeToolsCase):
         sleeper = self.start_sleeper()
         _autoreap(sleeper.pid)
         meta = self.proxy_meta(pid=sleeper.pid)
-        MOD.stop_proxy(meta)
+        MITM.stop_proxy(meta)
         try:
             stub.wait(5)
         except subprocess.TimeoutExpired:
@@ -702,7 +703,7 @@ class LifecycleTest(_FakeToolsCase):
         proc = subprocess.Popen([sys.executable, "-c", "pass"])
         self.addCleanup(self._kill, proc)
         os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)   # exited, still unreaped
-        self.assertFalse(MOD.proxy_alive(proc.pid),
+        self.assertFalse(MITM.proxy_alive(proc.pid),
                          "an exited-but-unreaped child counted as a live proxy — "
                          "stop_proxy waits its full grace on a zombie, then SIGKILLs it")
         with self.assertRaises(ChildProcessError):
@@ -713,10 +714,10 @@ class LifecycleTest(_FakeToolsCase):
         proxy: repair the record, never restart over the running one."""
         stub = self.start_stub_sock()
         self.proxy_meta(pid=_dead_pid())
-        meta = MOD.ensure_proxy(8090)
+        meta = MITM.ensure_proxy(8090)
         self.assertEqual(meta.get("pid"), stub.pid,
                          "returned meta does not name the live proxy")
-        self.assertEqual((MOD.read_proxy() or {}).get("pid"), stub.pid,
+        self.assertEqual((MITM.read_proxy() or {}).get("pid"), stub.pid,
                          "proxy.json still names a pid that is not the proxy")
         self.assertFalse(self.mitm_argv.exists(),
                          "a second proxy was started over the live one")
@@ -729,7 +730,7 @@ class LifecycleTest(_FakeToolsCase):
         stub = self.start_stub_sock()
         meta = self.proxy_meta(pid=stub.pid)
         self.write_claim(8090, "starting", os.getpid())
-        MOD.stop_proxy(meta)
+        MITM.stop_proxy(meta)
         self.assertIsNone(stub.poll(), "proxy killed under a starting session")
         self.assertTrue(PATHS.PROXY_JSON.exists(), "proxy.json cleared under a starting session")
 
@@ -758,7 +759,7 @@ class LifecycleTest(_FakeToolsCase):
         _autoreap(stub.pid)
         proxy = self.proxy_meta(pid=stub.pid)
         self.msb_cfg({"create_ok": False, "rm_ok": True})
-        port = MOD.pick_port(proxy, "prov1")
+        port = MITM.pick_port(proxy, "prov1")
         ruleset = rule_engine.RuleSet.parse(RULE)
         with self.assertRaises(SystemExit):
             MOD._provision_session("prov1", "img", port, RULE, ruleset,
@@ -883,7 +884,7 @@ class LifecycleTest(_FakeToolsCase):
         self.assertIsNotNone(stub.poll(),
                              "no sessions remain yet the proxy is still up — the #29 orphan")
         self.assertFalse(PATHS.PROXY_JSON.exists())
-        self.assertEqual(MOD._live_claims(), [])
+        self.assertEqual(MITM._live_claims(), [])
 
     def test_concurrent_down_teardowns_stop_the_proxy(self):
         """Racing `down`s, each seeing another's meta or claim: none may defer forever.
@@ -908,7 +909,7 @@ class LifecycleTest(_FakeToolsCase):
         _autoreap(stub.pid)
         proxy = self.proxy_meta(pid=stub.pid)
         self.msb_cfg({"create_ok": False, "rm_ok": True})
-        port = MOD.pick_port(proxy, "solo")
+        port = MITM.pick_port(proxy, "solo")
         ruleset = rule_engine.RuleSet.parse(RULE)
         with self.assertRaises(SystemExit):
             MOD._provision_session("solo", "img", port, RULE, ruleset,
@@ -927,7 +928,7 @@ class LifecycleTest(_FakeToolsCase):
         must be refused before the spawn, and must say so."""
         port = _free_pool_base(1)
         self.squat(port)
-        msg = self.expect_die(MOD.start_proxy, RULE, port)
+        msg = self.expect_die(MITM.start_proxy, RULE, port)
         self.assertIn(f"port {port} is already in use", msg)
         self.assertFalse(self.mitm_argv.exists(),
                          "a mitmdump was spawned against a port something else holds")
@@ -941,7 +942,7 @@ class LifecycleTest(_FakeToolsCase):
         base = _free_pool_base(1)
         self.proxy_meta(pid=stub.pid, base=base)
         self.squat(base)
-        msg = self.expect_die(MOD.start_proxy, RULE, base)
+        msg = self.expect_die(MITM.start_proxy, RULE, base)
         self.assertIn(f"pid {stub.pid}", msg)
         self.assertIn("silkgate ls", msg)
 
@@ -951,20 +952,20 @@ class LifecycleTest(_FakeToolsCase):
         first fully-free POOL_SIZE range, not the next POOL_SIZE-aligned one — and
         proxy.json records the actual pool: contiguous, blocker excluded."""
         def body():
-            base = _free_pool_base(2 * MOD.POOL_SIZE)
+            base = _free_pool_base(2 * MITM.POOL_SIZE)
             self.squat(base + 3)
             # our own squatter shifts the pool to base + 4 on purpose; any other
             # landing point is a concurrent binder's
             meta = self.start_shared_or_theft(base, base + 4)
             self.assertEqual(meta["ports"],
-                             list(range(base + 4, base + 4 + MOD.POOL_SIZE)),
+                             list(range(base + 4, base + 4 + MITM.POOL_SIZE)),
                              "pool is not the contiguous range one past the squatter")
             self.assertNotIn(base + 3, meta["ports"],
                              "the squatted port ended up inside the pool")
             self.assertEqual(meta["base_port"], meta["ports"][0],
                              "proxy.json base_port does not match the actual first port")
             self.assertTrue(PATHS.PROXY_JSON.exists())
-            MOD.stop_proxy(meta)
+            MITM.stop_proxy(meta)
             self.assertFalse(PATHS.PROXY_JSON.exists())
         self.retry_port_theft(body)
 
@@ -979,19 +980,19 @@ class LifecycleTest(_FakeToolsCase):
             self.skipTest("no IPv6 loopback here")
         port = _free_pool_base(1)
         self.squat(port, host="::1")
-        self.assertFalse(MOD._port_free(port),
+        self.assertFalse(MITM._port_free(port),
                          "a ::1-only listener was not seen: only IPv4 was probed")
 
     def test_start_shared_proxy_dies_when_no_free_range_exists(self):
         """With the base itself free but one squatter inside every candidate range,
         the walk exhausts its window and the error names the scanned extent and each
         blocking port — not the first squatter as an in-use refusal."""
-        base = _free_pool_base(5 * MOD.POOL_SIZE)
-        squatted = [base + 3 + i * MOD.POOL_SIZE for i in range(5)]
+        base = _free_pool_base(5 * MITM.POOL_SIZE)
+        squatted = [base + 3 + i * MITM.POOL_SIZE for i in range(5)]
         for p in squatted:
             self.squat(p)
-        msg = self.expect_die(MOD.start_shared_proxy, base)
-        self.assertIn(f"{base}..{base + 5 * MOD.POOL_SIZE - 1}", msg,
+        msg = self.expect_die(MITM.start_shared_proxy, base)
+        self.assertIn(f"{base}..{base + 5 * MITM.POOL_SIZE - 1}", msg,
                       "the scanned extent is not named")
         for p in squatted:
             self.assertIn(str(p), msg, "a blocking port is not named")
@@ -1001,23 +1002,23 @@ class LifecycleTest(_FakeToolsCase):
         """A scan whose window would cross the top of port space stops at 65535
         instead of handing bind() a number it raises OverflowError for; a base too
         high for even one pool is refused up front."""
-        msg = self.expect_die(MOD._find_free_pool, 65535 - MOD.POOL_SIZE + 2)
+        msg = self.expect_die(MITM._find_free_pool, 65535 - MITM.POOL_SIZE + 2)
         self.assertIn("65535", msg)
-        base = 65536 - MOD.POOL_SIZE          # exactly one candidate range fits
+        base = 65536 - MITM.POOL_SIZE          # exactly one candidate range fits
         # The only possible base, so a stolen port cannot be dodged with a fresh
         # range: a walk that dies full after the pre-check saw the range free met
         # a thief mid-walk and is retried; a die that persists is the pre-check's
         # skip condition, seen late.
         for _ in range(_THEFT_ATTEMPTS):
-            if not all(MOD._port_free(p) for p in range(base, 65536)):
+            if not all(MITM._port_free(p) for p in range(base, 65536)):
                 self.skipTest(f"ports {base}..65535 not free here")
             msgs = []
             with mock.patch.object(CONSOLE, "say", msgs.append):
                 try:
-                    pool = MOD._find_free_pool(base)
+                    pool = MITM._find_free_pool(base)
                 except SystemExit:
                     died = "\n".join(str(m) for m in msgs)
-                    if f"no {MOD.POOL_SIZE}-port range free" in died:
+                    if f"no {MITM.POOL_SIZE}-port range free" in died:
                         continue
                     self.fail(f"_find_free_pool died: {died}")
             self.assertEqual(pool, list(range(base, 65536)))
@@ -1027,22 +1028,22 @@ class LifecycleTest(_FakeToolsCase):
     def test_restart_with_surviving_session_never_floats_the_pool(self):
         """A surviving guest's port is fixed, so a restart with a squatter on the recorded
         base must die naming that port, never move the pool as a session-free start would."""
-        base = _free_pool_base(2 * MOD.POOL_SIZE)
+        base = _free_pool_base(2 * MITM.POOL_SIZE)
         self.proxy_meta(pid=_dead_pid(), base=base)
         self.write_session("kept", base + 2)
         self.squat(base)
-        msg = self.expect_die(MOD.ensure_proxy, base)
+        msg = self.expect_die(MITM.ensure_proxy, base)
         self.assertIn(f"port {base} is already in use", msg)
 
     def test_restart_dies_naming_the_session_whose_port_is_squatted(self):
         """When the squatter sits on the very port a surviving session is frozen
         onto, the refusal names both — that port cannot be walked past or reassigned
         without handing the session's traffic to whoever binds it."""
-        base = _free_pool_base(2 * MOD.POOL_SIZE)
+        base = _free_pool_base(2 * MITM.POOL_SIZE)
         self.proxy_meta(pid=_dead_pid(), base=base)
         self.write_session("kept", base + 2)
         self.squat(base + 2)
-        msg = self.expect_die(MOD.ensure_proxy, base)
+        msg = self.expect_die(MITM.ensure_proxy, base)
         self.assertIn(f"port {base + 2}", msg)
         self.assertIn("kept", msg)
 
@@ -1051,11 +1052,11 @@ class LifecycleTest(_FakeToolsCase):
         a restart under a surviving session lands exactly where the record says —
         proxy.json after equals proxy.json before, port for port."""
         def body():
-            base = _free_pool_base(2 * MOD.POOL_SIZE)
+            base = _free_pool_base(2 * MITM.POOL_SIZE)
             old = self.proxy_meta(pid=_dead_pid(), base=base)
             self.write_session("kept", base + 2)
             # a drifted scan floor must not matter
-            meta = self.run_or_theft(MOD.ensure_proxy, base + 1)
+            meta = self.run_or_theft(MITM.ensure_proxy, base + 1)
             _autoreap(meta["pid"])
             self.addCleanup(self._kill_pid, meta["pid"])
             self.assertEqual(meta["ports"], old["ports"],
@@ -1069,7 +1070,7 @@ class LifecycleTest(_FakeToolsCase):
         self.install_mitmdump(FAKE_MITMDUMP_BINDLESS_SRC)
         def body():
             port = _free_pool_base(1)
-            msg = self.expect_die(MOD.start_proxy, RULE, port)
+            msg = self.expect_die(MITM.start_proxy, RULE, port)
             if _port_theft(msg):
                 # the pre-spawn probe met a thief and refused, so the bindless fake
                 # never ran; the die under test is the log scan's, on a fresh port
@@ -1082,27 +1083,27 @@ class LifecycleTest(_FakeToolsCase):
         """Given a pid, the control-socket wait accepts only that process answering:
         ports coming up says nothing about who owns the socket."""
         stub = self.start_stub_sock()
-        MOD._wait_control_sock(2, stub.pid)      # the stub answering as itself: ready
-        msg = self.expect_die(MOD._wait_control_sock, 2, stub.pid + 1)
+        MITM._wait_control_sock(2, stub.pid)      # the stub answering as itself: ready
+        msg = self.expect_die(MITM._wait_control_sock, 2, stub.pid + 1)
         self.assertIn(str(stub.pid), msg)
 
     # -- proxy entry points: bind address and rawtcp --------------------------------
 
     def test_start_shared_proxy_binds_loopback_and_disables_rawtcp(self):
         def body():
-            base = _free_pool_base(MOD.POOL_SIZE)
+            base = _free_pool_base(MITM.POOL_SIZE)
             meta = self.start_shared_or_theft(base, base)
             argv = json.loads(self.mitm_argv.read_text())
             pairs = self._flag_pairs(argv)
             self.assertIn(("--set", "rawtcp=false"), pairs,
                           "raw-TCP fallback left on: an unparsable CONNECT becomes a tunnel")
             modes = [m.split("@", 1)[1] for f, m in pairs if f == "--mode"]
-            for port in range(base, base + MOD.POOL_SIZE):
+            for port in range(base, base + MITM.POOL_SIZE):
                 for addr in ("127.0.0.1", "::1"):
                     self.assertIn(f"{addr}:{port}", modes,
                                   "every pool port needs both loopback families: a guest "
                                   "resolves the host alias to its IPv6 address first")
-            self.assertEqual(len(modes), MOD.POOL_SIZE * 2,
+            self.assertEqual(len(modes), MITM.POOL_SIZE * 2,
                              "a bind beyond the two loopbacks would widen the exposure")
             # Both families must actually accept, not merely appear in the argv: a guest
             # resolves the host alias to its IPv6 address first, so a v4-only listener is
@@ -1114,15 +1115,15 @@ class LifecycleTest(_FakeToolsCase):
             if lan:
                 with self.assertRaises(OSError, msg=f"pool port reachable via LAN addr {lan}"):
                     socket.create_connection((lan, base), timeout=2).close()
-            MOD.stop_proxy(meta)
+            MITM.stop_proxy(meta)
             self.assertFalse(PATHS.PROXY_JSON.exists())
         self.retry_port_theft(body)
 
     def test_start_shared_proxy_events_file(self):
         """meta["events"] exists, its stamp matches the log's, and the events env var reaches the child."""
         def body():
-            base = _free_pool_base(MOD.POOL_SIZE)
-            meta = self.run_or_theft(MOD.start_shared_proxy, base)
+            base = _free_pool_base(MITM.POOL_SIZE)
+            meta = self.run_or_theft(MITM.start_shared_proxy, base)
             _autoreap(meta["pid"])
             self.addCleanup(self._kill_pid, meta["pid"])
 
@@ -1140,13 +1141,13 @@ class LifecycleTest(_FakeToolsCase):
             child_env = json.loads(env_file.read_text())
             self.assertEqual(child_env.get("SILKGATE_EGRESS_EVENTS_FILE"), meta["events"])
 
-            MOD.stop_proxy(meta)
+            MITM.stop_proxy(meta)
         self.retry_port_theft(body)
 
     def test_start_proxy_binds_loopback_and_disables_rawtcp(self):
         def body():
             port = _free_pool_base(1)
-            proc, _log = self.run_or_theft(MOD.start_proxy, RULE, port)
+            proc, _log = self.run_or_theft(MITM.start_proxy, RULE, port)
             self.addCleanup(self._kill, proc)
             argv = json.loads(self.mitm_argv.read_text())
             pairs = self._flag_pairs(argv)
@@ -1166,35 +1167,35 @@ class LifecycleTest(_FakeToolsCase):
     def test_modes_place_one_listener_per_bind_address(self):
         """A mode spec is the only way to bind more than one address, and its grammar
         splits host from port at the last colon — so an IPv6 literal must go in bare."""
-        self.assertEqual(MOD._modes(8090),
+        self.assertEqual(MITM._modes(8090),
                          ["--mode", "regular@127.0.0.1:8090", "--mode", "regular@::1:8090"])
         for binds, want in (
             (("127.0.0.1",), ["regular@127.0.0.1:9000"]),
             (("::1",), ["regular@::1:9000"]),
             (("10.0.0.2", "fd00::2"), ["regular@10.0.0.2:9000", "regular@fd00::2:9000"]),
         ):
-            with mock.patch.object(MOD, "PROXY_BINDS", binds):
-                self.assertEqual([a for a in MOD._modes(9000) if a != "--mode"], want)
+            with mock.patch.object(MITM, "PROXY_BINDS", binds):
+                self.assertEqual([a for a in MITM._modes(9000) if a != "--mode"], want)
                 # Brackets would be read as part of the hostname and fail to resolve.
-                self.assertNotIn("[", "".join(MOD._modes(9000)))
+                self.assertNotIn("[", "".join(MITM._modes(9000)))
 
     def test_bind_override_is_a_list_and_drives_the_readiness_probe(self):
         """SILKGATE_PROXY_BIND exists for a platform whose guests reach the host on a real
         interface; the probe follows the bind so the two cannot drift apart."""
-        self.assertEqual(MOD.PROXY_BINDS, ("127.0.0.1", "::1"))
-        self.assertEqual(MOD._probe_addr(8090), ("127.0.0.1", 8090))
-        with mock.patch.object(MOD, "PROXY_BINDS", ("::1",)):
-            self.assertEqual(MOD._probe_addr(8090), ("::1", 8090))
+        self.assertEqual(MITM.PROXY_BINDS, ("127.0.0.1", "::1"))
+        self.assertEqual(MITM._probe_addr(8090), ("127.0.0.1", 8090))
+        with mock.patch.object(MITM, "PROXY_BINDS", ("::1",)):
+            self.assertEqual(MITM._probe_addr(8090), ("::1", 8090))
         for wildcard, dialed in (("0.0.0.0", "127.0.0.1"), ("::", "::1")):
-            with mock.patch.object(MOD, "PROXY_BINDS", (wildcard,)):
-                self.assertEqual(MOD._probe_addr(8090), (dialed, 8090))
+            with mock.patch.object(MITM, "PROXY_BINDS", (wildcard,)):
+                self.assertEqual(MITM._probe_addr(8090), (dialed, 8090))
 
 
 def _start_proxy_worker(barrier, port):
     """One start_proxy against a mitmdump that never comes up, ready to be interrupted."""
     barrier.wait(timeout=20)
     try:
-        MOD.start_proxy(RULE, port)
+        MITM.start_proxy(RULE, port)
     except BaseException:
         pass
 
@@ -1352,7 +1353,7 @@ class InterruptTest(unittest.TestCase):
                         FAKE_MSB_DIR=str(self.msb_dir),
                         FAKE_MITM_ARGV=str(self.mitm_argv))
         self.env.pop("SILKGATE_PROXY_BIND", None)
-        self.base = _free_pool_base(MOD.POOL_SIZE)
+        self.base = _free_pool_base(MITM.POOL_SIZE)
         self.addCleanup(self._kill_recorded_mitm)
 
     # -- plumbing ----------------------------------------------------------------
@@ -1399,7 +1400,7 @@ class InterruptTest(unittest.TestCase):
                 return proc
             if kind == "died" and _port_theft(evidence):
                 if attempt + 1 < _THEFT_ATTEMPTS:
-                    self.base = _free_pool_base(MOD.POOL_SIZE)
+                    self.base = _free_pool_base(MITM.POOL_SIZE)
                     continue
                 self.fail(f"a concurrent binder stole the probed port on all "
                           f"{_THEFT_ATTEMPTS} attempts; the last death:\n{evidence}")
