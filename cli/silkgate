@@ -2060,27 +2060,22 @@ def _plain(line):
 _ERR_TAG = b"\x1e"          # RS: a stderr line, and the mark on silkgate's own voice (say)
 _OUT_TAG = b"\x1f"          # US: a stdout line
 
-# msb forwards output as it arrives only when its own stdout is a terminal, so a live run
-# needs a PTY — but the *command* must not be the one holding it, or it would switch to
-# interactive behavior (colors, cursor control, a reset burst on exit) and its two streams
-# would merge into the terminal. So give the command plain pipes and relay: two FIFOs carry
-# its streams to loops that tag every line — RS for stderr, US for stdout — and write into
-# the PTY the shell holds. Both loops tag, because the leading byte is what picks the
-# stream and the command writes into those FIFOs: forwarded bare, a stdout line the
-# command opens with RS would read as the wrapper's stderr tag. Tagged, the command's own
-# bytes can only land after column zero, where _plain strips them — its output stays data
-# on its own stream, never routing, and never the RS that marks silkgate's voice. That
-# last property is the one the host can hold alone: a guest that bypasses the wrapper (a
-# root write to sh's fd, an --image whose own /bin/sh ignores this script) can still put
-# a bare tag at column zero and pick a stream, but _plain keeps the mark out of whatever
-# it says there. The shell waits for both loops, so no trailing line is lost to the race
-# with the command's exit, and $? stays the command's own. POSIX sh + mkfifo; stdin is
-# /dev/null, as for any captured run.
-# SILKGATE_CONTEXT carries the sandbox context itself, not a path to it, so a prompt can be
-# composed inline: claude -p "$SILKGATE_CONTEXT
+# msb streams output live only when its stdout is a terminal, so a run needs a PTY. But the
+# command must not hold it: it would turn interactive (colors, cursor codes) and merge its
+# streams. So the command writes to two FIFOs, and two loops relay them into the PTY,
+# tagging each line: RS for stderr, US for stdout.
 #
-# <task>". It has to be exported in here rather than passed with `msb -e`, because msb aborts
-# the guest on any env value containing a newline — and this one is markdown.
+# Both streams get a tag, because the leading byte picks the stream: a bare stdout line
+# that opened with RS would read as stderr. Tagged, the command's bytes land after column
+# zero, where _plain strips any tag, so its output stays data. A guest that bypasses the
+# wrapper can still pick a stream, but its text never carries RS, silkgate's own mark.
+#
+# The shell waits for both loops, so no trailing line is lost, and $? stays the command's.
+# Needs POSIX sh and mkfifo. stdin is /dev/null.
+#
+# SILKGATE_CONTEXT holds the context text, not a path, so a prompt can inline it. It's
+# exported here, not passed with `msb -e`, because msb aborts on an env value that holds a
+# newline.
 _EXPORT_CONTEXT = ('[ -f %s ] && SILKGATE_CONTEXT=$(cat %s) && export SILKGATE_CONTEXT; '
                    % (GUEST_CONTEXT, GUEST_CONTEXT))
 
@@ -2267,23 +2262,18 @@ def _normalize_dst(dst):
 
 
 def _mount_pair(src, dst, mode, *, allow_git_dir=False):
-    """One mount, both sides validated -> (resolved host path, normalized guest path).
+    """One mount, both sides checked -> (resolved host path, normalized guest path).
 
-    Host side: a *linked worktree* is deliberately allowed and is the read-write pattern to
-    reach for when a guest needs a repository: its `.git` is a file naming a gitdir outside
-    the mount, so no hook and no config is in the guest's reach. A `.git` *directory* is
-    refused wherever it sits in an `rw` mount, not just at the root — the walk costs one
-    unfollowed-symlink pass over the tree the user pointed at, which the common case (one
-    project directory) makes cheap, and a guard that checked only the root would be trusted
-    as if it checked everything. --allow-git-dir skips the check (and the walk) entirely:
-    the risk then sits on the command line a human approved, never in an environment
-    variable that quietly outlives the decision. For an `ro` mount the walk and its refusal
-    are skipped — the risk, hooks and config becoming guest-writable, does not exist —
-    while the _forbidden_mounts guard applies in both modes: credentials and configuration
-    in those directories must not be exposed even read-only.
+    Host side:
+    - _forbidden_mounts (credentials, configuration) is refused in either mode.
+    - An rw mount is refused if it holds a `.git` directory anywhere, not just at its
+      root: hooks and config there would become guest-writable. A root-only check would
+      be trusted as if it checked everything.
+    - A linked worktree passes: its `.git` is a file that points outside the mount.
+    - --allow-git-dir skips the walk, so the risk sits on a command line a human
+      approved, never in an env var that outlives the decision. An ro mount skips it too.
 
-    Guest side: DST must be absolute, must not be the guest's whole filesystem, and must
-    not sit at, under, or above what silkgate itself places in the guest (_RESERVED_DSTS).
+    Guest side: DST is absolute, isn't `/`, and doesn't touch _RESERVED_DSTS.
     """
     w = Path(src).resolve()
     if not w.is_dir():
@@ -2531,24 +2521,19 @@ def _prune_archive():
 
 
 def _teardown_session(meta, archive=True):
-    """Stop and rm the guest, and only then free the session dir and its port — in that
-    order, because while a guest that can reach the port may still exist, the port must
-    stay reserved, or the next session inherits a guest policed by the wrong ruleset. A
-    sandbox that cannot be removed therefore keeps its session, port and all, and this
-    dies so no caller mistakes it for gone.
+    """Remove the guest, then free its session dir and port, in that order.
 
-    With `archive` (the default) the session dir is not deleted but finished and moved
-    whole to ARCHIVE_DIR/<sid>: a last guest-output snapshot while the guest still
-    exists, the `down` journal record, an "ended" stamp in meta, then one atomic rename
-    (same filesystem). All of that is bookkeeping — fail-open, warn and continue — while
-    the sandbox removal keeps its fail-closed die. archive=False is for a session never
-    handed over (`up`'s unwind), which is removed whole as it always was.
+    While a guest that can reach the port may exist, the port stays reserved, or the next
+    session would inherit a guest policed by the wrong ruleset. So a sandbox that can't be
+    removed keeps its session, and this dies.
 
-    Ends by stopping the shared proxy if the registry is now empty. Every path that
-    removes a session runs through here, so the proxy's lifetime follows the registry
-    itself rather than any caller's courtesy — the teardown that takes the last session
-    away stops it, even inside a command that found the proxy already running and never
-    considered it its own to stop."""
+    With `archive` (the default), the session dir moves to ARCHIVE_DIR/<sid>, after a
+    last output snapshot, the `down` journal record, and an `ended` stamp. That
+    bookkeeping fails open. archive=False is for a session never handed over (`up`'s
+    unwind).
+
+    The teardown that empties the registry stops the shared proxy, whoever started it.
+    Every removal runs through here, so the proxy's lifetime follows the registry."""
     name = meta.get("name")
     sandbox = meta.get("sandbox") or (sandbox_name(name) if name else None)
     sdir = session_dir(name) if name else None
