@@ -695,7 +695,7 @@ def _ui_server(port):
 
         def _sessions(self):
             meta = core.read_proxy() or {}
-            ident = core._proxy_ident()               # identity via the control socket, as ever:
+            ident = core._proxy_ident()          # identity via the control socket, as ever:
             running = ident is not None          # a recycled pid must not read as "running"
             # Archived rows carry the keys a listing needs; /api/session/<sid> has
             # the rest. last_rc rides along only where an exec_end recorded one.

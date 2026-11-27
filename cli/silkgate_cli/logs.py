@@ -45,7 +45,7 @@ def _logs_guest(args, meta):
     printed = len(full)
     while True:
         time.sleep(args.interval)
-        if not core.session_dir(args.name).exists():      # someone ran `silkgate down`
+        if not core.session_dir(args.name).exists():  # someone ran `silkgate down`
             console.die(f"session {args.name!r} is gone — stopped following")
         lines, err = core._run_msb_logs(sandbox)
         if err is not None:                          # sandbox removed / msb unhappy
@@ -130,7 +130,7 @@ def _logs_audit(args):
         if size < offset:                            # truncated/rotated in place
             console.say("audit log rotated — resyncing")
             offset = 0
-        new_lines, offset = _read_from(path, offset) # byte offset: only the new tail is read
+        new_lines, offset = _read_from(path, offset)  # byte offset: only the new tail is read
         if new_lines is None:
             console.die(f"audit log {path} vanished — stopped following")
         _emit([ln for ln in new_lines if _audit_match(ln, name)])

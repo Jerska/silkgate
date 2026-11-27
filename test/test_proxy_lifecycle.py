@@ -60,6 +60,7 @@ pkg = clipkg.load("sg_proxy_lifecycle")
 MOD = pkg.core
 PATHS = pkg.paths
 CONSOLE = pkg.console
+FOREGROUND = pkg.foreground
 
 import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
 
@@ -1159,7 +1160,7 @@ class LifecycleTest(_FakeToolsCase):
             if lan:
                 with self.assertRaises(OSError, msg=f"verify proxy reachable via LAN addr {lan}"):
                     socket.create_connection((lan, port), timeout=2).close()
-            MOD.stop(proc)
+            FOREGROUND.stop(proc)
         self.retry_port_theft(body)
 
     def test_modes_place_one_listener_per_bind_address(self):
@@ -1209,7 +1210,7 @@ class InterruptSideEffectTest(_FakeToolsCase):
                                  "import os, signal;"
                                  " signal.signal(signal.SIGINT, signal.SIG_DFL);"
                                  " os.kill(os.getpid(), signal.SIGINT)"])
-        self.assertEqual(MOD.wait_foreground(proc), 130)
+        self.assertEqual(FOREGROUND.wait_foreground(proc), 130)
 
     def test_say_survives_a_dead_stderr(self):
         """The unwind's own prints must not become a second failure: by teardown time
@@ -1230,7 +1231,7 @@ class InterruptSideEffectTest(_FakeToolsCase):
         saved, devnull = os.dup(2), os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 2)                          # the guard acknowledges on fd 2
         try:
-            with MOD._deferred_interrupts():
+            with FOREGROUND._deferred_interrupts():
                 os.kill(os.getpid(), signal.SIGINT)  # bare, this raises KeyboardInterrupt
                 time.sleep(0.05)                     # give the handler its bytecode edge
         finally:

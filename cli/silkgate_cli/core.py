@@ -33,7 +33,7 @@ TIER1_PROBE_TARGET = "1.1.1.1:443"   # must be a live public service: the probe 
 
 import rule_engine
 
-from . import console, git, paths, profile
+from . import console, foreground, git, paths, profile
 
 
 # --- host processes ----------------------------------------------------------
@@ -153,7 +153,7 @@ def _wait_proxy_ready(proc, ports, log_path):
         if proc.poll() is not None:
             console.die(f"proxy exited at startup — {log_path}:\n{console.tail(log_path)}")
         if _BIND_FAILURE in log_path.read_bytes().lower():
-            stop(proc)
+            foreground.stop(proc)
             console.die(f"proxy failed to bind — {log_path}:\n{console.tail(log_path)}")
         try:
             for port in ports:
@@ -164,7 +164,7 @@ def _wait_proxy_ready(proc, ports, log_path):
         except OSError:
             pass
         if time.monotonic() >= deadline:
-            stop(proc)
+            foreground.stop(proc)
             console.die(f"proxy did not answer at {addr[0]}:{addr[1]} within "
                         f"{PROXY_READY_TIMEOUT}s — {log_path}:\n{console.tail(log_path)}")
         time.sleep(0.2)
@@ -270,94 +270,9 @@ def start_proxy(rules_text, port):
     try:
         _wait_proxy_ready(proc, [port], log_path)
     except BaseException:       # incl. a Ctrl-C mid-wait: the caller has no handle on
-        stop(proc)              # the child yet, so an exit here is the last chance to
+        foreground.stop(proc)   # the child yet, so an exit here is the last chance to
         raise                   # stop it (stop is a no-op where the wait already did)
     return proc, log_path
-
-
-def stop(proc):
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
-
-class _guarded_terminal:
-    """Restore this terminal's settings afterwards, whatever the child did to them.
-
-    A child may put the terminal in raw mode (msb does), and one that dies without restoring
-    it leaves the shell mangled until `stty sane`. So: snapshot before, restore after. Does
-    nothing when stdout isn't a terminal.
-    """
-
-    def __enter__(self):
-        self.saved = None
-        try:
-            if sys.stdout.isatty():
-                self.saved = termios.tcgetattr(sys.stdout)
-        except (OSError, termios.error):
-            pass
-        return self
-
-    def __exit__(self, *exc):
-        if self.saved is not None:
-            try:
-                termios.tcsetattr(sys.stdout, termios.TCSADRAIN, self.saved)
-            except (OSError, termios.error):
-                pass
-        return False
-
-
-def wait_foreground(proc):
-    """Wait for a child that owns the terminal. Ctrl-C reaches it directly, so the parent
-    survives SIGINT to clean up. A Python handler isn't inherited across exec, so the child's
-    SIGINT behavior is untouched. A signal death returns 128 plus the signal, as a shell
-    would, since sys.exit mangles proc.wait()'s negative code."""
-    previous = signal.signal(signal.SIGINT, lambda *a: None)
-    try:
-        rc = proc.wait()
-        return rc if rc >= 0 else 128 - rc
-    finally:
-        signal.signal(signal.SIGINT, previous)
-
-
-class _deferred_interrupts:
-    """Hold SIGINT/SIGTERM/SIGHUP while an unwind runs, restoring them after.
-
-    A second Ctrl-C mid-teardown would leave a session half-removed, worse than up or
-    gone. So stop signals are acknowledged once on stderr and dropped: the unwind already
-    does what they ask. That's safe only because everything under it is bounded: the msb
-    calls in _remove_sandbox time out and run outside the terminal's process group, and
-    stop_proxy escalates to SIGKILL after 5 s. The note uses os.write, because print into a
-    buffer mid-flush raises."""
-
-    _SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
-
-    def __enter__(self):
-        self._noted = False
-        self._prev = []
-
-        def hold(signum, frame):
-            if not self._noted:
-                self._noted = True
-                try:
-                    os.write(2, console._ERR_TAG + b"silkgate: interrupt noted "
-                                b"- finishing cleanup first (it is bounded)\n")
-                except OSError:
-                    pass
-        try:
-            for s in self._SIGNALS:
-                self._prev.append((s, signal.signal(s, hold)))
-        except ValueError:           # not the main thread: nothing can be deferred
-            pass
-        return self
-
-    def __exit__(self, *exc):
-        for s, previous in self._prev:
-            signal.signal(s, previous)
-        return False
 
 
 def msb_argv(image, cmd, port, *, pull_never=True, mounts=()):
@@ -1146,7 +1061,7 @@ def start_shared_proxy(base_port, ports=None):
         _wait_proxy_ready(proc, ports, log_path)
         _write_json(paths.PROXY_JSON, meta)
     except BaseException:       # incl. a Ctrl-C mid-wait: until proxy.json lands, no
-        stop(proc)              # other command can ever find this mitmdump to stop
+        foreground.stop(proc)   # other command can ever find this mitmdump to stop
         raise                   # it (stop is a no-op where the wait already did)
     return meta
 
@@ -1198,7 +1113,7 @@ def _ensure_proxy_locked(base_port):
                         f"{paths.PROXY_JSON} is gone — kill that process and retry")
         if ident and meta.get("pid") != ident:
             meta["pid"] = ident                # proxy.json outlived the proxy it described;
-            _write_json(paths.PROXY_JSON, meta)      # the socket's owner is the identity
+            _write_json(paths.PROXY_JSON, meta)  # the socket's owner is the identity
         return meta
     pinned = _pinned_pool(meta)                # read while the stale record still exists
     if meta:                                   # record of a proxy that no longer answers
@@ -1659,12 +1574,12 @@ def run_guest(build_argv, cmd, *, tty, on_line=None, exec_id=None):
             # what lets an interrupted TUI leave that terminal in raw mode, so the
             # settings are guarded, and an exit mid-wait (SIGTERM, SIGHUP) stops the
             # child instead of orphaning it against a sandbox about to be removed.
-            with _guarded_terminal():
+            with foreground._guarded_terminal():
                 proc = subprocess.Popen(build_argv(cmd))
                 try:
-                    return wait_foreground(proc)
+                    return foreground.wait_foreground(proc)
                 finally:
-                    stop(proc)
+                    foreground.stop(proc)
         return _pty_relay(build_argv(cmd), demux=False, on_line=on_line)
     return _pty_relay(build_argv(["sh", "-c", marker + _RELAY_SH, "_"] + list(cmd)),
                       demux=True, on_line=on_line)
@@ -1710,11 +1625,11 @@ def _pty_relay(argv, *, demux, on_line=None):
                 _relay(line, newline=True, on_line=on_line)
         if buf:
             _relay(buf, newline=False, on_line=on_line)
-        return wait_foreground(proc)
+        return foreground.wait_foreground(proc)
     finally:
         os.close(ptm)
         if proc is not None:
-            stop(proc)                                  # reaped already on the clean path
+            foreground.stop(proc)                       # reaped already on the clean path
         signal.signal(signal.SIGINT, previous)
 
 
@@ -1919,7 +1834,7 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
                                           cpus=cpus)).returncode:
             console.die(f"msb create failed for session {name!r}")
     except BaseException:                                # incl. SystemExit from die()
-        with _deferred_interrupts():                     # a Ctrl-C cannot halve the unwind
+        with foreground._deferred_interrupts():          # a Ctrl-C cannot halve the unwind
             if created:                                  # failed or cut short, a create
                 _remove_sandbox(sandbox_name(name))      # can still have registered it
             shutil.rmtree(tmp, ignore_errors=True)
@@ -2100,7 +2015,7 @@ def _maybe_stop_proxy():
 
 def cmd_build(args):
     profiles = profile.resolve_profiles(args.with_ or [])
-    profile.load_ruleset(profile.compose_rules(profiles))   # bad rules fail before a long build
+    profile.load_ruleset(profile.compose_rules(profiles))  # bad rules fail before a long build
     console.preflight(*console._build_tools())              # every missing tool, pre-docker
     ref = build_image(profiles, base=args.base, platform_=args.platform)
     console.say(f"loaded {ref} into msb")
@@ -2132,7 +2047,7 @@ def _profile_block(prof, width):
         header.append(prof.version)
     if prof.arg_pattern:
         header.append(f"arg: {prof.arg_pattern}")
-    if prof.name in profile._VERIFY_ONLY:               # listed like the rest, usable unlike them
+    if prof.name in profile._VERIFY_ONLY:       # listed like the rest, usable unlike them
         header.append("(silkgate verify only — refused with run/up/build/proxy)")
     lines = [" ".join(header)]
     desc = prof.conf.get("description", "")
@@ -2207,9 +2122,9 @@ def cmd_proxy(args):
     argv = [mitmdump, "-s", str(paths.ADDON), "--set", "rawtcp=false"] + _modes(args.port)
     proc = subprocess.Popen(argv, env=env)
     try:
-        sys.exit(wait_foreground(proc))
+        sys.exit(foreground.wait_foreground(proc))
     finally:
-        stop(proc)
+        foreground.stop(proc)
 
 
 def _strip_cmd_sep(cmd):
@@ -2272,7 +2187,7 @@ def cmd_run(args):
         provisioned = True
         fault = tier1_fault(sandbox_name(name), port)
         if fault:
-            console.die(fault)                      # the finally below tears the session down
+            console.die(fault)              # the finally below tears the session down
         if args.branch:
             git._setup_branch_guest(sandbox_name(name), args.branch, spec["base"], name)
             branch_ready = True
@@ -2290,7 +2205,7 @@ def cmd_run(args):
     finally:
         # One-shot means one-shot even interrupted: the unwind runs with the stop
         # signals deferred, so a second Ctrl-C cannot leave the session half-removed.
-        with _deferred_interrupts():
+        with foreground._deferred_interrupts():
             if provisioned:
                 meta = read_meta(name) or {"name": name, "sandbox": sandbox_name(name),
                                            **(spec or {}), **({"workspace": ws} if ws else {})}
@@ -2582,7 +2497,7 @@ def cmd_up(args):
         # A session `up` never handed over is removed whole, interrupt included: nothing
         # of the user's is in it yet, and one left behind would hide the failure. Stop
         # signals are deferred, so a second Ctrl-C can't leave it half-removed.
-        with _deferred_interrupts():
+        with foreground._deferred_interrupts():
             if provisioned:
                 # A session never handed over leaves nothing worth archiving.
                 _teardown_session(read_meta(name) or
@@ -2644,7 +2559,7 @@ def _down_session(meta):
     Harvest first, since the guest's gitdir dies with the VM. A retried down harvests
     again, a no-op without new commits. Returns True if a failed harvest kept the
     workspace. Stop signals are deferred during removal (a no-op off the main thread)."""
-    with _deferred_interrupts():
+    with foreground._deferred_interrupts():
         keep = bool(meta.get("branch")) and not git._harvest_branch(meta)
         _teardown_session(meta)
         if meta.get("branch") and not keep:
@@ -2788,7 +2703,7 @@ def cmd_secret_set(args):
         console.die("shared proxy not running — start a session first (silkgate up)")
     _sock_call({"op": "set_secret", "name": name.lower(), "value": value,
                 "session": args.session})
-    console.say(f"secret {name.lower()} set for session {args.session}")   # value never printed
+    console.say(f"secret {name.lower()} set for session {args.session}")  # value never printed
 
 
 def cmd_secret_ls(args):

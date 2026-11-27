@@ -9,7 +9,7 @@ import threading
 import time
 from uuid import uuid4
 
-from . import console, core, paths, profile
+from . import console, core, foreground, paths, profile
 
 
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
@@ -207,7 +207,7 @@ def _create_verify_guest(sandbox, port, *, mounts=(), leaky=False, why=""):
     reads as a hang. `leaky` is the negative control's guest — the same guest, egress open."""
     argv = _verify_msb_argv(sandbox, port, mounts=mounts)
     if subprocess.run(_leaky_argv(argv) if leaky else argv).returncode:
-        core._remove_sandbox(sandbox)              # a failed create can still register the name
+        core._remove_sandbox(sandbox)         # a failed create can still register the name
         console.die(f"msb create failed for verify guest {sandbox} (see msb's output above){why}")
 
 
@@ -971,7 +971,7 @@ def cmd_verify(args):
         proxy, log_path = core.start_proxy(rules_text, args.port)
         console.say(f"proxy :{args.port} · audit: tail -f {log_path}")
         guest = _verify_guest_name("main")
-        with core._guarded_terminal():
+        with foreground._guarded_terminal():
             _create_verify_guest(guest, args.port, mounts=mounts)
             guests.add(guest)
             if oracles:
@@ -1017,7 +1017,7 @@ def cmd_verify(args):
                         "allow, "
                         "the setting that actually opens egress")
             leaky_lines = []
-            with core._guarded_terminal():
+            with foreground._guarded_terminal():
                 _create_verify_guest(leaky, args.port, mounts=mounts, leaky=True,
                                      why=" — the control did not run, so this verify says "
                                          "nothing about whether its checks can fail")
@@ -1049,7 +1049,7 @@ def cmd_verify(args):
                     + ")")
     finally:
         if proxy is not None:
-            core.stop(proxy)
+            foreground.stop(proxy)
         if oracles:
             oracles.close()
         for name in sorted(guests):
