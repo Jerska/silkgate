@@ -2397,13 +2397,16 @@ def _prune_archive():
         except OSError:                              # vanished mid-scan: already gone
             continue
     stamped.sort(reverse=True)
+    pruned = 0
     for mtime, d in stamped[ARCHIVE_RETAIN_COUNT:]:
         if mtime >= cutoff:
             continue
         shutil.rmtree(d, ignore_errors=True)
-        say(f"pruned archived session {d.name} — older than {days:g}d and beyond the "
-            f"newest {ARCHIVE_RETAIN_COUNT} (SILKGATE_ARCHIVE_RETAIN_DAYS=0 keeps "
-            "everything)")
+        pruned += not d.exists()
+    if pruned:
+        say(f"pruned {pruned} archived session(s) older than {days:g}d from {ARCHIVE_DIR} "
+            f"(the {ARCHIVE_RETAIN_COUNT} newest always stay; SILKGATE_ARCHIVE_RETAIN_DAYS=0 "
+            "keeps everything)")
 
 
 def _teardown_session(meta, archive=True):

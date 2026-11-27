@@ -443,8 +443,8 @@ class TestPruneArchive(JournalCase):
         kept = [d for d in dirs if d.exists()]
         self.assertEqual(len(kept), sg.ARCHIVE_RETAIN_COUNT)
         self.assertEqual(set(kept), set(newest_first[:sg.ARCHIVE_RETAIN_COUNT]))
-        self.assertEqual(err.getvalue().count("pruned archived session"), 5,
-                         "every removal is announced")
+        self.assertEqual(err.getvalue().count("pruned "), 1, "one summary line")
+        self.assertIn("pruned 5 archived session(s)", err.getvalue())
 
     def test_age_alone_never_prunes(self):
         for i in range(5):
