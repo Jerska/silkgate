@@ -455,6 +455,7 @@ def _listen_port(flow):
         return None
 
 
+# The record fields are mirrored in doc/PROXY.md (The audit trail). Update both.
 def _audit(decision, flow, reason="", session=None, **extra):
     """One JSON object per line.
 

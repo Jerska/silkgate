@@ -66,6 +66,7 @@ its self-tests.
 **By default a rule allows GET only, with no body, no query params, and baseline headers.
 Each option widens one of those.**
 
+<!-- Mirrors the Options list in mitmaddon/rule_engine.py's docstring. Update both. -->
 | Option | Allows | Default |
 |---|---|---|
 | `GET POST …` | these methods | GET |
@@ -85,6 +86,7 @@ Each option widens one of those.**
 **A header goes through only if the baseline or an `h:` option allows it, and its value
 matches.**
 
+<!-- Mirrors _BASELINE_SPECS in mitmaddon/rule_engine.py. Update both. -->
 | Baseline header | Allowed value |
 |---|---|
 | `host` | a hostname and optional port, ≤ 253 chars |

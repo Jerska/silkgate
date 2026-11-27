@@ -36,6 +36,7 @@ Pinned by: `test/test_scripts.py` (the copy matches `profiles/`).
 
 **`profile.conf` is `key = value` lines. `#` starts a comment.**
 
+<!-- Mirrors the keys Profile.__init__ reads in cli/silkgate. Update both. -->
 | Key | Meaning | Example |
 |---|---|---|
 | `description` | one line for `silkgate profiles` | `Node.js, from the official pinned tarball` |

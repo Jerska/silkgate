@@ -10,7 +10,7 @@ Path globs (after the first '/'):    *  -> [^/]+   **  -> .*
 A pattern with no '/' matches any path. No ':<port>' means 80 and 443 only;
 ':*' means any port; ':N[,M...]' means exactly those ports.
 
-Options (space-separated, after the pattern):
+Options (space-separated, after the pattern), mirrored in doc/DSL.md (Options):
     GET POST ...        allowed methods                    (default: GET only)
     max_body=<size>     permit a request body up to <size> (default: none; bytes, k/m suffix)
     q:*                 allow all query params             (default: stripped)
@@ -190,6 +190,7 @@ def _parse_ports(spec):
 
 # Default header policy: name -> constraint. ("any",) | ("exact", v) | ("re", compiled)
 # fullmatch semantics for "re". Values are capped to shrink the residual channel.
+# Mirrored in doc/DSL.md (Headers). Update both.
 _BASELINE_SPECS = {
     # The minimal structural baseline. `host` is the already-allowed destination.
     # content-type and content-length frame bodies, and so does transfer-encoding: dropping

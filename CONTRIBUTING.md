@@ -82,7 +82,9 @@ code blocks, identifiers, paths, or quoted messages.
 - Give each document one audience, in one line under the title: "Read this to …".
 - Give each section one topic. Split a section that does two things. Move reference detail
   into its own file and link to it.
-- State each fact once. Elsewhere, link to it.
+- State each fact once. Elsewhere, link to it. A doc table that copies code gets a
+  `<!-- Mirrors X in file. Update both. -->` comment, and the code a matching
+  `Mirrored in doc.md` comment.
 - Use the glossary terms from [ARCHITECTURE](doc/ARCHITECTURE.md#glossary) as defined:
   guest, session, profile, Tier 1, Tier 2.
 - Lists and tables may use fragments. Paragraphs use full sentences.

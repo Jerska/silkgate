@@ -71,6 +71,7 @@ silkgate verify --full                       # also installs probe tools through
 silkgate verify --full --negative-control    # adds a leaky guest that must fail
 ```
 
+<!-- Mirrors the CHECK lines in test/verify_guest.sh. Update both. -->
 - No TCP, UDP, DNS over either transport, IPv6, or ICMP got out. Neither did a new route, a
   new address, or the host's other ports.
 - A blocked probe passes only on an answer from the boundary, never on silence. A refusal

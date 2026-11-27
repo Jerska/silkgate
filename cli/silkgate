@@ -47,6 +47,7 @@ GUEST_BRIEF = "/silkgate/BRIEF.md"            # where --brief lands the operator
 GUEST_EXECS = "/silkgate/execs"               # one pidfile per exec, <exec_id>.pid
 PROXY_JSON = SILK_DIR / "proxy.json"          # shared-proxy meta (pid/ports/log/sock)
 PROXY_SOCK = SILK_DIR / "proxy.sock"          # control socket (line-delimited JSON)
+# Mirrored in doc/PROXY.md (The port pool). Update both.
 POOL_SIZE = 16                                 # base_port .. base_port+15
 DEFAULT_BASE_PORT = 8090
 PROXY_ALIAS = "host.microsandbox.internal"   # resolves via the guest's /etc/hosts
@@ -202,6 +203,7 @@ class Profile:
                  "env", "context", "packages", "guest_credentials")
 
     def __init__(self, name, version=None, arg=None):
+        # The keys read here are mirrored in doc/PROFILES.md (profile.conf keys). Update both.
         self.name, self.dir = name, PROFILE_DIR / name
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) or not self.dir.is_dir():
             avail = ", ".join(sorted(p.name for p in PROFILE_DIR.iterdir() if p.is_dir()))
@@ -568,6 +570,7 @@ def _wait_proxy_ready(proc, ports, log_path):
 # pruning favors keeping: a file goes only when it's BOTH older than the retention age AND
 # beyond the newest LOG_RETAIN_COUNT of its kind. Every removal is announced, and
 # SILKGATE_LOG_RETAIN_DAYS=0 keeps everything.
+# Mirrored with ARCHIVE_RETAIN_* in doc/PROXY.md (Retention). Update both.
 LOG_RETAIN_DAYS = 30
 LOG_RETAIN_COUNT = 20
 # Capture files hold conversation content — bulkier and more sensitive than audit
@@ -2112,6 +2115,7 @@ def _relay(line, *, newline, on_line=None):
 # Mounts are the only host paths a guest ever sees. Even read-only access to home,
 # silkgate's own state, or the checkout this CLI runs from exposes credentials and
 # configuration — so the guard applies regardless of the mount mode.
+# This, _RESERVED_DSTS, and _mount_args are mirrored in README.md (Mounts). Update both.
 def _forbidden_mounts():
     return ((Path.home(), "your home directory"),
             (SILK_DIR, "silkgate's own state (session rulesets, the control socket, the CA)"),
@@ -2339,6 +2343,7 @@ def _remove_sandbox(sandbox):
 # bytes (enforced before the write), so a chatty guest can't balloon it. The defaults hold a
 # full agent transcript, and ARCHIVE_RETAIN_COUNT snapshots cost at most ~400 MiB. Each knob
 # takes a positive integer. Anything else keeps the default.
+# Mirrored in doc/PROXY.md (The archive). Update both.
 _SNAPSHOT_TAIL_LINES = 20000     # SILKGATE_SNAPSHOT_TAIL_LINES
 _SNAPSHOT_MAX_BYTES = 8 << 20    # SILKGATE_SNAPSHOT_MAX_BYTES
 
@@ -4557,6 +4562,7 @@ def _ui_server(port):
                 with _DIFF_LOCK:
                     _DIFF_BUSY.discard(ident)
 
+        # This and _kill are mirrored in README.md (Audit UI). Update both.
         def _control(self, ident, action):
             meta, state, _ = _resolve_ident(ident)
             if meta is None:
@@ -5762,6 +5768,7 @@ class _MarkedParser(argparse.ArgumentParser):
         self.exit(2, f"{self.format_usage()}{self.prog}: error: {message}\n")
 
 
+# The run, up, and exec options are mirrored in README.md (More flags). Update both.
 def main():
     ap = _MarkedParser(prog="silkgate", description=__doc__,
                        formatter_class=argparse.RawDescriptionHelpFormatter)

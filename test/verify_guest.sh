@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Tier 1 verification — run as ROOT INSIDE the microsandbox guest (Debian + bash).
 #
+# The checks are summarized in doc/THREAT-MODEL.md (Verified live). Update both.
+#
 # EVERY VERDICT NEEDS AN ANSWER. On the allow side, check 0 requires the proxy's own 403,
 # not just a connect. On the deny side, `tcp()` keeps the errno: "the boundary refused" and
 # "the guest never sent a packet" are both rc=1, and only the first proves containment.
