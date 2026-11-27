@@ -27,7 +27,8 @@ import clipkg
 REPO = Path(__file__).resolve().parent.parent
 
 
-sg = clipkg.load("sg_cli_validation").core
+pkg = clipkg.load("sg_cli_validation")
+sg = pkg.core
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-tests-"))
@@ -80,7 +81,7 @@ class CliCase(unittest.TestCase):
         err = io.StringIO()
         with mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
-            sg.main()
+            pkg.main.main()
         self.assertEqual(caught.exception.code, 2)          # argparse usage error
         self.assertIn(needle, err.getvalue())
         self.assertIn(flag, err.getvalue())                 # the message names the flag
@@ -120,7 +121,7 @@ class CliCase(unittest.TestCase):
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:
-            sg.main()
+            pkg.main.main()
         self.assertEqual(caught.exception.code, 42, argv)
         return seen
 
@@ -167,9 +168,9 @@ class TestBuildArguments(CliCase):
                           ["up", "--image=silkgate/x:1\nRUN echo INJECTED"])
 
     def test_valid_spec_survives_parsing(self):
-        self.assertEqual(sg._with_arg("node@22.11.0"), "node@22.11.0")
-        self.assertEqual(sg._with_arg("claude"), "claude")
-        self.assertEqual(sg._image_arg(sg.BASE_IMAGE), sg.BASE_IMAGE)
+        self.assertEqual(pkg.main._with_arg("node@22.11.0"), "node@22.11.0")
+        self.assertEqual(pkg.main._with_arg("claude"), "claude")
+        self.assertEqual(pkg.main._image_arg(sg.BASE_IMAGE), sg.BASE_IMAGE)
 
 
 class TestBaseFlag(CliCase):
@@ -190,7 +191,7 @@ class TestBaseFlag(CliCase):
                     mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                     contextlib.redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit) as caught:
-                sg.main()
+                pkg.main.main()
             self.assertEqual(caught.exception.code, 42, argv)
             self.assertEqual(seen["base"], "example.com/alt:9", argv)
 
@@ -203,7 +204,7 @@ class TestBaseFlag(CliCase):
         with self.no_preflight(), \
                 mock.patch.object(sys, "argv", ["silkgate", "run", "--image", "img:1",
                                                 "--base", "example.com/alt:9", "--", "true"]):
-            self.refuses("--image and --base", sg.main)
+            self.refuses("--image and --base", pkg.main.main)
 
 
 class TestImageRef(CliCase):
@@ -449,7 +450,7 @@ class TestMountGuards(CliCase):
                     mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                     contextlib.redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit) as caught:
-                sg.main()
+                pkg.main.main()
             self.assertEqual(caught.exception.code, 42, argv)
             self.assertEqual(seen["specs"], [spec], argv)
             self.assertTrue(seen["flag"], argv)
@@ -1143,7 +1144,7 @@ class TestPreflight(CliCase):
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:
-            sg.main()
+            pkg.main.main()
         self.assertEqual(caught.exception.code, 42, argv)
         return set(seen)
 
@@ -1182,7 +1183,7 @@ class TestPreflight(CliCase):
                 mock.patch.object(sg, "MITM_CA", self.tmp / "absent-ca.pem"), \
                 mock.patch.object(sys, "argv", ["silkgate", "run", "--", "true"]), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
-            sg.main()
+            pkg.main.main()
         self.assertEqual(caught.exception.code, 1)
         # A plain run's toolchain — git is hinted too, but only --checkout/--branch demand it.
         for binary in ("docker", "msb", "mitmdump"):
@@ -1239,7 +1240,7 @@ class TestPreflight(CliCase):
         with self.path_holding(), \
                 mock.patch.object(sys, "argv",
                                   ["silkgate", "exec", "lazy1", "--no-tty", "--", "true"]):
-            message = self.refuses("msb not found", sg.main)
+            message = self.refuses("msb not found", pkg.main.main)
         self.assertIn(sg._TOOL_HINTS["msb"], message)
 
 
@@ -1349,7 +1350,7 @@ class GitRepoCase(CliCase):
 
     def argv_refuses(self, needle, argv):
         with mock.patch.object(sys, "argv", ["silkgate"] + argv), self.no_preflight():
-            return self.refuses(needle, sg.main)
+            return self.refuses(needle, pkg.main.main)
 
     def git_profile(self):
         import types
@@ -1394,7 +1395,7 @@ class TestRunName(GitRepoCase):
         with mock.patch.object(sg, "preflight", preflight), \
                 mock.patch.object(sys, "argv",
                                   ["silkgate", "run", "--name", "a b", "--", "true"]):
-            self.refuses("invalid session name", sg.main)
+            self.refuses("invalid session name", pkg.main.main)
         preflight.assert_not_called()
 
     def test_live_session_name_is_refused(self):
@@ -1436,7 +1437,7 @@ class TestBranchGuards(GitRepoCase):
                 mock.patch.object(sg, "_branch_workspace", spy), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.no_preflight(), self.assertRaises(SystemExit) as caught:
-            sg.main()
+            pkg.main.main()
         self.assertEqual(caught.exception.code, 42)
 
     def test_branch_needs_the_git_profile(self):
@@ -1615,7 +1616,7 @@ class TestBranchGuards(GitRepoCase):
                     mock.patch.object(sg, "_branch_spec", lambda *a: fake_spec), \
                     mock.patch.object(sg, "_branch_workspace", spy), \
                     self.no_preflight(), self.assertRaises(SystemExit) as caught:
-                sg.main()
+                pkg.main.main()
             self.assertEqual(caught.exception.code, 42, argv[0])
             self.assertEqual(seen["spec"], fake_spec)
             self.assertTrue(seen["name"] == "w1" if argv[0] == "up"
@@ -1671,7 +1672,7 @@ class TestHarvestWiring(CliCase):
                 mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(sg, "say", lambda *a, **k: None), \
                 self.assertRaises(SystemExit) as caught:
-            sg.main()
+            pkg.main.main()
         return caught.exception.code, calls, seen.get("meta")
 
     def test_run_harvests_from_the_launch_spec_when_meta_vanishes(self):
@@ -1719,7 +1720,7 @@ class TestHarvestWiring(CliCase):
                 mock.patch.object(sg, "stop_proxy", lambda *a, **k: None), \
                 mock.patch.object(sg, "say", lambda *a, **k: None):
             try:
-                sg.main()
+                pkg.main.main()
             except SystemExit as caught:
                 return caught.code, calls
         return None, calls
@@ -1777,7 +1778,7 @@ class TestCheckoutSessions(GitRepoCase):
                     mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                     contextlib.redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit) as caught:
-                sg.main()
+                pkg.main.main()
             self.assertEqual(caught.exception.code, 42, argv)
             self.assertIn("git", seen, argv)
 
@@ -1863,7 +1864,7 @@ class TestCheckoutSessions(GitRepoCase):
             with mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                     mock.patch.object(sg, "_branch_spec", spy), \
                     self.no_preflight(), self.assertRaises(SystemExit) as caught:
-                sg.main()
+                pkg.main.main()
             self.assertEqual(caught.exception.code, 42, argv)
             self.assertEqual((seen["branch"], seen["ref"]), ("nb", ref), argv)
 
@@ -2277,7 +2278,7 @@ class TestMemoryFlag(CliCase):
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:
-            sg.main()
+            pkg.main.main()
         self.assertEqual(caught.exception.code, 42, argv)
         return seen["argv"]
 
@@ -2308,7 +2309,7 @@ class TestMemoryFlag(CliCase):
 
     def test_the_shape_msb_documents_survives_parsing(self):
         for size in ("512M", "1G", "8G", "16384M"):
-            self.assertEqual(sg._memory_arg(size), size)
+            self.assertEqual(pkg.main._memory_arg(size), size)
 
     def test_a_malformed_size_dies_at_the_command_line(self):
         # Exit code 2 is argparse's, raised while parsing — structurally before any
@@ -2369,7 +2370,7 @@ class TestCpusFlag(CliCase):
 
     def test_a_positive_integer_survives_parsing(self):
         for count in ("1", "2", "8", "16"):
-            self.assertEqual(sg._cpus_arg(count), count)
+            self.assertEqual(pkg.main._cpus_arg(count), count)
 
     def test_a_malformed_count_dies_at_the_command_line(self):
         # Exit code 2 is argparse's, raised while parsing — structurally before any

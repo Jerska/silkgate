@@ -30,7 +30,8 @@ import clipkg
 REPO = Path(__file__).resolve().parent.parent
 
 
-sg = clipkg.load("sg_cli_journal").core
+pkg = clipkg.load("sg_cli_journal")
+sg = pkg.core
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-journal-tests-"))
@@ -554,7 +555,7 @@ class TestMetaAdditions(JournalCase):
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:
-            sg.main()
+            pkg.main.main()
         self.assertEqual(caught.exception.code, 42, argv)
         return seen
 
@@ -766,7 +767,7 @@ class TestExecBrief(JournalCase):
                                    "--no-tty", "--", "true"]), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:
-            sg.main()
+            pkg.main.main()
         self.assertEqual(caught.exception.code, 0)
         sdirs = [d for d in sg.SESSIONS_DIR.iterdir() if not d.name.startswith(".")]
         self.assertEqual(len(sdirs), 1)

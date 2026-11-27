@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # The silkgate command. The code is the silkgate_cli package beside this file, and --help
-# prints the docstring of silkgate_cli/core.py.
+# prints the docstring of silkgate_cli/main.py.
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from silkgate_cli import core
+from silkgate_cli import main
 
-core.main()
+main.main()

@@ -26,7 +26,8 @@ import clipkg
 REPO = Path(__file__).resolve().parent.parent
 
 
-sg = clipkg.load("sg_cli_settings").core
+pkg = clipkg.load("sg_cli_settings")
+sg = pkg.core
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-settings-tests-"))
@@ -251,7 +252,7 @@ class TestRunUpWiring(SettingsCase):
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:
-            sg.main()
+            pkg.main.main()
         self.assertEqual(caught.exception.code, 42, argv)
         return seen
 
