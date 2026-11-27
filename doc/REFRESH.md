@@ -27,6 +27,7 @@ Every `setup.sh` fails the build when the installed version misses its pin.
 | `install.sh` takes a version argument | `profiles/claude/setup.sh` | the build's version check |
 | `curl libgcc-s1 libstdc++6 ripgrep` are the binary's runtime needs | `profiles/claude/profile.conf` | `ldd` on the binary in a fresh image |
 | a plain `claude -p` reads `context_path`, `--bare` doesn't | `profiles/claude/profile.conf` | ask a guest `claude -p` about its context, then `--bare` |
+| `/root/.claude.json` keys `hasCompletedOnboarding`, `lastOnboardingVersion`, `bypassPermissionsModeAccepted`, and `projects./workspace.hasTrustDialogAccepted` skip first-run prompts | `profiles/claude/setup.sh` | `run --tty --with claude -- silkgate-claude`: it opens on the prompt, not a theme picker or a bypass warning |
 | `IS_SANDBOX=1` lets root use `bypassPermissions` | `profiles/claude/setup.sh` | run `silkgate-claude` in a guest: no refusal. Plain `claude --permission-mode bypassPermissions` refuses. |
 | the switches in the env file (`DISABLE_AUTOUPDATER`, …) | `profiles/claude/env` | check each name in the settings docs, and watch the audit log for new hosts |
 | the `nodejs.org/dist` tarball layout | `profiles/node/setup.sh` | the build's version check |

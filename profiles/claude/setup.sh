@@ -5,6 +5,15 @@ curl -fsSL https://claude.ai/install.sh | bash -s "$VERSION"
 case "$(claude --version)" in "$VERSION"|"$VERSION "*) ;; *) claude --version >&2; exit 1 ;; esac
 install -d /root/.claude
 
+# Claude Code's first-run state, so an interactive session opens on its prompt: no theme
+# picker, no trust dialog for /workspace, and no bypass-mode confirmation, since the VM is
+# the boundary that confirmation warns about.
+cat > /root/.claude.json <<EOF
+{"hasCompletedOnboarding": true, "lastOnboardingVersion": "$VERSION",
+ "bypassPermissionsModeAccepted": true,
+ "projects": {"/workspace": {"hasTrustDialogAccepted": true}}}
+EOF
+
 # A sandbox-flavoured entry point. The flags it adds are the ones that are always right in
 # here and easy to forget, so a caller writes `silkgate-claude -p "…"` and the approval
 # prompt a human reads stays short. It adds nothing the caller already passed, and prints
