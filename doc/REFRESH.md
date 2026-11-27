@@ -1,159 +1,145 @@
 # Refresh registry
 
-Read this to find the facts in this tree that rot with time, and the check that catches
-each one.
+Read this to find the facts here that go stale on someone else's schedule, and the check
+for each.
 
-Every entry is a fact an external party owns: a version, a price, a model id, a URL, a
-measurement, or another system's behavior. None of them is a defect.
-Each goes stale on somebody else's schedule, and its check is how this repository finds
-out. When a check fails, fix the fact and every copy that [Cross-file
-pairs](#cross-file-pairs) names for it. This registry names files and identifiers, not
-line numbers — line numbers rot faster than the facts they point at.
+Each row is a fact an outside party owns: a version, a price, a URL, another system's
+behavior. When a check fails, fix the fact, and every copy [Cross-file
+pairs](#cross-file-pairs) lists. Rows name files and identifiers, never line numbers.
 
 ## Profile pins
 
-**Each profile pins one upstream version, and the pin ages on that upstream's release
-schedule.** The pins, and the check for each:
+**Each profile pins one upstream version.**
 
 | Pin | Where | Check |
 |---|---|---|
-| Claude Code `2.1.330` | `default_version` in [`profiles/claude/profile.conf`](../profiles/claude/profile.conf) | Compare `npm view @anthropic-ai/claude-code version` to the pin. Claude Code releases near-daily, so this pin ages fastest. |
-| node `22.23.5` | `default_version` in [`profiles/node/profile.conf`](../profiles/node/profile.conf), echoed by examples in the sandboxed-agent skill | Compare to the latest 22.x on the Node release schedule. Diff every `@x.y.z` in the skill against the profile. Node 22 reaches end of life in 2027. |
-| python `3.12.16` | `default_version` in [`profiles/python/profile.conf`](../profiles/python/profile.conf) | Compare to the latest 3.12.x security release. The image build asserts the interpreter version against the pin. |
-| uv `0.13.9` | `UV_VERSION` in [`profiles/python/setup.sh`](../profiles/python/setup.sh) | Compare to the latest uv release. The image build asserts `uv --version`. |
+| Claude Code `2.1.330` | `profiles/claude/profile.conf` | `npm view @anthropic-ai/claude-code version`. It releases almost daily. |
+| node `22.23.5` | `profiles/node/profile.conf` | the latest 22.x. Node 22 reaches end of life in 2027. |
+| python `3.12.16` | `profiles/python/profile.conf` | the latest 3.12.x security release |
+| uv `0.13.9` | `UV_VERSION` in `profiles/python/setup.sh` | the latest uv release |
 
-**A pin bump can also break the install contract around the pin, so each contract has
-its own check.** These facts belong to the upstream vendor, not to this repository:
+Every `setup.sh` fails the build when the installed version misses its pin.
 
-| Contract | Where | Check |
+**A bump can also break what surrounds the pin.**
+
+| Contract | Where | Check on a bump |
 |---|---|---|
-| The installer at `https://claude.ai/install.sh` accepts a pinned version argument | `profiles/claude/setup.sh` | The image build asserts `claude --version` against the pin. |
-| `packages = curl libgcc-s1 libstdc++6 ripgrep` are the native binary's runtime needs | `profiles/claude/profile.conf` | After a bump, run `ldd` on the binary in a fresh image. |
-| `context_path` is read on a plain `claude -p` and not under `--bare` | `profiles/claude/profile.conf` | On a bump, check that a guest `claude -p` reads the file and `--bare` does not. |
-| `--permission-mode bypassPermissions` exists, and `IS_SANDBOX=1` lifts the refusal to bypass permissions as root | `profiles/claude/setup.sh` | On a bump, run the wrapper as root in a guest and expect no refusal. |
-| The Claude Code switches in the env file (`DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, …) | `profiles/claude/env` | On a bump, check each name against the settings documentation, and watch the audit log for new hosts. |
-| The node tarball URL layout under `nodejs.org/dist` | `profiles/node/setup.sh` | The build asserts `node --version` against the pin. |
-| The Debian mirrors `deb.debian.org` and `security.debian.org` | `profiles/probe/rules.txt` | Run `silkgate verify --full` and check that the probe tools install through the proxy. |
+| `install.sh` takes a version argument | `profiles/claude/setup.sh` | the build's version check |
+| `curl libgcc-s1 libstdc++6 ripgrep` are the binary's runtime needs | `profiles/claude/profile.conf` | `ldd` on the binary in a fresh image |
+| a plain `claude -p` reads `context_path`, `--bare` doesn't | `profiles/claude/profile.conf` | ask a guest `claude -p` about its context, then `--bare` |
+| `IS_SANDBOX=1` lets root use `bypassPermissions` | `profiles/claude/setup.sh` | run `silkgate-claude` in a guest: no refusal. Plain `claude --permission-mode bypassPermissions` refuses. |
+| the switches in the env file (`DISABLE_AUTOUPDATER`, …) | `profiles/claude/env` | check each name in the settings docs, and watch the audit log for new hosts |
+| the `nodejs.org/dist` tarball layout | `profiles/node/setup.sh` | the build's version check |
+| `deb.debian.org`, `security.debian.org` | `profiles/probe/rules.txt` | `silkgate verify --full` installs the probe tools |
 
-## Egress rule lists
+## Egress rules
 
-**Each rules file encodes what an external service needs today, and the service moves
-first.** A path the service adds later fails as a 403 the guest reports as silkgate
-policy, so audit-log denies are the staleness signal.
+**Each rules file encodes what a service needs today. A path it adds later shows up as an
+audit-log deny.**
 
 | List | Where | Check |
 |---|---|---|
-| The Claude Code endpoint list: `/v1/messages` and `count_tokens`, `/v1/models`, the `claude_code` paths, `domain_info`, the Console oauth prefix | [`profiles/claude/rules.txt`](../profiles/claude/rules.txt) | Re-derive the list from fresh audit logs at the pinned version. Grep audit logs for denies on `api.anthropic.com` and `platform.claude.com`. |
-| `max_body=10m` on the two POSTed Anthropic paths, `64k` on oauth | `profiles/claude/rules.txt` | Grep audit logs for 413 answers. Request bodies grow with new tool shapes. |
-| GitHub smart-HTTP facts: the `?service=` requirement, protocol v2 with a v0 fallback, `max_body=1m` for negotiation | [`profiles/github/rules.txt`](../profiles/github/rules.txt) | Clone and fetch a public repository through the profile, and assert zero denies and no 413. |
-| The GitHub content hosts `raw.githubusercontent.com` and `codeload.github.com` | `profiles/github/rules.txt` | Fetch a raw file and a tarball through the profile. |
-| GitHub LFS infrastructure by name (`lfs.github.com`, `github-cloud.*`), the no-redirect path forms, and the S3 501 on a doubled Authorization header | `profiles/github-read/rules.txt` and `profiles/github-write/rules.txt` | Run a live LFS clone and push against a scratch repository, and assert zero denies. |
-| The SAML SSO shape: an unauthorized PAT answers GitHub's own 403 or 404 with an `X-GitHub-SSO` response header | `README.md` (GitHub egress) | Run one grant with a deliberately unauthorized PAT against an SSO organization, and check the header beside the audit allow line. |
-| npm needs only `registry.npmjs.org/**` GET | `profiles/node/rules.txt` | Install a package in a guest and grep the audit log for denies. |
-| pip needs only `pypi.org/simple/**` and `files.pythonhosted.org/**` GET | `profiles/python/rules.txt` | Install a package in a guest and grep the audit log for denies. |
+| Claude Code's endpoints | `profiles/claude/rules.txt` | grep fresh audit logs for denies on `api.anthropic.com` and `platform.claude.com` |
+| `max_body=10m` on the two Anthropic POSTs, `64k` on oauth | `profiles/claude/rules.txt` | grep audit logs for 413s |
+| interactive Claude Code probes `platform.claude.com/v1/oauth/hello` | `profiles/claude/rules.txt` | `attach` a claude session, and diff the hosts it hits |
+| GitHub smart HTTP: `?service=`, protocol v2, 1 MiB negotiation | `profiles/github/rules.txt` | clone and fetch a public repo: no denies, no 413 |
+| `raw.githubusercontent.com`, `codeload.github.com` | `profiles/github/rules.txt` | fetch a raw file and a tarball |
+| LFS hosts (`lfs.github.com`, `github-cloud.*`), and S3's 501 on a second `Authorization` | `profiles/github-{read,write}/rules.txt` | an LFS clone and push on a scratch repo: no denies |
+| SAML SSO: GitHub's 403 or 404 with `X-GitHub-SSO` | `doc/GIT.md` | one grant with an unauthorized PAT on an SSO org |
+| npm needs only `registry.npmjs.org/**` GET | `profiles/node/rules.txt` | install a package: no denies |
+| pip needs only `pypi.org/simple/**`, `files.pythonhosted.org/**` GET | `profiles/python/rules.txt` | install a package: no denies |
 
-The Claude Code list carries a known debt. Runs at 2.1.330 under a subscription token
-confirm three of its paths. The other paths come from API-key runs before 2.1.226, and the
-file's own comment says so. Re-check them under a working API key rather than widen a rule.
+Known debt: at 2.1.330, subscription-token runs confirmed three of Claude Code's paths. The
+rest date from API-key runs before 2.1.226. Re-check them with a working API key, rather
+than widen a rule.
 
 ## Toolchain and CI pins
 
-**CI and the Linux test image pin the toolchain, and several pins have copies that must
-move in lockstep.**
-
 | Pin | Where | Check |
 |---|---|---|
-| mitmproxy `12.3.1`, the version the addon is verified against | `.github/workflows/ci.yml`, `test/linux/Dockerfile`, a comment in `test/test_proxy_lifecycle.py` | Run `rg -n '12\.3\.1'` and check that all three sites agree. Watch the `addon-mitmproxy-latest` canary job, and compare the pin to the PyPI latest. |
-| msb `0.6.8` in CI, `0.5.4` and `0.5.7` by hand | `README.md`, `doc/THREAT-MODEL.md`, `test/linux/Dockerfile` | On a bump, run `silkgate verify --full` per platform and update every citation. |
-| `BASE_IMAGE = "debian:bookworm-slim"` | `cli/silkgate` | Compare to the current Debian stable codename and its release schedule. |
-| `FROM ubuntu:24.04` and the glibc `2.39` floor for msb release binaries | `test/linux/Dockerfile`, `README.md` | Run `ldd` on the current msb release binary and read the required GLIBC symbols. Bump the base image when noble ages out. |
-| `actions/checkout` and `actions/setup-python` pinned to commit shas, with release tags in comments | `.github/workflows/ci.yml` | Resolve each sha and compare it to the action's latest release tag. The comment can drift from the sha. |
-| The Python test matrix, 3.12 and 3.13 | `.github/workflows/ci.yml` | Compare the matrix to the current Ubuntu LTS python3 and the latest stable CPython. |
-| GitHub's `ubuntu-24.04` runners expose `/dev/kvm` | `.github/workflows/containment.yml` | The workflow's own KVM probe warns. Read the runner-image notes when the label ages out. |
+| mitmproxy `12.3.1` | `.github/workflows/ci.yml`, `test/linux/Dockerfile`, `test/test_proxy_lifecycle.py` | the `addon-mitmproxy-latest` canary job, and PyPI |
+| msb `0.6.8` in CI, `0.5.4` and `0.5.7` by hand | `README.md`, `doc/THREAT-MODEL.md`, `test/linux/Dockerfile` | `silkgate verify --full` per platform |
+| `debian:bookworm-slim` | `BASE_IMAGE` in `cli/silkgate`, `doc/PROFILES.md` | Debian's current stable |
+| `ubuntu:24.04`, glibc 2.39 | `test/linux/Dockerfile`, `README.md` | `ldd` on the current msb binary |
+| action SHAs, tags in comments | `.github/workflows/ci.yml` | resolve each SHA. The comment can drift from it. |
+| python 3.12 and 3.13 in CI | `.github/workflows/ci.yml` | the Ubuntu LTS python3, and the latest CPython |
+| `ubuntu-24.04` runners expose `/dev/kvm` | `.github/workflows/containment.yml` | the workflow's own KVM probe warns |
 
-## Static tables in code
+## Tables in code
 
-**Three hand-kept tables answer for outside facts — prices, secret shapes, and capture
-formats — and each drifts silently unless its check runs.**
+**These hand-kept tables mirror outside facts, and drift silently.**
 
 | Table | Where | Check |
 |---|---|---|
-| `PRICES`: model-id prefixes, dollars per MTok, cache multipliers, context windows, and a "last reconciled" date | [`ui/pricing.js`](../ui/pricing.js) | Diff every row against the published price list and the models list, then move the reconciled date. For every model in recent capture files, assert `priceFor()` is not null — a new model id answers null and hides its cost. |
-| `_SECRET_PATTERNS`: 20 vendor-prefixed regexes from the gitleaks default set, with `_SECRET_TRIGGERS` literals beside them | [`mitmaddon/proxy_addon.py`](../mitmaddon/proxy_addon.py) | Diff each regex against `config/gitleaks.toml` at the gitleaks HEAD. Vendors rotate token prefixes and lengths. |
-| The Anthropic key shape `sk-ant-[A-Za-z0-9_-]{16,}` | `mitmaddon/proxy_addon.py` | Check that a fresh Console key still matches, and cross-check the gitleaks anthropic rule. |
-| `CAPTURE_FORMATS`, the decoder names a `capture=` rule can cite (today only `anthropic`) | [`mitmaddon/rule_engine.py`](../mitmaddon/rule_engine.py) | When a decoder lands or retires, run the rule-engine self-tests and grep `doc/DSL.md` and the profiles for the format names. |
-| The capture caps: `_CAPTURE_LINE_MAX` at 64 KiB, block at 256 KiB, total and JSON at 2 MiB — sized from real Anthropic event lines | `mitmaddon/proxy_addon.py` | Measure the largest observed SSE line and body in live capture files after each API or model change. One over-cap line kills capture for that flow. |
-| The SSE grammar: keepalives as `:` comments, unknown delta types ignored, `ping` and newer event types pass silently | `mitmaddon/proxy_addon.py` (`_AnthropicCapture`) | Replay a fresh live transcript through `_AnthropicCapture` and diff the record kinds against the response content. A new content kind is lost without a sign. |
-| The identity-encoding assumption: Anthropic answers uncompressed, so metadata-only is the fallback | `mitmaddon/proxy_addon.py` | Count `capture_error: content-encoding` records in live capture files and alert above zero. |
-| The stream-vs-buffer rationale cites the client's rough 60-second timeout | `mitmaddon/proxy_addon.py` | Read the current SDK stream timeout on a Claude Code pin bump. |
-| The salient and payload maps in `toolCallView`: the Claude Code tool names, the input key that names each call, and the key whose value renders verbatim (`command` for `bash`, `content` for `write`) | [`ui/views/session.js`](../ui/views/session.js) | The tool names and input schemas move with the Claude Code pin. On a bump, grep fresh capture files for tool names outside the maps. An unmapped tool degrades to compact JSON: the line survives but stops naming the argument. |
+| `PRICES` and its "last reconciled" date | `ui/pricing.js` | diff against Anthropic's price and model lists. Every model in recent capture files must get a non-null `priceFor()`. |
+| `_SECRET_PATTERNS`: 20 regexes from gitleaks | `mitmaddon/proxy_addon.py` | diff against gitleaks' `config/gitleaks.toml` |
+| the Anthropic key shape `sk-ant-[A-Za-z0-9_-]{16,}` | `mitmaddon/proxy_addon.py` | a fresh Console key still matches |
+| `CAPTURE_FORMATS` (only `anthropic`) | `mitmaddon/rule_engine.py` | when a decoder changes, grep `doc/DSL.md` and the profiles |
+| capture caps: 64 KiB line, 256 KiB block, 2 MiB total | `mitmaddon/proxy_addon.py` | the largest SSE line in fresh capture files. One over-cap line ends capture for that flow. |
+| the SSE grammar (`:` keepalives, unknown deltas ignored) | `_AnthropicCapture` in `mitmaddon/proxy_addon.py` | replay a fresh transcript and diff record kinds |
+| Anthropic answers uncompressed | `mitmaddon/proxy_addon.py` | count `capture_error: content-encoding` records |
+| the client's ~60 s stream timeout | `mitmaddon/proxy_addon.py` | the SDK's stream timeout, on a Claude Code bump |
+| Claude Code tool names (`Bash`, `Write`, `Agent`, …) and their key fields | `toolCallView` in `ui/views/session.js` | grep fresh capture files for unmapped tool names |
 
 ## Observed microsandbox behavior
 
-**Code and docs record what msb 0.5.4 through 0.6.8 does, and msb is pre-1.0 — re-check
-each observation on every bump.**
+**msb is pre-1.0. Re-check each observation on every bump.**
 
 | Observation | Where | Check |
 |---|---|---|
-| Guest traffic arrives on loopback (observed on macOS/HVF) | `cli/silkgate` | Re-observe the peer address of a guest connection. |
-| msb can swallow the first exec after a create, so the code retries once | `cli/silkgate` | Run the Tier-1 probe 20 times after fresh creates and count first-exec timeouts. An upstream fix makes the retry wrong. |
-| The msb rule grammar and scope names are pre-1.0 and unpinned | `cli/silkgate` | Read the msb release notes, then run `silkgate verify`. |
-| `--tail` limits a snapshot to `_SNAPSHOT_TAIL_LINES` (5000) — the flag is msb's to honor | `cli/silkgate` | Snapshot a guest that printed more than 5000 lines and count what arrives. |
-| The gateway alias `host.microsandbox.internal` resolves in a guest | `test/verify_guest.sh` | Check the alias in `/etc/hosts` inside a guest. |
-| The installer at `install.microsandbox.dev`, the brew tap, the repository owner, and `--net-*` flag stability | `cli/silkgate`, `README.md` | Send a HEAD request to the installer URL, check that the tap and the repository resolve, and diff `msb run --help`. |
-| A rename across two virtiofs mounts is EXDEV, and git-lfs 3.3.0 has no copy fallback | `cli/silkgate` | Retest an LFS checkout across the mount with the git-lfs the base image ships. |
-| Boot is ~0.3 s | `README.md` | Re-time `silkgate run -- true` on an msb bump. |
+| guest traffic arrives on loopback (macOS) | `cli/silkgate` | the peer address of a guest connection |
+| the first exec after a create can vanish, so the CLI retries once | `cli/silkgate` | 20 fresh creates: count first-exec timeouts |
+| rule grammar and scope names | `cli/silkgate` | release notes, then `silkgate verify` |
+| `--tail` honors `_SNAPSHOT_TAIL_LINES` (20000) | `cli/silkgate` | snapshot a guest that printed more |
+| `host.microsandbox.internal` resolves in a guest | `test/verify_guest.sh` | the guest's `/etc/hosts` |
+| the installer URL, the brew tap, the repo owner, `--net-*` flags | `cli/silkgate`, `README.md` | HEAD the installer, resolve the tap, diff `msb run --help` |
+| a rename across two virtiofs mounts is EXDEV, and git-lfs 3.3.0 has no fallback | `cli/silkgate` | an LFS checkout across the mount |
+| boot takes ~0.3 s | the skill | time `silkgate run -- true` |
 
 ## Observed Claude Code behavior
 
-**The sandbox leans on Claude Code internals that no contract guarantees, so each pin
-bump re-tests them.**
+**Silkgate leans on Claude Code internals no contract guarantees.**
 
-| Observation | Where | Check |
+| Observation | Where | Check on a bump |
 |---|---|---|
-| `ANTHROPIC_CUSTOM_HEADERS` is the SDK's escape hatch for extra headers and carries `X-Silkgate-Exec` | `cli/silkgate` | Run one journaled exec and assert `exec` appears on the audit allow line. A rename silently ends exec attribution. |
-| Interactive Claude Code probes `platform.claude.com/v1/oauth/hello` at startup | `doc/ARCHITECTURE.md` | Run interactive claude in a guest and diff the probed hosts in the audit log. |
-| An in-guest `claude -p` waits at most 600 seconds for background subagents, and one env var overrides the ceiling | the sandboxed-agent skill | On a pin bump, run one background subagent and grep the new binary for the variable name. |
-| Plugin cache semantics, feature version floors, and every claim cited from the docs mirror | `doc/PLUGIN.md` | Re-fetch each cited page from `code.claude.com`, diff every claim, and run one `--plugin-dir` install on current Claude Code. |
-| The plugin manifest `$schema` URLs at `json.schemastore.org` | `.claude-plugin/plugin.json` | Run `claude plugin validate . --strict`, plus a HEAD request on both schema URLs. |
-| `CLAUDE_CODE_OAUTH_TOKEN` authenticates a plain `claude -p` but not `--bare`, and `ANTHROPIC_API_KEY` outranks it | `guest_credential.*` in `profiles/claude/profile.conf`, the README (A Claude subscription) | On a pin bump, run one `silkgate-claude -p` and one `claude --bare -p` under an `Authorization` secret. Expect an answer, then `Not logged in`. |
-| The example rule pins `h:anthropic-version=2023-06-01` | `doc/DSL.md` | Compare to the `anthropic-version` in the current API documentation. |
+| `ANTHROPIC_CUSTOM_HEADERS` carries `X-Silkgate-Exec` | `cli/silkgate` | an exec's allow lines carry `exec` |
+| `claude -p` waits at most 600 s for background subagents, and one env var lifts it | the skill | run one background subagent, and grep the binary for the variable |
+| `CLAUDE_CODE_OAUTH_TOKEN` works for `claude -p` but not `--bare`, and `ANTHROPIC_API_KEY` outranks it | `profiles/claude/profile.conf`, `README.md` | under an `Authorization` secret: `silkgate-claude -p` answers, `claude --bare -p` says `Not logged in` |
+| the default model needs the subscription to have it | `profiles/claude/profile.conf` | a `claude -p` with no settings answers |
+| plugin cache rules, version floors, every claim from the docs mirror | `doc/PLUGIN.md` | re-read each cited page, and try one `--plugin-dir` install |
+| the manifests' `$schema` URLs | `.claude-plugin/*.json` | `claude plugin validate .`, and HEAD both URLs |
+| `anthropic-version=2023-06-01` in an example | `doc/DSL.md` | the current API docs |
 
-## Documentation snapshots
+## Dated documents
 
-**Two documents are dated research, and each rots as a whole rather than row by row.**
+**Two documents are research snapshots. Each goes stale as a whole.**
 
-| Snapshot | Where | Check |
-|---|---|---|
-| "Last verified: June 2026", the boot and overhead figures, the Claude Code sandbox internals with their 2.1.90 patch floor, and about 25 source URLs | [`doc/SOTA.md`](./SOTA.md) | Re-run the research pass and move the verified date. Send a HEAD request to every URL and replace each 404. Re-read the srt repository and check the patch floor is still the relevant one. |
-| The verified-platform list and the no-IPv6 note for Linux guests | [`doc/THREAT-MODEL.md`](./THREAT-MODEL.md) | Run `silkgate verify --full` on the current msb per platform and update the version list. |
-| The README measurements: "all fifteen checks", "15/15 on macOS by hand", the msb version list | [`README.md`](../README.md) | Cross-check against `verify` output and `containment.yml` on every change to either. |
+| Snapshot | Check |
+|---|---|
+| [`doc/SOTA.md`](./SOTA.md), "Last verified: June 2026" | redo the research pass. HEAD every URL. Re-check the 2.1.90 patch floor. |
+| the verified-platform table in [`doc/THREAT-MODEL.md`](./THREAT-MODEL.md) | `silkgate verify --full` per platform, on the current msb |
 
-## Test fixtures and external oracles
-
-**The suite freezes today's wire shapes and leans on services nobody here controls.**
+## Test fixtures and outside oracles
 
 | Fact | Where | Check |
 |---|---|---|
-| Fixture model ids (`claude-sonnet-4-5`, dated snapshot ids) and the frozen SSE event vocabulary | `test/test_capture_decoder.py`, `test/test_capture_tap.py`, `ui/capture.test.js`, `ui/fixtures.test.js` | Record one live streamed response per API change, diff its event set against the fixture builders, and refresh the ids. |
-| The fixture `pattern` values must be spelled as `_SECRET_PATTERNS` names them | `ui/fixtures.test.js` | Grep the fixture patterns against the producer's name list. |
-| The log scan matches the real line format mitmdump 12.3.1 writes | `test/test_proxy_lifecycle.py` | The `addon-mitmproxy-latest` canary job. Update the scan when the pin moves. |
-| The full check fetches `https://registry.npmjs.org/lodash` | `test/verify_guest.sh` | Fetch the URL from an unrestricted host in CI. |
-| `https://evil.com` is the guaranteed-unlisted host | `test/verify_guest.sh` | Grep every rules file for `evil.com`. Keep the header-discrimination check green. |
-| The external oracles: `1.1.1.1` answers TCP 443, ICMP and DNS (also `TIER1_PROBE_TARGET` in `cli/silkgate`), and TEST-NET-1 `192.0.2.1` never routes | `test/verify_guest.sh` | From an unrestricted host, run `curl -sv --connect-timeout 3 https://1.1.1.1/`, and send one ICMP echo from CI. |
+| fixture model ids and the SSE event set | `test/test_capture_decoder.py`, `test/test_capture_tap.py`, `ui/capture.test.js`, `ui/fixtures.test.js` | record one live streamed response, diff its events |
+| fixture `pattern` values match `_SECRET_PATTERNS` names | `ui/fixtures.test.js` | grep them against the producer |
+| the log scan matches mitmdump 12.3.1's line format | `test/test_proxy_lifecycle.py` | the canary job |
+| `--full` fetches `https://registry.npmjs.org/lodash` | `test/verify_guest.sh` | fetch it from an open host |
+| `evil.com` is never allowed | `test/verify_guest.sh` | grep every rules file |
+| `1.1.1.1` answers TCP 443, ICMP, DNS. `192.0.2.1` never routes. | `test/verify_guest.sh`, `TIER1_PROBE_TARGET` in `cli/silkgate` | `curl -sv --connect-timeout 3 https://1.1.1.1/` from an open host |
 
 ## Cross-file pairs
 
-**The highest-risk facts live in more than one place, and every copy must move
-together.**
+**These facts live in more than one place. Move every copy together.**
 
 | Fact | Copies | Check |
 |---|---|---|
-| The Anthropic dummy key and dummy OAuth token | `guest_credential.*` in `profiles/claude/profile.conf`, `_SECRET_ALLOWLIST` in `mitmaddon/proxy_addon.py` | `grep -F DUMMY-replaced` both files and compare the literals byte for byte. A mismatch raises a false sighting on every transcript. |
-| The Claude Code pin against the rules derivation | `profiles/claude/profile.conf`, the comment in `profiles/claude/rules.txt` | Grep both for `2.1.` and check the versions agree. On a bump, re-derive the endpoint list, then update the comment. |
-| mitmproxy `12.3.1` | `.github/workflows/ci.yml`, `test/linux/Dockerfile`, `test/test_proxy_lifecycle.py` | `rg -n '12\.3\.1'` — all three sites must agree. |
-| msb `0.6.8` | `README.md` (three sites), `doc/THREAT-MODEL.md`, `test/linux/Dockerfile` | `rg -n '0\.6\.8'` and update every citation on a bump. |
-| `node@22.23.5` | `profiles/node/profile.conf`, the sandboxed-agent skill examples | Diff every `@x.y.z` in the skill against the profile's `default_version`. |
-| Model prices and context windows | `ui/pricing.js`, re-hardcoded in `ui/pricing.test.js` | When `PRICES` changes, grep `pricing.test.js` for every dollar figure and every window. |
-| The sighting pattern names | `_SECRET_PATTERNS` in `mitmaddon/proxy_addon.py`, `ui/fixtures.test.js` | Grep each fixture `pattern` value against the producer's names. |
-| The file-path keys shared by two maps: `file_path` for `read`, `edit`, `write`, and `multiedit`, and `notebook_path` for `notebookedit` | the salient map in `ui/views/session.js`, `FILE_KEYS` in `ui/timeline.js` | Diff the shared entries whenever either map changes. The files panel and the call lines must name the same paths for the same calls. |
+| the dummy key and dummy OAuth token | `guest_credential.*` in `profiles/claude/profile.conf`, `_SECRET_ALLOWLIST` in `mitmaddon/proxy_addon.py` | `grep -F DUMMY-replaced` both. A mismatch flags every transcript. |
+| the Claude Code pin and its rules note | `profiles/claude/profile.conf`, the comment in `profiles/claude/rules.txt` | grep both for `2.1.` |
+| mitmproxy `12.3.1` | see Toolchain | `rg -n '12\.3\.1'` |
+| msb `0.6.8` | see Toolchain | `rg -n '0\.6\.8'` |
+| model prices and windows | `ui/pricing.js`, `ui/pricing.test.js` | grep the test for every figure |
+| secret pattern names | `_SECRET_PATTERNS`, `ui/fixtures.test.js` | grep the fixture patterns |
+| file-path keys: `file_path` for read, edit, write, multiedit, and `notebook_path` | the salient map in `ui/views/session.js`, `FILE_KEYS` in `ui/timeline.js` | diff the shared entries |

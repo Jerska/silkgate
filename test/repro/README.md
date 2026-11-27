@@ -1,25 +1,21 @@
-# Reproductions from the retired review
+# Reproductions
 
-Each script here demonstrates one finding from the review that seeded the test suite
-(`FEEDBACK.md`, kept in git history) and prints what it observed next to what it expected, so
-it can be turned into an assertion. They were written when the enforcement code had no tests;
-the suite in `test/` covers it now, and TODO.md carries the review's still-open items.
+Read this to re-run the demonstrations of the findings that seeded the test suite.
 
-**These are reproductions, not a test suite.** They print; they do not assert.
-`addon_host_spoof.py` did become `test/test_addon.py` — `tflow`-based cases run in CI — so the
-finding it demonstrates can never regress.
+**These scripts print what they observed next to what they expected. They don't assert.**
+The review behind them (`FEEDBACK.md`) lives in git history, and `test/` now covers each
+finding. For example, `addon_host_spoof.py` became `test/test_addon.py`.
 
-| script | finding | needs |
+| Script | Finding | Needs |
 |---|---|---|
-| `engine_claims.py` | rule-engine parsing and matching defects | nothing (stdlib) |
-| `addon_host_spoof.py` | **critical**: policy from a spoofable header, credential injected to the wrong host | `pip install mitmproxy` |
-| `build_injection.py` | shell/Dockerfile injection through `--with name@VERSION` and `--base` | nothing |
-| `host_spoof_live.sh` | the same critical finding end to end, through a real proxy | mitmproxy; binds :8099 |
-| `connect_probe.sh` | `CONNECT` is accepted with no policy decision and no audit line | mitmproxy; binds :8099 |
-| `git_profile_clone.sh` | the git profile holds zero rules, and the github floor plus a github-read grant clone and fetch, never push | docker, msb, a built image |
+| `engine_claims.py` | rule-engine parsing and matching defects | nothing |
+| `addon_host_spoof.py` | critical: policy from a spoofable header, so a credential goes to the wrong host | mitmproxy |
+| `build_injection.py` | shell and Dockerfile injection through `--with name@VERSION` and `--base` | nothing |
+| `host_spoof_live.sh` | the same critical finding, end to end through a real proxy | mitmproxy, port 8099 |
+| `connect_probe.sh` | `CONNECT` accepted with no policy decision and no audit line | mitmproxy, port 8099 |
+| `git_profile_clone.sh` | `git` holds no rules, and `github` plus a `github-read` grant clone and fetch but never push | docker, msb, a built image |
 
-No script here needs a real API key: `addon_host_spoof.py` uses a sentinel secret so that what
-leaks in the demonstration is a string with no value.
+None needs a real API key: `addon_host_spoof.py` leaks a sentinel, not a secret.
 
 ```sh
 python3 test/repro/engine_claims.py
@@ -27,5 +23,5 @@ python3 test/repro/addon_host_spoof.py
 python3 test/repro/build_injection.py
 sh      test/repro/host_spoof_live.sh
 sh      test/repro/connect_probe.sh
-sh      test/repro/git_profile_clone.sh      # slowest; boots a guest
+sh      test/repro/git_profile_clone.sh      # slowest: boots a guest
 ```

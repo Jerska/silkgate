@@ -1,160 +1,140 @@
-# Egress allowlist DSL — specification
+# Egress rules
 
-Read this to write egress rules for a profile or a session.
+Read this to write the rules in a profile's `rules.txt`, or in `--rule`.
 
-The proxy enforces this rule language. The reference implementation is
-[`mitmaddon/rule_engine.py`](../mitmaddon/rule_engine.py) (dependency-free —
-`python3 mitmaddon/rule_engine.py` self-tests, 69/69). The design rationale is in
-[THREAT-MODEL.md](./THREAT-MODEL.md). Rules live in `profiles/<name>/rules.txt`, one profile
-per capability. A session's ruleset is the profiles it was started `--with`, concatenated,
-and the proxy reads the composed snapshot at `~/.silkgate/sessions/<name>/rules.txt`.
+## A rule
 
-## Grammar
+**One allow rule per line. Anything no rule matches is denied.**
 
-**One allow-rule per line, and default-deny: anything no rule matches is blocked.** The
-first match wins. Order is irrelevant for an allowlist, and stays so until deny-rules are
-added. `#` starts a comment, and blank lines are ignored.
-
-An empty ruleset is legal, and it is the tightest policy there is: default-deny with nothing
-exempted. `run` and `up` with no `--with` and no `--rule` compose exactly that — a guest
-that can reach nothing. Only the standalone `silkgate proxy` insists on at least one rule.
-
-```
+```text
 <host>[:<port>][/<path>]   [METHOD ...]   [option ...]
 ```
 
-```
+```text
 # pattern                       methods   options
 api.anthropic.com/v1/messages   POST      inject_auth=anthropic h:anthropic-version=2023-06-01 max_body=10m
 registry.npmjs.org/**           GET
-files.pythonhosted.org/**       GET
-github.com/your-org/**          GET POST  max_body=1m
-*.internal.corp/**              GET POST
+github.com/acme/**              GET POST  max_body=1m
+*.internal.corp/**              GET
 ```
+
+- The first matching rule decides, options included. Composition order is in
+  [PROFILES.md](./PROFILES.md#rule-order).
+- `#` starts a comment. Blank lines are ignored.
+- An empty ruleset is legal: the guest reaches nothing.
+- Check a composed ruleset with `silkgate profiles --render <spec>`.
+
+The engine is [`mitmaddon/rule_engine.py`](../mitmaddon/rule_engine.py). Run it directly for
+its self-tests.
 
 ## Wildcards
 
-**The pattern splits at the first `/`: the host is before it, the path after it.**
+**The pattern splits at the first `/`: host before it, path after it.**
 
-| Token | In host (before `/`) | In path (after `/`) |
+| Token | In the host | In the path |
 |---|---|---|
-| `*`  | `[^.]+` (one DNS label) | `[^/]+` (one path segment) |
-| `**` | `.*` (any, dots included)  | `.*` (any, slashes or empty included) |
-| `**.`| `(?:.*\.)?` — optional subdomain prefix, matches the apex too | — |
+| `*` | one DNS label | one path segment |
+| `**` | anything, dots included | anything, slashes included, or nothing |
+| `**.` | an optional subdomain prefix: matches the apex too | — |
 
-The consequences:
+| Pattern | Matches | Doesn't match |
+|---|---|---|
+| `*.github.com` | `api.github.com` | `github.com`, `a.b.github.com` |
+| `**.github.com` | `github.com`, `api.github.com`, `a.b.github.com` | `notgithub.com` |
+| `api.anthropic.com` (no `/`) | every path on that host | |
+| `github.com/**` | `github.com`, `github.com/`, `github.com/a/b` | |
+| `github.com/acme/**` | `github.com/acme/x` | `github.com/acme`, `github.com/acme-evil` |
 
-- `*.github.com` matches `api.github.com`, not `github.com` (the apex) and not
-  `a.b.github.com`.
-- `**.github.com` matches `github.com`, `api.github.com`, and `a.b.github.com` — but not
-  `notgithub.com`.
-- A pattern with no `/` matches any path. `api.anthropic.com` alone allows every path on
-  that host.
-- `github.com/**` matches `github.com`, `github.com/`, and any deeper path.
-- `a/**` requires the `a/` prefix (a clean boundary). To also match bare `/a`, add a second
-  rule. That is safer than `a**`, which also matches `a-organization`.
-
-Wildcards bound capability and blast radius, not exfiltration bandwidth. A single `*`
-segment still carries an arbitrary base64 blob. See the reframe in
-[THREAT-MODEL.md](./THREAT-MODEL.md).
-
-## Host normalization (the null-byte and homograph guard)
-
-**Normalization lives in the engine and applies identically to the pattern host and the
-request host.** The steps, in order:
-
-1. Reject a host with null, space, tab, CR, LF, `%`, `@`, `[`, or `]`.
-2. Split off and validate an optional `:port` (digits only).
-3. Lowercase, and strip a trailing dot.
-4. Reject non-ASCII: force punycode (`xn--…`), which kills homographs.
-5. Reject raw IP literals, so only domains are allowlisted.
-6. Require the strict form `^label(\.label)*$` with
-   `label = [a-z0-9](?:[a-z0-9-]*[a-z0-9])?`, label ≤ 63, total ≤ 253.
-
-`_` (underscore) is excluded by default — it is invalid in public DNS — and is opt-in for
-internal names. Pattern hosts additionally permit `*`.
+- To match bare `/acme` too, add a second rule. `acme**` would also match `acme-evil`.
+- A host that's only wildcards (`**`, `*.*`) is legal, but warns: it matches everything.
+- A narrow path limits what the agent can do, not what it can leak. One `*` segment still
+  carries any base64 blob ([THREAT-MODEL.md](./THREAT-MODEL.md#allowlists-bound-who-not-what)).
 
 ## Ports
 
-**A host pattern can carry an optional `:port`, matched against the destination port the
-proxy dials.**
+**No port means 80 and 443. Any other port must be listed.**
 
-| Pattern | Matched ports |
+| Pattern | Ports |
 |---|---|
-| no port | 80 and 443 only (the default) |
-| `:8080`, or a comma list `:443,8080` | exactly those — the list replaces the default |
-| `:*` | any port |
-
-A non-default port on an allowed host is denied unless listed. For example,
-`api.internal:8443/**` permits only `:8443`, and `foo.com/**` rejects `foo.com:8080`.
-
-## Path normalization
-
-**The engine normalizes the path before it matches.** It strips `#fragment` and `?query`,
-percent-decodes once (`%2e%2e` becomes `..`), then resolves `.` and `..` with
-`posixpath.normpath`. So `your-org/x/../../other` normalizes to `/other` and does not match
-`your-org/**`. The decode is single: double-encoded input is a noted residual.
+| `foo.com/**` | 80, 443 |
+| `foo.com:8443/**` | 8443 only |
+| `foo.com:443,8080/**` | 443 and 8080 |
+| `foo.com:*/**` | any |
 
 ## Options
 
-**Every option widens one dimension — methods, body size, query params, headers, or a
-credential — except `capture`, which records instead.**
+**By default a rule allows GET only, with no body, no query params, and baseline headers.
+Each option widens one of those.**
 
-| Option | Effect | Default |
+| Option | Allows | Default |
 |---|---|---|
-| `GET POST …` | allowed methods (bare uppercase tokens) | GET only |
-| `max_body=<size>` | permit a request body up to `<size>` (bytes, or a `k`/`m` suffix) | no body |
-| `q:*` | allow all query params (escape hatch — use sparingly) | params stripped |
-| `q:<name>=<value>` | keep query param `<name>` only if its value equals `<value>` — all others stripped | params stripped |
-| `q:<name>~<regex>` | keep query param `<name>` only if `<regex>` fullmatches — all others stripped | params stripped |
-| `h:*` | allow all request headers, `Authorization` included (escape hatch — use sparingly) | headers stripped |
-| `h:<name>=<value>` | forward the header only if its value equals `<value>` | — |
-| `h:<name>~<regex>` | forward the header only if `<regex>` fullmatches (no spaces — use `\s`) | — |
-| `inject_auth=<name>` | if the request already carries the header named in `SILKGATE_EGRESS_SECRET_<NAME>` (`header: value`), replace its value with the host-held secret — never added when absent | — |
-| `capture=<format>` | decode the response body and record it in the capture file (`anthropic` is the only format) | not captured |
+| `GET POST …` | these methods | GET |
+| `max_body=<size>` | a request body up to `<size>`: bytes, or `k`/`m` | no body |
+| `q:*` | every query param | all stripped |
+| `q:<name>=<value>`, `q:<name>~<regex>` | that param, if its value matches. Others are stripped. | all stripped |
+| `h:*` | every header, `Authorization` included | baseline only |
+| `h:<name>=<value>`, `h:<name>~<regex>` | that header, if its value matches | baseline only |
+| `inject_auth=<name>` | swaps in `SILKGATE_EGRESS_SECRET_<NAME>`, if the guest sends that header | no swap |
+| `capture=anthropic` | records the response ([PROXY.md](./PROXY.md#capture)) | no capture |
 
-Two notes. Per-rule body content rules are deferred — only the `max_body` size exists.
-Option tokens are whitespace-split, so an option value cannot contain a space (use `\s` in
-a regex).
+- Options split on whitespace, so a value can't hold a space. Write `\s` in a regex.
+- `inject_auth` never adds a header. It only replaces one the guest sent.
 
-## Header policy (deny-by-default, value-constrained)
+## Headers
 
-**A header is stripped unless it appears in the effective policy and its value satisfies
-the constraint.** The effective policy is the engine baseline plus the per-rule `h:`
-overrides, and an override wins. The baseline is capped to shrink the residual channel —
-override per rule for a stricter posture:
+**A header goes through only if the baseline or an `h:` option allows it, and its value
+matches.**
 
-| Header | Constraint |
+| Baseline header | Allowed value |
 |---|---|
-| `host` | hostname charset plus optional port, ≤253 (the already-allowlisted destination) |
-| `content-type` | MIME-ish charset, ≤64 |
-| `content-length` | digits, ≤10 |
+| `host` | a hostname and optional port, ≤ 253 chars |
+| `content-type` | a MIME-like value, ≤ 64 chars |
+| `content-length` | digits, ≤ 10 |
+| `transfer-encoding` | exactly `chunked` |
 
-`accept`, `accept-encoding`, `accept-language`, `user-agent`, and `range` are not baseline.
-Opt in per rule with `h:` where a host needs them. `cookie`, `authorization`, and any
-`x-*` or unknown header are stripped by default — allow one explicitly with `h:` if a host
-needs it, because no header is special-cased. When a rule has `inject_auth`, the proxy
-*replaces* the named header's value with the host-held secret, and only when the request
-already carries that header. The real credential is therefore never present in the guest.
+Everything else is stripped unless a rule allows it: `user-agent`, `accept`, `range`,
+`cookie`, `authorization`, any `x-*`. A `h:` option overrides the baseline for its rule.
 
-## Locked design decisions
+For example, GitHub's REST API refuses requests without a `User-Agent`:
 
-**Six decisions are locked. Do not reopen them without a test that proves the change safe.**
+```text
+api.github.com/repos/acme/app/**  GET  q:*  h:user-agent~.+  h:accept~.+
+```
 
-1. A bare host (no `/`) matches any path. ✓
-2. The default method is GET only. `POST` and the rest must be explicit. ✓
-3. `**.` matches the apex. `*.` does not. ✓
-4. A path `**` compiles to `.*` and matches an empty path or a bare host. ✓
-5. Query params, headers, and bodies are deny-by-default and opt-in, uniform across methods.
-   The GET-vs-POST difference falls out naturally: GET has no body, so `max_body` on a GET
-   rule buys nothing. Header opt-in is value-constrained, not name-only. ✓
-6. The host charset after normalization is `[a-z0-9.-]`, `_` is opt-in, and raw IPs are
-   rejected. ✓
+## Normalization
 
-## What the engine does not do (the addon's job)
+**The engine normalizes hosts and paths before it matches, the same way for patterns and
+requests.**
 
-**The engine matches and carries configuration. Enforcement lives in the mitmproxy addon**
-([`mitmaddon/proxy_addon.py`](../mitmaddon/proxy_addon.py)): TLS termination, SNI==Host,
-header stripping, body-size rejection, query-param stripping, secret injection, the audit
-log, and fail-closed treatment of anything undecryptable. [PROXY.md](./PROXY.md) covers how
-that proxy runs and what it records.
+Hosts:
+
+1. Reject null, whitespace, CR, LF, `%`, `@`, `[`, `]`.
+2. Split off an optional `:port` (digits only).
+3. Lowercase, and strip a trailing dot.
+4. Reject non-ASCII. Use punycode (`xn--…`), which blocks homographs.
+5. Reject IP literals: only domains can be allowed.
+6. Require strict DNS labels: `[a-z0-9-]`, ≤ 63 each, ≤ 253 total. `_` is opt-in, for
+   internal names.
+
+Paths: drop `#fragment` and `?query`, percent-decode once, then resolve `.` and `..`. So
+`acme/x/../../other` becomes `/other`, and doesn't match `acme/**`. Double-encoded input
+is a known residual.
+
+## Settled decisions
+
+**Don't change these without a test that proves the change safe.**
+
+1. A host with no `/` matches every path.
+2. The default method is GET.
+3. `**.` matches the apex. `*.` doesn't.
+4. A path `**` matches an empty path.
+5. Query params, headers, and bodies are denied unless a rule allows them, for every method.
+   Header allows constrain the value, not just the name.
+6. Hosts normalize to `[a-z0-9.-]`, `_` is opt-in, and IP literals are refused.
+
+## What the addon does
+
+**The engine only matches. The mitmproxy addon enforces**
+([`mitmaddon/proxy_addon.py`](../mitmaddon/proxy_addon.py)): TLS termination, SNI must equal
+Host, header and query stripping, body caps, secret injection, the audit log, and refusal of
+anything it can't decrypt.

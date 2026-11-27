@@ -1,190 +1,206 @@
 # Proxy operations
 
-Read this to run, inspect, and debug the shared proxy that serves every session.
+Read this to run, inspect, and debug the shared proxy, and to find what silkgate keeps on
+the host.
 
-This document covers operations only. [ARCHITECTURE.md](./ARCHITECTURE.md) holds the concepts
-and the glossary (guest, session, profile, Tier 1, Tier 2). [DSL.md](./DSL.md) holds the rule
-language. [THREAT-MODEL.md](./THREAT-MODEL.md) holds the threat analysis.
+## One proxy, many sessions
 
-## The shared-proxy model
+**All sessions share one `mitmdump` process with silkgate's addon loaded. Each session
+claims one of its ports.**
 
-**All sessions share one proxy process, and each session claims one listener port.** The
-process is one `mitmdump` (mitmproxy's headless runner) with silkgate's addon
-([`mitmaddon/proxy_addon.py`](../mitmaddon/proxy_addon.py)) loaded — "the addon" below.
-`silkgate up` starts it the first time a session needs it, detached from the shell. It waits
-until every pool port accepts connections, then records the proxy in
-`~/.silkgate/proxy.json`. `silkgate down <name>` ends a session, and the `down` that ends
-the last session also stops the proxy. `test/test_proxy_lifecycle.py` pins the lifecycle:
-start, readiness, teardown, and the races between them.
+- The first `up` or `run` starts it, detached. It's ready once every pool port accepts.
+- The `down` that ends the last session stops it.
+- It binds loopback only, `127.0.0.1` and `::1`. `SILKGATE_PROXY_BIND=<addr>[,<addr>]`
+  replaces those addresses, if your platform routes guests through a bridge.
+- It runs with `--set rawtcp=false`, so a tunnel that isn't TLS is refused, not passed
+  through.
 
-The proxy binds loopback by default, on both address families (`127.0.0.1` and `::1`), and
-never the LAN. If your platform routes guests through a real bridge address, set
-`SILKGATE_PROXY_BIND=<address>[,<address>]` — the override replaces the default addresses.
-The proxy also starts with `--set rawtcp=false`, so a tunnel it cannot read as TLS is
-refused instead of passed through
-(`test_start_shared_proxy_binds_loopback_and_disables_rawtcp`).
+After you edit the addon, stop the proxy before the next launch: `down` the last session,
+or kill the pid in `~/.silkgate/proxy.json`. mitmdump hot-reloads an edited addon into the
+old process, with the old environment and old modules.
 
-If you edit the addon or rename one of its env vars, retire the live proxy deliberately —
-end the last session with `down`, or stop the pid recorded in `proxy.json` — so the next
-launch starts a fresh process. mitmdump hot-reloads `-s` scripts when their mtime changes,
-so a long-lived proxy silently picks up addon edits into a process that keeps its old
-environment and its old `sys.modules`.
+Pinned by: `test/test_proxy_lifecycle.py`.
 
 ## The port pool
 
-**The proxy listens on 16 consecutive ports, normally 8090 to 8105.** Each pool port gets
-one `--mode regular@<addr>:<port>` listener per bind address. The scan starts at the base
-port (normally 8090), so a squatter anywhere in a candidate range shifts the whole pool to
-the first fully-free 16-port range above it
-(`test_start_shared_proxy_skips_squatted_base_and_finds_next_range`). Each session claims
-one port from the pool the moment the port is picked, by a marker file, so concurrent `up`
-commands get distinct ports (`test_concurrent_pick_port_yields_distinct_ports`).
+**The proxy listens on 16 consecutive ports, normally 8090 to 8105.**
 
-A restart re-picks the pool only when no session survives. A guest's port is fixed at
-creation: its proxy URL and its Tier-1 net-rule both name it. A moved pool strands every
-survivor on a port that any later process can bind and answer. While any
-session or port claim survives, a proxy restart therefore reuses the recorded pool verbatim,
-and dies if a port of it is now taken
-(`test_restart_with_surviving_session_never_floats_the_pool`,
-`test_restart_dies_naming_the_session_whose_port_is_squatted`).
+- The scan starts at 8090, or at `--port`. A taken port anywhere shifts the whole pool to
+  the next free 16-port range.
+- Each session claims its port with a marker file, so concurrent `up`s never collide.
+- A guest's port is fixed at creation. So while any session survives, a proxy restart
+  reuses the recorded pool exactly, and fails if one of its ports is now taken.
+
+Pinned by: `test/test_proxy_lifecycle.py`.
 
 ## Port as session identity
 
-**The listener port is the session identity, and a guest cannot forge it.** Each guest's
-Tier-1 net-rule — a flag of microsandbox, the microVM runtime — allows egress to only its
-own session's port (`--net-rule "allow@host:tcp:<port>"`, default-deny otherwise).
-microsandbox enforces that rule on the host side, below the guest
-([THREAT-MODEL.md](./THREAT-MODEL.md), Tier 1), so a connection to another session's port is
-refused before a real socket opens. The port a request arrives on therefore proves which
-session sent it, with the proof enforced outside the guest. No per-request tokens are needed
-or used.
+**The port a request arrives on proves which session sent it.**
 
-The addon reads the accepted port from `flow.client_conn.sockname[1]`, resolves the session
-that claims that port, and applies that session's ruleset. The ruleset is a per-session
-snapshot, composed at `up` time into `~/.silkgate/sessions/<name>/rules.txt` and cached per
-port. The sessions-directory mtime and the per-session `rules.txt` mtime invalidate the cache.
+Each guest's Tier 1 rule allows only its own port:
 
-Session resolution fails closed. An unknown port, a missing session, or an unparsable
-ruleset denies the request with reason `no session for port`, and the addon never falls
-through to another session's rules. Every audit record carries a `session` field.
-`test/test_addon.py` pins the resolution and each fail-closed path.
+```text
+msb … --net-default-egress deny --net-rule "allow@host:tcp:<port>"
+```
+
+microsandbox enforces that on the host, so a guest can't reach another session's port.
+The addon maps the port to that session's ruleset, `~/.silkgate/sessions/<name>/rules.txt`.
+
+An unknown port, a missing session, or a broken ruleset denies the request with reason
+`no session for port`. It never falls through to another session's rules.
+
+Pinned by: `test/test_addon.py`.
 
 ## The control socket
 
-**The host controls the proxy over a unix socket, never over a network port.** Every guest
-can reach its own proxy port — that is the point of the proxy. A control endpoint on a
-proxy port is therefore reachable by an adversarial guest, and needs its own authentication
-to be safe. A unix socket in the host filesystem is unreachable from every guest by
-construction: no host path is mounted into a guest, and no network route leads to it. It
-therefore needs no authentication.
+**The CLI controls the proxy over `~/.silkgate/proxy.sock`, never over a network port.**
 
-The addon serves line-delimited JSON on `~/.silkgate/proxy.sock` (mode `0600`) and unlinks a
-stale socket file at start. The operations are `ping`, `set_secret`, and `list_secrets`. An
-unknown operation or a malformed line is an error.
+A guest can reach its proxy port, so a control endpoint there would need its own auth. No
+guest can reach a host unix socket. The socket is mode `0600` and speaks line-delimited
+JSON: `ping`, `set_secret`, `list_secrets`.
 
-## The secrets flow
+## Secrets
 
-**A credential moves from the host environment into proxy memory, scoped to one session, and
-never enters a guest.** The credential lives on the host only as
-`SILKGATE_EGRESS_SECRET_<NAME>`, one `"<Header>: <value>"` line. `silkgate up` and
-`silkgate secret set <name> --session <session>` read it from the local environment and push
-it over the control socket with `set_secret`, with the session name attached. The addon holds
-it in an in-memory dict keyed by session, and `inject_auth=<name>` resolves only within the
-session the request arrived for.
+**A credential goes from your shell to proxy memory, scoped to one session. It never enters
+a guest.**
 
-The guest holds a dummy that sends the header the secret names, because the proxy only
-replaces a header the guest sends. A profile's `guest_credential` lines in `profile.conf`
-map each header to the env pair that `up` sets in the guest. The claude profile maps
-`x-api-key` to a dummy `ANTHROPIC_API_KEY` and `authorization` to a dummy
-`CLAUDE_CODE_OAUTH_TOKEN`. Only the header's name decides, and no part of the value enters
-the guest (`TestGuestCredential` in `test/test_cli_validation.py`).
+```text
+SILKGATE_EGRESS_SECRET_<NAME>="<Header>: <value>"      in your shell
+  └─ up / secret set ──▶ set_secret over the socket, with the session name
+       └─ proxy memory, keyed by session ──▶ a rule's inject_auth=<name> spends it
+```
 
-Four properties, each pinned in `test/test_addon.py`:
+- The proxy replaces a header only when the guest already sends it. So the guest holds a
+  dummy that sends that header, picked by the profile's `guest_credential` lines
+  ([PROFILES.md](./PROFILES.md#profileconf-keys)).
+- Each `up` reads the variable from its own environment. A session never inherits a
+  secret another session pushed.
+- The value never appears in argv, on disk, or in a log. `list_secrets` returns names.
+- A missing or malformed secret warns at `up`. The session starts, and matching requests
+  are denied.
+- That deny looks like any policy miss to the guest. Only the audit record says
+  `missing secret`.
+- The standalone `silkgate proxy` reads `SILKGATE_EGRESS_SECRET_*` from its own environment.
+  Sessions never do.
 
-- A later session cannot spend a key an earlier session pushed
-  (`test_a_session_cannot_spend_anothers_secret`).
-- The value never appears in a process argument, on disk, or in a log, and `list_secrets`
-  returns names only (`test_list_secrets_never_echoes_a_value`).
-- The `SILKGATE_EGRESS_SECRET_*` environment of the proxy process — what `mitmdump`
-  inherited at start, not what an `up` shell holds — serves the standalone `silkgate proxy`
-  only, where no sessions exist (`test_env_secrets_do_not_serve_named_sessions`).
-- A request that matches an `inject_auth` rule whose secret is absent or unusable is
-  denied, whether or not the guest sent the header, and the guest sees the same answer as
-  for a request no rule matches
-  (`test_missing_secret_is_indistinguishable_from_a_policy_miss`). Which secrets the host
-  holds is not the guest's to learn. The audit record keeps the real reason.
+Pinned by: `test/test_addon.py`, `TestGuestCredential` in `test/test_cli_validation.py`.
 
-A missing or malformed secret warns at `up` and never blocks startup. If a session's
-ruleset names `inject_auth=<name>` and the variable is absent or not one
-`"<Header>: <value>"` line, `_push_secrets` in [`cli/silkgate`](../cli/silkgate) prints a
-warning and continues. The session comes up, requests that match that rule are denied, and
-the guest reads the credential status in `/silkgate/CONTEXT.md`. The session scope above has
-a cost: each `up` needs the variable in its own environment, because a session never inherits
-a secret already in the proxy.
+### After a proxy restart
 
-The store's lifetime is the proxy process. Secrets are pushed per launch and live in proxy
-memory only, so they die when the proxy exits, while sessions and their ruleset snapshots
-survive on disk. A proxy restart under a live session therefore leaves injection with no
-value: a request that matches an `inject_auth` rule fails closed, with audit reason
-`missing secret for inject_auth=<name>`. Recover on either path: relaunch the session
-(`down`, then `up` — `up` re-pushes what its environment holds), or push into the live
-session with `silkgate secret set <name> --session <name>`. A launch with an empty
-allowlist pushes nothing, because no `inject_auth` name exists to serve. Two failure shapes
-tell the diagnosis apart. A 401 from the upstream means injection happened with a bad
-value. A deny whose audit reason is `missing secret` means the proxy holds no value at all.
+**Secrets live in proxy memory only, so a proxy restart loses them.**
+
+Sessions survive the restart on disk, but their secrets don't. Requests that need one fail
+closed. Recover in either of two ways:
+
+```sh
+silkgate down foo && silkgate up --name foo --with claude  # up re-pushes from its env
+silkgate secret set anthropic --session foo                # or push into the live session
+```
+
+| You see | Cause |
+|---|---|
+| a 401 from upstream | the proxy injected a wrong value |
+| a deny with reason `missing secret` | the proxy holds no value |
 
 ## The audit trail
 
-**Every decision writes one JSON line to the audit log, and the proxy mirrors the same line
-into a machine-only events file.** A request tells its story in at most two records, joined
-by mitmproxy's flow id. The first is the decision when it is made. The second, for an allow,
-is a `response` record once the flow concludes. A deny record is the whole story, because
-nothing went upstream. The `host` and `port` fields name the destination the proxy dials,
-never the guest's claim about it. A `Host:` header that contradicts that destination is
-recorded as `claimed`. Bodies and credential values are never written.
+**Every decision writes one JSON line. The proxy also mirrors it into a machine-only events
+file.**
 
-Action fields carry names, never values. An allow record holds what the proxy did on
-the way through. `injected` names the secret whose value replaced the header the guest sent.
-`inject_skipped` names the secret the proxy held but left unused because the guest did not
-send that header — the two fields are exclusive. `stripped_query` and `stripped_headers`
-hold the sorted names that lost at least one pair. `listen_port` rides every record kind, so
-even a `session: null` deny stays attributable to a port. The `response` record adds status,
-byte counts, and duration.
+A request has one record (a deny) or two (an allow, then its `response`), joined by flow
+id:
 
-The events file is the machine-readable contract. Each proxy start creates one
-`events-<stamp>.jsonl` beside the log: pure JSONL, free of mitmdump's own output. The
-CLI names that file to the addon in `SILKGATE_EGRESS_EVENTS_FILE`, and `proxy.json`
-records the path. Every
-request record lands in both sinks byte-identical. Control-socket activity is logged but
-never mirrored (`test_control_records_not_mirrored` in `test/test_addon.py`), so the events
-file holds request records only. The audit trail is required, not best-effort: a write that
-fails on either sink blocks the request (`EventsFileTest` in `test/test_addon.py`).
-`silkgate ui` serves a live, filterable view over these files on `127.0.0.1:8642`. It never
-parses the mixed-format `proxy-*.log` files, so its history is exactly what the retained
-events files record.
+```json
+{"decision": "allow", "session": "foo", "listen_port": 8091, "method": "POST",
+ "host": "api.anthropic.com", "path": "/v1/messages", "injected": "anthropic", "exec": "239f1a6e"}
+{"decision": "response", "id": "…", "status": 200, "duration_ms": 1840}
+```
 
-Retention deletes a file only when it is both older than 30 days and beyond the newest 20
-of its kind. The live log and events files are never pruned: `proxy.json` names them and
-the prune skips them, and a file under write keeps its mtime fresh anyway. Set
-`SILKGATE_LOG_RETAIN_DAYS=0` to keep everything.
+| Field | Meaning |
+|---|---|
+| `host`, `port` | where the proxy dials, never the guest's claim |
+| `claimed` | a `Host:` header that disagrees with the destination |
+| `injected` | the secret that replaced a header the guest sent |
+| `inject_skipped` | a secret the rule names, unused because the guest sent no such header |
+| `stripped_query`, `stripped_headers` | names the proxy removed |
+| `exec` | the `silkgate exec` that sent it, from a header the proxy strips |
+| `reason` | the rule that matched an allow, or why a deny happened |
+| `status`, `duration_ms`, `ttfb_ms`, `request_bytes`, `response_bytes` | on the `response` record |
 
-## On-disk layout of `~/.silkgate/`
+- Bodies and credential values are never written.
+- A failed write to either file blocks the request: the trail isn't best-effort.
+- `logs/proxy-*.log` mixes in mitmdump's own output. `logs/events-*.jsonl` holds request
+  records only, and it's what `silkgate ui` reads.
 
-**All host state lives under `~/.silkgate/`, created on the first `silkgate run` or
-`silkgate up`.**
+Pinned by: `test/test_addon.py`.
+
+## Capture
+
+**A rule with `capture=anthropic` records the model's responses. Capture never changes a
+flow.**
+
+- Records go to `logs/capture-*.jsonl`: `turn_start` (model, tokens), `content_block`
+  (text, tool calls), `turn_end` (stop reason).
+- Thinking blocks are recorded as lengths only.
+- A secret in a response is stored redacted, with a `secret_sighting` record that names the
+  pattern.
+- Any capture failure leaves the flow, its byte counts, and its audit record unchanged.
+
+Pinned by: `test/test_cli_journal.py`, `test/test_capture_decoder.py`.
+
+## Host state
+
+**Everything lives under `~/.silkgate/`, created on the first `run` or `up`.**
 
 | Path | Holds |
 |---|---|
-| `proxy.json` | Shared-proxy metadata: pid, base port, the port pool, log path, events path, socket path |
-| `proxy.sock` | The control socket (mode `0600`) |
-| `proxy.lock` | The lock that serializes proxy start and stop |
-| `sessions/<name>/meta.json` | Session metadata: sandbox name, port, image, profiles, command, mounts |
-| `sessions/<name>/rules.txt` | The composed ruleset snapshot the proxy reads for that session |
-| `sessions/<name>/context.md` | The guest context, copied into the guest at `/silkgate/CONTEXT.md` |
-| `sessions/<name>/settings.json` | The projected host model settings, copied into the guest at each profile's `settings_path` |
-| `ca/egress-ca.pem` | The MITM certificate, baked into guest images and trusted by guests — never the private key |
-| `logs/proxy-*.log` | The audit log, one file per proxy start |
-| `logs/events-*.jsonl` | The events files: the same request records, machine-only |
-| `logs/proxy-*.rules` | The one fixed ruleset a `verify` proxy ran with |
-| `logs/standalone-*.rules` | The one fixed ruleset a `silkgate proxy` run enforced |
-| `docker/` | Silkgate's own `DOCKER_CONFIG`, so image builds never call the user's credential helper |
+| `proxy.json` | the live proxy: pid, port pool, log and events paths |
+| `proxy.sock`, `proxy.lock` | the control socket, and the start/stop lock |
+| `sessions/<name>/` | a live session: `meta.json`, `rules.txt`, `context.md`, `settings.json` |
+| `archive/<sid>/` | an ended session (below) |
+| `ca/egress-ca.pem` | the proxy's CA certificate, never its key |
+| `logs/proxy-*.log`, `logs/events-*.jsonl` | the audit trail, one pair per proxy start |
+| `logs/capture-*.jsonl` | captured model responses |
+| `logs/proxy-*.rules`, `logs/standalone-*.rules` | the ruleset a `verify` or `silkgate proxy` ran with |
+| `docker/` | silkgate's own `DOCKER_CONFIG`, so builds never call your credential helper |
+
+### The archive
+
+**An ended session moves to `archive/<sid>/`. Nothing is silently deleted.**
+
+The sid is a UTC stamp, the session name, and six hex characters, so sorting by name sorts
+by time. `silkgate ls -a` lists archives, and the audit UI reads them.
+
+| File | Holds |
+|---|---|
+| `meta.json` | the session's metadata, plus `sid`, `ended`, `last_rc` |
+| `rules.txt` | the ruleset the proxy enforced |
+| `journal.jsonl` | one record per event: `created`, `exec_start`, `exec_end`, `harvest`, `frozen`, `resumed`, `killed`, `down` |
+| `output.log` | the last 20000 lines of guest output, at most 8 MiB |
+| `brief.md`, `briefs/<exec_id>.md` | the session's brief, and each exec's |
+
+- The journal records each exec's argv, prompt included: it exists to reconstruct a
+  session. Env vars appear as names only.
+- The journal is mode `0600`, and no guest can read `~/.silkgate`.
+- A failed archive step warns, and the teardown completes. A sandbox that can't be removed
+  keeps its session, and the command fails.
+- `SILKGATE_SNAPSHOT_TAIL_LINES` and `SILKGATE_SNAPSHOT_MAX_BYTES` change the
+  `output.log` bounds.
+
+Pinned by: `test/test_cli_journal.py`.
+
+### Retention
+
+**A file goes only when it's both older than its age limit and beyond its newest-count
+guard. Each removal prints a line.**
+
+| Kind | Age | Keeps at least | Knob (`0` keeps everything) |
+|---|---|---|---|
+| `proxy-*.log`, `events-*.jsonl`, `*.rules` | 30 days | newest 20 per kind | `SILKGATE_LOG_RETAIN_DAYS` |
+| `capture-*.jsonl` | 7 days | newest 20 | `SILKGATE_CAPTURE_RETAIN_DAYS` |
+| `archive/<sid>/` | 30 days | newest 50 | `SILKGATE_ARCHIVE_RETAIN_DAYS` |
+
+- The live proxy's files are never removed.
+- Capture keeps less, because it holds conversation content.
+
+Pinned by: `test/test_cli_journal.py`, `test/test_cli_logs.py`.

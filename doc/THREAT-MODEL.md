@@ -1,173 +1,161 @@
 # Threat model
 
-Read this to understand what an adversarial guest can attempt and which layer stops each
-attempt. Tier 1 and Tier 2 are defined here in full. The glossary in
-[ARCHITECTURE.md](./ARCHITECTURE.md) gives the one-line versions.
+Read this to see what a hostile guest can try, and which tier stops it.
 
-The scenario: an adversarial coding agent, equal to arbitrary code execution, runs inside a
-microVM, and the proxy is its only egress. The attacker wants to exfiltrate data — source,
-the mounted workspace, reachable secrets — and to reach attacker-controlled infrastructure.
+The scenario: a hostile agent, equal to arbitrary code execution, runs in the microVM, and
+the proxy is its only way out. It wants to send data out (source, the workspace, any secret
+it can reach) or to reach the attacker's servers.
 
-## The reframe that drives everything
+## Allowlists bound who, not what
 
-**An allowlist bounds who the agent talks to, not what it says.** Every allowed destination
-is a potential exfiltration carrier. Two distinct axes are often conflated:
+**An allowlist limits who the agent talks to, not what it says.**
 
-- Exfiltration bandwidth is bounded only by whether the destination stores or echoes
-  attacker-readable data, by request volume, and by content caps and inspection. It is never
-  bounded by glob breadth. Of the caps, this design ships the size half only, per request: a
-  rule's `max_body` caps the request body. Nothing inspects content, nothing caps responses,
-  and nothing rate-limits.
-- Capability and blast radius are bounded by path and method scope.
-
-A correction worth a record: `*` (one segment) is not safer than `**` for exfiltration. A
-single path segment carries an arbitrary-length base64 blob. Glob granularity bounds the
-shape of a URL, not the bytes through it. `POST github.com/<org>/<repo>` and `github.com/**`
-leak identically as exfiltration channels. The first only restricts what the agent can do:
-write one repo, not open gists or issues on others. Do not mistake a scoped path for stopped
-exfiltration.
-
-There are three problems. The proxy owns only the middle one.
-
-## Tier 1 — network-layer prerequisites
-
-**Tier 1 forces all guest egress to the session's proxy port, enforced outside the guest. If
-any part of it leaks, the proxy is theater: the agent goes around it.** The guest is
-root-compromised by assumption, so enforcement must live outside it. Any iptables, route, or
-resolver configuration inside the guest is flushable by guest-root and is not a boundary.
-Tier 1 is host-side policy on the guest's interface.
-
-| Channel | Attack | Required property |
+| Axis | Bounded by | In silkgate |
 |---|---|---|
-| DNS (port 53) | `<data>.attacker.com` queries tunnel data past any HTTP proxy | The guest resolves no external names. Port 53 terminates in the VMM. |
-| QUIC / HTTP3 (UDP 443) | Bypasses an HTTP proxy entirely | Default-deny covers all UDP. |
-| IPv6 | A v4-only deny leaves v6 wide open — a classic miss | Default-deny covers both address families. |
-| Raw sockets, ICMP, other IP protocols | Channels below TCP | Only TCP to the proxy port leaves the VMM. |
+| What the agent can do | path and method scope | rules |
+| How much it can leak | whether the destination stores or echoes data, volume, content limits | `max_body` per request only. No content inspection, no response cap, no rate limit. |
+
+A narrow glob isn't safer for leaks. One `*` path segment carries any base64 blob, so
+`POST github.com/acme/app` and `github.com/**` leak the same. The narrow rule only limits
+what the agent can do: write one repo, not open gists elsewhere.
+
+## Tier 1: the network boundary
+
+**Tier 1 forces all guest egress to the session's proxy port, from outside the guest. If it
+leaks, the agent just goes around the proxy.**
+
+The guest is root by assumption, so anything configured inside it (iptables, routes, a
+resolver) isn't a boundary.
+
+| Channel | Attack | Required |
+|---|---|---|
+| DNS (port 53) | `<data>.attacker.com` queries tunnel past any HTTP proxy | No external names resolve. Port 53 ends in the VMM. |
+| QUIC, HTTP/3 (UDP 443) | bypasses an HTTP proxy | Default-deny covers all UDP. |
+| IPv6 | a v4-only deny leaves v6 open | Default-deny covers both families. |
+| Raw sockets, ICMP, other protocols | channels below TCP | Only TCP to the proxy port leaves. |
 
 ### How microsandbox enforces it
 
-**microsandbox terminates the guest's network in its own host-side userspace TCP/IP stack
-(smoltcp), where a default-deny policy engine runs before any real socket opens.** It does
-not use libkrun's TSI mode: it attaches a virtio-net device and ends it in that stack, native
-on HVF and KVM. The guest's only egress path is `eth0`, then the host-side stack, then the
-policy check, then a real socket opened by the host process. Guest-root can reconfigure
-`eth0`, add routes, run its own resolver, or craft raw frames — every frame still terminates
-in the host stack. Only a hypervisor escape bypasses it. This is the enforce-outside-the-guest
-property Tier 1 needs, with no nested VM, no `pf`, and no `nft`.
+**microsandbox ends the guest's network in its own host-side TCP/IP stack, where a
+default-deny policy runs before any real socket opens.**
 
-The configuration is `msb run … --net-default-egress deny --net-rule
-"allow@host:tcp:<proxyport>"`, with `HTTPS_PROXY=host.microsandbox.internal:<proxyport>` in
-the guest.
+```text
+guest eth0 ─▶ virtio-net ─▶ host-side stack (smoltcp) ─▶ policy ─▶ real socket
+```
 
-Port 53 is not an egress channel in either protocol. microsandbox's gateway intercepts
-all UDP/53, and its forwarder applies the egress policy per query, so with no DNS allow rule
-the default-deny yields NXDOMAIN — no explicit DNS deny is needed. Its stub answers `REFUSED`
-for TCP/53 to every destination. The proxy alias resolves through the guest's `/etc/hosts`,
-so nothing breaks. Do not add `allow@host:udp:53` to a session. That rule reopens DNS.
+Guest root can reconfigure `eth0`, add routes, or craft raw frames. Every frame still ends
+in that stack. Only a hypervisor escape bypasses it. Silkgate starts each guest with:
+
+```text
+msb run … --net-default-egress deny --net-rule "allow@host:tcp:<port>"
+HTTPS_PROXY=host.microsandbox.internal:<port>
+```
+
+DNS needs no extra rule:
+
+- All UDP/53 goes to microsandbox's gateway. With no DNS allow rule, every query gets
+  NXDOMAIN.
+- TCP/53 to any destination gets `REFUSED` from microsandbox's own stub.
+- The proxy alias resolves through the guest's `/etc/hosts`.
+
+Don't add `allow@host:udp:53` to a session. That rule reopens DNS.
 
 ### Verified live
 
-**A root guest reached nothing except its own proxy port: 15 of 15 checks passed, and three
-oracles outside the guest agree.** The guest reached nothing by TCP, UDP, DNS over either
-transport, IPv6, or ICMP. It did not escape through a new route, a new address, or any of the
-host's other ports. The addon allowed the allowlisted host and refused an unlisted one. Each
-denial was an answer from the boundary, not a silence.
+**From a root guest, nothing but the guest's own proxy port answered. All 15 checks passed,
+and three observers outside the guest agreed.**
 
-The three oracles sat outside the guest. A listener the allowlist omits heard nothing from
-the guest. A recorder endpoint saw the proxy replace a credential the guest sent, and never
-add one the guest did not send. The run's audit log holds the decisions the checks provoked. With
-`--negative-control`, a deliberately leaky guest fails six of the checks — the only proof
-that the checks can fail at all.
+```sh
+silkgate verify                              # bare guest
+silkgate verify --full                       # also installs probe tools through the proxy
+silkgate verify --full --negative-control    # adds a leaky guest that must fail
+```
 
-Platforms: macOS (Apple Silicon, HVF, msb 0.5.4/0.5.7) by hand, and Linux (x86_64, KVM,
-msb 0.6.8, in the `test/linux/` container) by CI on every push. Coverage differs. The Linux
-guest has no working IPv6 and maps the proxy alias to v4 only, so a check whose subject is
-a v6 path reports that it had nothing to probe.
+- No TCP, UDP, DNS over either transport, IPv6, or ICMP got out. Neither did a new route, a
+  new address, or the host's other ports.
+- A blocked probe passes only on an answer from the boundary, never on silence. A refusal
+  counts. An unreachable means the probe never left, and proves nothing. Silence is graded
+  against a control that measures how this boundary denies.
+- Check 0 tests the probe itself: it needs the proxy to refuse a request no rule allows. A
+  bare TCP connect proves nothing, because microsandbox's NAT completes the handshake with
+  no listener.
+- Check 3 runs as root with no direct route. Check 7 re-adds a default route as root and is
+  still blocked: enforcement sits below the guest NIC. If any of checks 3 to 7 succeeds, the
+  boundary leaks.
+- `--full` checks which checks ran (the guest's `CHECKS:` line), not just the count. A skip
+  fails it.
+- Three observers outside the guest:
+  - a listener the allowlist omits, which must hear nothing, while its own control token
+    must arrive
+  - a recorder that must see the proxy replace a credential the guest sent, and never add
+    one
+  - the run's audit log, which must hold the decisions the checks provoked
+- `--negative-control` must fail six checks on a deliberately leaky guest. It's the only
+  proof the checks can fail.
+- Every `up` and `run` re-runs check 3 before handing over the guest.
 
-The checks live in `test/verify_guest.sh`, run as root inside a guest by `silkgate verify`.
-`test/test_verify_checks.py` and `test/test_verify_oracles.py` pin the harness. Pin your
-`msb --version` — rule-grammar scope names drift pre-1.0.
+| Platform | msb | How |
+|---|---|---|
+| macOS, Apple Silicon (HVF) | 0.5.4, 0.5.7 | by hand |
+| Linux x86_64 (KVM), in `test/linux/` | 0.6.8 | CI, every push |
+
+The Linux guest has no working IPv6, so the v6 checks report nothing to probe there. Pin
+your `msb --version`: rule names drift before 1.0.
+
+Pinned by: `test/verify_guest.sh` (the checks), `test/test_verify_checks.py` and
+`test/test_verify_oracles.py` (the harness).
 
 ### Fallbacks
 
-**If microsandbox's policy proves insufficient, three fallbacks exist, ranked.**
+**If microsandbox's policy ever proves insufficient, three fallbacks exist, best first.**
 
-1. A `VZFileHandleNetworkDeviceAttachment` userspace gateway (fork gvproxy). Strongest, but
-   Virtualization.framework-only, so it drops libkrun.
-2. No NIC plus a vsock-to-host relay. Equal containment, but macOS has no host `AF_VSOCK`,
-   so it needs a custom host relay and an in-guest TCP-to-vsock shim.
-3. Host `pf` on `bridge100`, keyed by VM subnet. Fragile — it races Apple's InternetSharing
-   daemon — and defense-in-depth only.
+1. A userspace gateway on `VZFileHandleNetworkDeviceAttachment` (a gvproxy fork). Strongest,
+   but Virtualization.framework only, so it drops libkrun.
+2. No NIC, plus a vsock relay to the host. Same containment, but macOS has no host
+   `AF_VSOCK`, so it needs a custom relay and an in-guest shim.
+3. Host `pf` on `bridge100`. Fragile, because it races Apple's InternetSharing: defense in
+   depth only.
 
-The Linux fallback is a tap device plus an `nft` ruleset in the `inet` family on that
-interface. The rules: allow `ct state established,related`, allow new TCP to the proxy
-address and port only, and drop everything else. That covers all UDP, ICMP, IPv6, and other
-TCP, with no resolver in the guest. It is not needed while microsandbox's stack holds.
+On Linux: a tap device plus an `nft` ruleset in the `inet` family. Allow established
+traffic and new TCP to the proxy port, and drop the rest.
 
-## Tier 2 — what the proxy enforces (and the traps)
+## Tier 2: what the proxy enforces
 
-**Tier 2 is per-request enforcement at the proxy: the mitmproxy addon plus the rule engine
-in [DSL.md](./DSL.md).** Each trap below names the failure it guards against.
+**Tier 2 is per-request enforcement: the mitmproxy addon plus the rule engine
+([DSL.md](./DSL.md)).**
 
-- Domain fronting. The proxy rejects any request whose SNI and Host disagree.
-- Host-parsing discrepancies — the null-byte bug class (see the Claude Code SOCKS5 bypass in
-  [SOTA.md](./SOTA.md)). The matcher must normalize the host identically to how the
-  connection layer resolves it. Reject null bytes, `%`, CR-LF, whitespace, `user@host`,
-  brackets, and raw IP literals. Strip the trailing dot, lowercase, and force punycode to
-  kill homographs. If the pattern is laxer than the resolver, the difference is a bypass.
-  This is the most likely place this proxy gets broken, so normalization lives in the rule
-  engine, applied to pattern and request host by the same function
-  ([DSL.md](./DSL.md), host normalization).
-- Path scope is only as strong as path normalization. Decode `%2e%2e` and resolve `..` and
-  `.` before the match, or the pattern and the upstream server disagree.
-- Headers are micro-channels, not just names. `User-Agent`, `Range`, and `Accept-Language`
-  carry attacker bytes to a host that logs them. To allow a name is not enough: constrain the
-  value (exact or regex plus a length cap) and keep the baseline minimal. This design ships a
-  three-header, length-capped baseline — `host`, `content-type`, `content-length` — and
-  everything else, `User-Agent` included, is opt-in per rule. A constrained value is still a
-  residual low-bandwidth channel. Pin exact values for a stricter posture.
-- A WebSocket `Upgrade` to an allowed host is a bidirectional command channel that looks like
-  one allowed request. Deny `Upgrade` by default.
-- Fail closed on anything undecryptable. Cert-pinned tools, non-HTTP-over-TLS, and raw
-  CONNECT tunnels must break, not get an exception: whatever the proxy passes through
-  uninspected is the exfiltration channel. Two halves enforce it, and neither is sufficient
-  alone. The `http_connect` hook matches the tunnel's authority before the tunnel exists, and
-  `--set rawtcp=false` removes the passthrough a CONNECT falls back to when its payload is
-  not TLS. One visible consequence: a denied HTTPS destination is refused before the tunnel
-  exists, so the guest sees a rejected CONNECT that names 403 rather than a 403 response
-  body.
-- Non-standard ports. A host allowlist that ignores the port lets `allowed.com:1234` reach an
-  attacker service on a co-opted host. The rules gate it: no port means 80 and 443 only, and
-  any other port needs an explicit `:port` or `:*` ([DSL.md](./DSL.md), ports).
+| Trap | Defense |
+|---|---|
+| Domain fronting | reject SNI ≠ Host |
+| Host-parsing tricks: null bytes, `user@host`, homographs | normalize the pattern and the request host with the same function, and reject anything odd ([DSL.md](./DSL.md#normalization)). The most likely place for a bypass. |
+| `..` and `%2e%2e` in paths | decode once and resolve before matching |
+| Headers as side channels (`User-Agent`, `Range`) | strip all but a 4-header baseline. Every other header is opt-in, value-constrained. |
+| WebSocket `Upgrade` | always denied |
+| Undecryptable traffic: pinned certs, raw CONNECT, non-TLS | refused, never passed through. `http_connect` checks the tunnel's target before it opens, and `rawtcp=false` removes the fallback. |
+| Non-standard ports | no port means 80 and 443 only |
 
-## Tier 3 — the irreducible residual (no proxy fixes these)
+A denied HTTPS destination is refused at CONNECT, before any TLS. The client sees a failed
+CONNECT that names 403, not a 403 body.
 
-**Tier 3 is what remains after Tiers 1 and 2 hold. It is bounded by rule discipline and
-operations, not by code.**
+## Tier 3: what no proxy fixes
 
-- Exfiltration through a legitimately allowed path and body. `registry.npmjs.org/**` with an
-  unbounded `**` is an open channel, and the LLM API body is attacker-influenced by
-  definition. You cannot both use these and prove nothing leaves. The levers: minimize the
-  allowlist, cap request bodies with `max_body`, and prefer destinations that neither store
-  nor relay attacker-readable data. `api.anthropic.com` is low-risk because the response
-  comes from Anthropic, not the attacker. Never allowlist an endpoint that reflects headers
-  or bodies, such as an `httpbin`-style service.
-- Injected-credential abuse. The agent cannot read the injected key but can spend it: run up
-  cost, hit your account. And if any allowed endpoint reflects request headers, the agent
-  reads the key back. Scope and rate-limit the key, and never allowlist a reflector.
-- Subdomain as data. `**` in the host, and the `**.` apex matcher, let `<data>.allowed.com`
-  carry bytes in the SNI itself. Reach for `**` in hosts deliberately.
-- Timing and size side channels. Low bandwidth, out of scope, named here for honesty.
-- Inbound prompt injection. The allowed content the agent fetches is what turns it
-  adversarial. The proxy controls where the agent fetches, not the semantics of what comes
-  back. Egress control limits damage. It does not prevent the turn.
+**Tier 3 is what's left when Tiers 1 and 2 hold. Rule discipline bounds it, not code.**
 
-## Scope summary
+- Leaks through an allowed path. `registry.npmjs.org/**` is an open channel, and the LLM
+  request body is attacker-influenced by definition. Keep rules minimal, cap bodies, and
+  prefer destinations that don't store or relay what you send. Never allow an endpoint that
+  echoes headers or bodies.
+- Spending the injected credential. The agent can't read the key, but can spend it. If an
+  allowed endpoint echoes headers, it reads the key back. Scope and rate-limit keys.
+- Subdomains as data. `**` in a host lets `<data>.allowed.com` carry bytes in the SNI.
+- Timing and size side channels: low bandwidth, out of scope.
+- Inbound prompt injection. The proxy controls where the agent fetches from, not what
+  comes back. It limits the damage, but can't prevent the turn.
 
-**Each tier has one owner, and only the first two are code.**
+## Summary
 
-| Tier | Owner | In this design |
+| Tier | Owner | Status |
 |---|---|---|
-| 1 — network-layer prerequisites | Host and VMM, outside the guest | Implemented and verified: `test/verify_guest.sh` 15/15 plus three host-side oracles, macOS by hand, Linux in CI on every push, `nft` as the Linux fallback |
-| 2 — request-level enforcement | The proxy plus the rule engine | Implemented: [`mitmaddon/`](../mitmaddon/), operations in [PROXY.md](./PROXY.md) |
-| 3 — irreducible residual | Rule discipline plus operations | Accepted and documented, not code |
+| 1, network | host and VMM, outside the guest | implemented and verified, 15 of 15 checks |
+| 2, requests | the proxy and the rule engine | implemented ([PROXY.md](./PROXY.md)) |
+| 3, residual | rule discipline and operations | documented, not code |

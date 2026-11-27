@@ -9,192 +9,143 @@ Read this to launch silkgate sandboxes, choose their policy, and judge what a ru
 
 ## The boundary
 
-**Both containment layers sit outside the guest, so nothing the guest does can widen them.**
-The workload runs in a microVM. Its only route out is a proxy that terminates TLS and
-matches each request against an allowlist. microsandbox's host-side network policy pins
-the VM to that proxy. `./cli/silkgate verify --full` checks this containment on a live
-sandbox.
+**The workload runs in a microVM whose only way out is a proxy that allowlists each
+request. Both layers sit outside the guest, so nothing the guest does can widen them.**
 
-Run the CLI from the repo root (`./cli/silkgate`, as below) or by absolute path. A
-`-v` mount's SRC takes either kind of path. The prerequisites are the README's:
-docker, mitmproxy, and microsandbox.
+- From a checkout, run `./cli/silkgate` from the repo root, or use its absolute path.
+- Installed as the silkgate plugin, the CLI is `"${CLAUDE_PLUGIN_ROOT}"/cli/silkgate`.
+- The host needs docker, mitmproxy, and microsandbox. Commands name whatever is missing.
+- `./cli/silkgate verify --full` checks containment on a live sandbox.
 
-## Write invocations across multiple lines
+## How to write an invocation
 
-**Write each invocation across multiple lines, one flag per line, with the guest's command
-indented under `--`.** The invocation is what a human sees in the approval prompt. The
-split shows the granted policy — which profiles, which mounts — apart from whatever
-runs inside. If a short command fits on one line, keep it there.
-
-## Let commands report their own preconditions
-
-**Do not pre-check what a command reports itself.** Silkgate commands surface their own
-preconditions. For example, a launch pushes each secret and then names anything missing
-or malformed in its own output, before any exec. A host-side probe of
-`SILKGATE_EGRESS_SECRET_*` presence, a `silkgate ls`, or a probe of proxy health before a
-launch duplicates that report and adds noise. Launch, then read what the tool said.
-
-## What the guest looks like
-
-**A guest holds exactly what its profiles installed, the mounts you granted, and a dummy
-key.**
-
-- `-v SRC:DST[:ro|rw]` (repeatable) mounts host directory SRC at DST in the guest,
-  read-only unless the spec says `:rw`. The mounts are the only host paths in the
-  guest. Everything else the guest writes dies with the machine. `/workspace` is the
-  working directory. Mount something there (`-v DIR:/workspace:rw` for a writable
-  workbench), or leave it as guest-local scratch.
-- Silkgate refuses a DST that is relative, `/`, at, under, or above `/silkgate`,
-  `/root/lfsstore`, or `/root/gitdir`, duplicated, or nested under another mount. If a
-  read-write mount holds a `.git` directory, the launch needs `--allow-git-dir`.
-- The `.git`-directory check is skipped for read-only mounts, so a whole repository
-  can be mounted directly. The guest then reads all of `.git`, `.git/config` included,
-  and a remote URL there can embed a token. Check `.git/config` before you mount a
-  repository.
-- There is no writable-copy flag. For a writable copy of a plain directory, mount it
-  read-only and copy it in the guest: `-v DIR:/data:ro`, then `cp -a /data/. /workspace/`.
-- Pick the mode by what the guest needs. A read-only shelf of host files takes
-  `-v DIR:DST` — read-only is the default. A scratch checkout, with printed output as
-  the deliverable, takes `--checkout [REF]` and needs `--with git`. Deliverable commits
-  take `--branch NAME`.
-- `--branch` is `--checkout` plus a return path. The worktree moves from a guest-only
-  folder to a host-derived mount, and a named branch is created at the base. The base
-  is HEAD unless `--checkout REF` names another. Commits return fast-forward only: at
-  `run` teardown, at `down`, or earlier with `harvest NAME`. `--branch X --checkout
-  REF` sets the branch base to REF.
-- A plain `--checkout` guest holds committed content only — untracked files such as
-  `.env` never enter it. Nothing a `--checkout` guest writes returns, commits included.
-  `--checkout` works from the silkgate repo itself: only the repository's `.git` is
-  mounted, read-only, the same shape `--branch` always used.
-- Each guest boots with 1G of memory and half of the host's CPUs by default. `--memory SIZE` and
-  `--cpus COUNT` on `run` and `up` change that. Both are limits the host scheduler
-  shares, not reservations. If Claude Code runs a test suite or a build inside the
-  guest, give it 2G.
-- The base image has no language runtimes: no node, no python, no git. A guest has
-  exactly what its profiles installed, so `--with claude` alone cannot run `node --test`.
-- `inject_auth=<name>` in a rules file maps to `SILKGATE_EGRESS_SECRET_<NAME>` in the
-  host environment. That variable holds the complete header line the proxy sends upstream
-  (`"x-api-key: sk-ant-…"`, or `"Authorization: Bearer sk-ant-oat01-…"` for a subscription
-  token, not a bare key). Under a subscription token, never pass `--bare` to Claude Code:
-  it ignores the token there. The operator chooses how the variable
-  reaches the environment: a shell profile, a per-launch prefix, a password-manager
-  wrapper. That choice is the operator's responsibility.
-- A missing or malformed secret is a warning, not a startup error. The session comes up,
-  the launch output names the defect, and `/silkgate/CONTEXT.md` shows the guest the
-  credential status. If a secret your task needs is missing or malformed, stop and
-  report. Do not launch a task whose matching requests will all be denied.
-- The guest's own `ANTHROPIC_API_KEY` is a dummy that the claude profile bakes in. The
-  proxy's CA is in the guest's trust store. That combination is what makes the
-  interception work. Check it with `run --name keycheck --with claude -- printenv ANTHROPIC_API_KEY`. If
-  a run dies on a TLS or auth error rather than a 403, suspect that layer.
-- The audit log records the proxy's decisions about requests. It never records request
-  bodies, and never the injected credential, which is spent upstream, not written.
-- `silkgate-claude` (below) exists in the guest only when `--with claude` is among the
-  profiles.
-
-## Paths and ports
-
-**Every fixed path and port lives in this table.**
-
-| Item | Value |
-|---|---|
-| Guest working directory | `/workspace` |
-| Guest context, as a file | `/silkgate/CONTEXT.md` |
-| Guest context, as text in the environment | `$SILKGATE_CONTEXT` |
-| Context copy that a plain `claude -p` reads | `/root/.claude/CLAUDE.md` |
-| Projected host model settings (`model`, `effortLevel`) | `/root/.claude/settings.json` |
-| Audit log files | `~/.silkgate/logs/proxy-*.log` |
-| Host-side secret variables | `SILKGATE_EGRESS_SECRET_<NAME>` |
-| Proxy listen port | 8090, or `--port N` on `run` and `up` when 8090 is taken |
-
-## `run`: one task, then gone
-
-**Use `run` by default: it creates a microVM, runs one command, and removes everything.**
-It is one command where a session is three. There is nothing to `down` afterward. A
-caller that dies mid-task cannot leave a session or a sandbox behind. Boot takes about
-0.3 seconds, so a fresh VM per command costs almost nothing.
-
-`run` starts and stops the proxy itself, and it builds the image it needs on first use.
-If the first run with a new profile set stalls, allow a minute for that build before you
-suspect a hang. Later runs with the same profiles reuse the image and start in under a
-second.
-
-Give every invocation that creates a sandbox a `--name`. The audit log, the journal,
-and the archive carry the name, and an unnamed sandbox is hard to attribute. The
-requirement covers `run` and `up` both.
+**Name every sandbox, put one flag per line, and indent the guest command under `--`.**
 
 ```sh
 ./cli/silkgate run \
     --name fix-tests \
-    --with node@22.23.5 \
+    --with node \
     --with claude \
     -v ./test/mock:/workspace:rw \
     -- silkgate-claude \
         -p "The tests in /workspace fail. Run 'node --test', fix the source, confirm it passes."
 ```
 
-`silkgate-claude` is Claude Code plus the flags that are always right here. It adds
-`--permission-mode bypassPermissions`, because the VM is the boundary and an in-guest
-permission prompt hangs a non-interactive run. It adds
-`--append-system-prompt-file /silkgate/CONTEXT.md`. It prints on stderr what it added,
-and it skips either flag you pass yourself. In `-p` mode the prompt is positional: `-p`
-is a mode flag and does not take the prompt. That is why `-p --resume <id> "task"` is
-also correct.
+- The human approving the command sees the granted policy apart from what runs inside it.
+- `--name` labels the audit log, the journal, and the archive. Both `run` and `up` take it.
+- Don't pre-check what a command reports itself: secrets, proxy health, `silkgate ls`.
+  Launch, then read the output.
+
+## `run` by default
+
+**`run` creates a VM, runs one command, and removes everything.**
+
+- Boot takes ~0.3 s. There's nothing to `down`, and a dying caller leaves nothing behind.
+- The first run with a new profile set builds an image. Allow a minute before you suspect
+  a hang.
+- `silkgate-claude` is Claude Code plus `--permission-mode bypassPermissions` and
+  `--append-system-prompt-file /silkgate/CONTEXT.md`. It prints what it added on stderr,
+  and skips a flag you pass yourself. Plain `claude` as root refuses `bypassPermissions`.
+- In `-p` mode the prompt is positional, so `-p --resume <id> "task"` is correct.
+
+## What the guest has
+
+**A guest holds what its profiles installed, the mounts you granted, and a dummy
+credential. Nothing else.**
+
+| Item | Value |
+|---|---|
+| working directory | `/workspace`: a mount, a git checkout, or scratch |
+| guest context | `/silkgate/CONTEXT.md`, and as text in `$SILKGATE_CONTEXT` |
+| context copy a plain `claude -p` reads | `/root/.claude/CLAUDE.md` |
+| projected `model` and `effortLevel` | `/root/.claude/settings.json` (`--no-settings` skips) |
+| a `--brief FILE` | `/silkgate/BRIEF.md` |
+| defaults | 1G memory, half the host's CPUs. `--memory 2G` for a test suite or build. |
+| audit log | `~/.silkgate/logs/proxy-*.log`, printed at startup |
+
+- The base image has no node, no python, no git. `--with claude` alone can't run
+  `node --test`.
+- `silkgate-claude` exists only with `--with claude`.
+- Secrets are `SILKGATE_EGRESS_SECRET_<NAME>` on the host, each a full header line:
+  `"x-api-key: sk-ant-…"`, or `"Authorization: Bearer sk-ant-oat01-…"` for a subscription
+  token. The guest holds a matching dummy: `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`.
+- Under a subscription token, never pass `--bare`: Claude Code ignores the token there.
+- If a secret the task needs is missing, the launch says so. Stop and report: every
+  matching request will be denied.
+- A TLS or auth error, rather than a 403, points at the dummy or the CA. Check with
+  `run --name keycheck --with claude -- env`.
+
+## Mounts
+
+**`-v SRC:DST[:ro|rw]` is read-only unless you add `:rw`.**
+
+- Refused: `/`, `$HOME`, silkgate's checkout and state, a relative DST, a DST touching
+  `/silkgate`, `/root/lfsstore` or `/root/gitdir`, and nested or duplicate DSTs.
+- A read-write mount holding a `.git` directory needs `--allow-git-dir`: its hooks would run
+  on the host. For the same reason, never run git on the host in a directory a guest wrote.
+- A read-only mount still exposes `.git/config`, where a remote URL can hold a token. Check
+  it before you mount a repo.
+- For a writable copy of a directory, mount it read-only and copy it:
+  `-v DIR:/data:ro`, then `cp -a /data/. /workspace/`.
+
+| The guest needs | Use |
+|---|---|
+| to read host files | `-v DIR:DST` |
+| a repo to explore, output as the deliverable | `--with git --checkout [REF]` |
+| to deliver commits | `--with git --branch NAME` |
+
+## Git
+
+**`--checkout` is a throwaway clone. `--branch` also returns its commits, fast-forward
+only.** Both run from inside the repo.
+
+- Commits return at `run` teardown, at `down`, or earlier with `harvest NAME`. `run` prints
+  its session name at startup, so a second terminal can harvest mid-run.
+- A harvest that can't bank everything makes `run` and `down` exit 1, and keeps the
+  workspace, even when the guest exited 0.
+- Uncommitted files die with the session.
+- Under `--branch`, `GIT_DIR` and `GIT_WORK_TREE` are set in every exec. An unrelated
+  clone needs `env -u GIT_DIR -u GIT_WORK_TREE git clone …`.
+- Host branches appear as `origin/<name>` in the guest. Write that in briefs.
+- Host hooks run in the guest. One that uses host paths fails: `--no-verify`, or fix it.
+- A mounted linked worktree can't run git: its `.git` file points outside the mount.
+
+Details: [GIT.md](../../../doc/GIT.md).
 
 ## What you get back
 
-**The exit code means the guest finished, never that the work is right — the output is
-the guest's report, not evidence.**
+**The exit code means the guest finished, never that the work is right. The output is the
+guest's report, not evidence.**
 
-- Output streams live, stdout and stderr kept apart, as a convenience and not a property.
-  The relay tags stderr with an in-band byte, and a guest can write that byte itself. A
-  guest can therefore put lines on your stderr, or emit well-formed `stream-json` events
-  that never came from the harness. `test/test_relay.py` pins the attribution that does
-  hold: silkgate's own lines open with a byte no relayed guest output can carry. Capture
-  the stream only when something will parse it (`--output-format stream-json --verbose`,
-  then pipe or redirect). Treat what it parses as the guest's report, not as evidence.
-- The exit code is the guest command's. An agent run that exits 0 means the agent
-  finished, never that its work is right. To learn whether the tests pass, run them
-  yourself in a fresh sandbox and read that exit code:
+- stdout and stderr stay apart as a convenience. A guest can forge the split, and emit
+  fake `stream-json` events. Silkgate's own lines start with a byte no guest output can
+  carry (`test/test_relay.py`).
+- Capture the stream only if something parses it: `--output-format stream-json --verbose`.
+- To learn whether tests pass, run them yourself in a fresh sandbox, with the smallest
+  policy:
 
   ```sh
-  ./cli/silkgate run --name check-tests --with node@22.23.5 -v ./test/mock:/workspace:rw -- node --test
+  ./cli/silkgate run --name check --with node -v ./test/mock:/workspace -- node --test
+  ./cli/silkgate run --name check-branch --with git --with node --checkout agent/fix-tests -- node --test
   ```
 
-  That run needs no claude profile and no secret — the smallest policy that can answer
-  the question. To check a harvested branch, point a disposable checkout at it:
+- Review the diff on the host before you push. Check that no test got weakened. For an
+  untracked fixture, `git add -N <dir>` first, or `git diff` shows nothing.
+- If a task looks failed, read the audit log first. Each line names its session.
 
-  ```sh
-  ./cli/silkgate run --name check-branch --with git --with node@22.23.5 --checkout agent/fix-tests -- node --test
-  ```
-- The workspace diff is the deliverable. Review it on the host before you push. Check
-  that only what you expected changed, and that no test got weakened to pass. If a
-  fixture is untracked, run `git add -N <dir>` first, or `git diff` shows nothing.
-- The startup output prints the audit log path, and the files are
-  `~/.silkgate/logs/proxy-*.log` if you lose it. The log is shared across sessions, and
-  each line names the session that produced it. If a task looks failed, read the audit
-  log before you conclude anything.
+## Sessions
 
-## Sessions: a later turn needs the same VM
+**Open a session only when you can name the later command that needs the same VM.**
 
-**Open a session only when you can name the later turn that must find the same VM.** A
-session keeps the VM warm between commands, and that matters in three cases. A multi-turn
-conversation is the first: a later `--resume` must find the same `/root/.claude`, and
-`run` destroys the VM and that directory with it. An interactive `attach` is the second.
-A long batch on a machine that can sleep is the third.
-
-A batch of one-shot tasks is none of those. One earlier batch ran its parallel agents as
-sessions, and none of them used `--resume` or `silkgate logs`. The machinery returned
-nothing and cost a `down` per sandbox. The one session that earned itself was a
-reconciliation, where a finished agent was still there for a follow-up question. If you
-cannot name the follow-up, use `run`. When you can:
+That's a `--resume`, an interactive `attach`, or a long batch on a machine that may sleep.
+A batch of one-shot tasks needs none: use `run`.
 
 ```sh
 ./cli/silkgate up \
     --name foo \
-    --with node@22.23.5 \
+    --with node \
     --with claude \
-    -v ~/projects/foo:/workspace:rw
+    -v ~/projects/foo/src:/workspace:rw
 
 ./cli/silkgate exec foo \
     --brief task.md \
@@ -205,239 +156,106 @@ cannot name the follow-up, use `run`. When you can:
 ./cli/silkgate exec foo \
     --brief followup.md \
     -- silkgate-claude \
-        -p --resume <id> "Read /silkgate/BRIEF.md and do the task."   # same VM, so this resumes
+        -p --resume <id> "Read /silkgate/BRIEF.md and do the task."
 
-./cli/silkgate logs foo --audit -f           # watch what it tries to reach
-./cli/silkgate attach foo                    # interactive, runs the profile's command
-./cli/silkgate down foo                      # frees the port; last one out stops the proxy
+./cli/silkgate logs foo --audit -f           # what it tries to reach
+./cli/silkgate attach foo                    # interactive
+./cli/silkgate down foo
 ```
 
-One shared proxy serves every session on its own port. Each guest's network policy admits
-only its own port, so a guest cannot reach another session's listener.
+## Briefs
 
-## `--brief`: hand the task over as a file
+**Put a multi-line task in `--brief FILE`, and point the prompt at it.**
 
-**A written, multi-line brief rides `--brief FILE`, and the prompt shrinks to a pointer
-such as "Read /silkgate/BRIEF.md and do the task."** A one-line ask stays inline in the
-prompt. `run`, `up`, and `exec` all take `--brief FILE`. FILE lands at
-`/silkgate/BRIEF.md` in the guest before the command runs. The limit is 1 MiB. An
-unreadable or oversized file dies host-side, before any guest work. After a brief lands,
-the generated guest context tells the agent to read `/silkgate/BRIEF.md` first.
+- `run`, `up`, and `exec` take it. It lands at `/silkgate/BRIEF.md`, at most 1 MiB.
+- `up --brief` sets a default for every exec without its own.
+- Each exec's brief is stored and journaled with its sha256.
+- One slot per session: concurrent agents in one session overwrite each other's brief.
 
-`up --brief` sets a session default, applied to every exec that passes no `--brief` of
-its own, re-landed on each exec. An exec's own `--brief` wins. Each exec's resolved
-brief is stored at `briefs/<exec_id>.md` in the session directory and journaled with
-its sha256.
+## Parallel agents on one repo
 
-The limitation: the guest path is a single slot per session. Each exec's landed brief
-atomically replaces the previous one. Sequential follow-ups work. Only concurrent
-agents inside one session share the slot and can read each other's brief.
+**Split the work by file ownership, and write the split into every brief.**
 
-## Parallel agents against one repository
+- Each brief lists the files the agent owns, a never-edit list, and the new files it'll
+  create. Tell each agent what the others own.
+- Resolve unknowns on the host before writing briefs. A wrong hint costs more than a vague
+  one.
+- Ask for a report with Assumed and Disputed sections. Tell the agent what its sandbox
+  can't run (docker, msb, a live proxy). Check each dispute yourself.
+- Test the merged tree, not each branch. Before blaming the merge, run the same command on
+  the pre-merge commit.
+- Tell every agent to commit early. To continue a dead agent's work, harvest its branch,
+  then launch `--branch <name>-2 --checkout <name>`, with a brief listing what it inherits.
 
-**Partition by file ownership, and put the partition in every brief — agents that own
-disjoint files merge with near-zero conflicts.** Each brief lists the files the agent
-owns plus an explicit never-edit list, and names its new files up front. Tell each
-agent what the others own, so a collision surfaces as a report line instead of an
-edit. Partition tests by the contract they assert, not only by file.
+## Profiles and rules
 
-- Resolve the agents' unknowns on the host before you write the briefs. One minute of
-  host work removes the largest source of wrong work. A wrong hint costs more than a
-  vague one: it fences the agent off the real cause.
-- Demand a report with Assumed and Disputed sections. Tell the agent what its sandbox
-  cannot run (docker, msb, a live proxy), so those claims land under Assumed. Check
-  each dispute yourself before you accept it.
-- Verify the merged tree, never each branch alone. A regression that lives between two
-  branches is invisible in either one. Before you blame the merge, baseline the same
-  command at the pre-merge commit.
-- Brief every agent to commit early. Agents die mid-run: an API stream idles out, the
-  host sleeps, a guest hits its memory limit. Commits survive where an unwritten
-  report does not. To continue a dead agent's work, harvest its branch, then launch a
-  successor with `--branch <name>-2 --checkout <name>` and a brief that lists the
-  inherited commits.
+**`--with NAME[@VERSION][:ARG]` adds a profile: its installer and its allowlist, together.**
 
-## Profiles: the image and the policy are one declaration
+- [PROFILES.txt](PROFILES.txt) lists every profile, its purpose, its credential, and its
+  rules file. Read it instead of running the CLI.
+- No version means the pinned one. A version must be exact: `node@20.18.1` works,
+  `node@22` fails.
+- A profile with an ARG pattern requires `:ARG`. Preview the result with
+  `./cli/silkgate profiles --render NAME:ARG`.
+- `--rule 'host/path GET'` adds one rule. Rules can't be removed, so a profile's rules are a
+  floor. Pick the smallest set.
+- To add a capability, write a profile ([PROFILES.md](../../../doc/PROFILES.md)). Don't edit an
+  image.
 
-**Pick capabilities with `--with NAME[@VERSION][:ARG]`, repeatable: a profile carries
-both its installer and its allowlist.** A profile holds how to install itself
-(`setup.sh`, at image build time) and what it can reach (`rules.txt`, enforced by the
-proxy). A guest therefore never holds a tool whose traffic nobody allowed. The image
-builds on first use and is cached under a hash of those inputs.
-
-Omit the version (`--with node`) to get the one the profile pins. A named version
-installs that exact release. Anything the profile's installer can fetch upstream works,
-so `node@20.18.1` succeeds as well as the default. The version must be exact: `node@22`
-is not a prefix match and fails the build. `./cli/silkgate profiles` lists the names and
-their pinned defaults.
-
-The committed copy of that listing is [PROFILES.txt](PROFILES.txt) in this skill's
-folder: every profile with its purpose, injected credential, and rules path. No launch
-plan needs to shell out to the CLI. Regenerate the copy with
-`COLUMNS=80 ./cli/silkgate profiles > .claude/skills/sandboxed-agent/PROFILES.txt`.
-The drift test in `test/test_scripts.py` fails when the snapshot and `profiles/`
-disagree.
-
-A profile whose ARG column there shows a pattern requires `:ARG`, and the argument
-must fully match the pattern. The argument expands into the profile's rules
-and never changes the image. Repeat the name with different arguments for several
-grants. `./cli/silkgate profiles --render NAME:ARG` prints the exact rules a spec
-composes to — audit that before a launch.
-
-`--rule 'host/path GET'` adds a one-off rule. No rule can be subtracted, so a profile's
-rules are a floor: `--with node` grants `registry.npmjs.org` even to a task with no
-dependencies. Prefer the smallest profile set. Prefer download-only rules (GET). Never
-allowlist an endpoint that reflects headers or bodies back — a reflected response is an
-exfiltration channel. To add a capability, write a profile. Do not edit an image.
-
-The rule grammar, one rule per line in a `rules.txt` or after `--rule`:
-
-```
+```text
 <host>[:<port>][/<path>]   [METHOD ...]   [option ...]
+api.anthropic.com/v1/messages   POST  inject_auth=anthropic max_body=10m
+registry.npmjs.org/**           GET
 ```
 
-- Host globs: `*` matches one label (`api.github.com`, not `a.b.github.com`). `**`
-  matches any number of labels. `**.` matches zero or more labels, the apex variant. A
-  pattern that is all wildcards (`**`, `*.*`) is legal but warns on stderr, because it
-  matches every destination.
-- Path globs: `*` matches one path segment. `**` matches any path. A pattern with no `/`
-  matches any path.
-- Ports: an omitted port allows 80 and 443 only. `:*` allows any port. `:N[,M…]` pins
-  exact ports.
-- The defaults, when no option overrides them, are GET only, no request body, stripped
-  query params, and baseline headers only (host, content-type, content-length,
-  transfer-encoding).
+| Default | Widen with |
+|---|---|
+| GET only | `GET POST …` |
+| no body | `max_body=10m` |
+| query params stripped | `q:*`, `q:<name>~<regex>` |
+| headers: host, content-type, content-length, transfer-encoding | `h:*`, `h:<name>~<regex>` |
+| ports 80 and 443 | `:8443`, `:*` |
+| no credential | `inject_auth=<name>` |
 
-These options go space-separated after the pattern:
+Full syntax: [DSL.md](../../../doc/DSL.md).
 
-- `GET POST …` names the allowed methods.
-- `max_body=<size>` permits a request body up to `<size>` (bytes, with a `k` or `m`
-  suffix).
-- `q:*` allows all query params. `q:<name>=<value>` and `q:<name>~<regex>` keep the
-  matched param and strip the rest.
-- `h:*` allows all request headers. `h:<name>=<value>` and `h:<name>~<regex>` forward a
-  header that matches and drop one that does not.
-- `inject_auth=<name>` replaces the matched header's value with
-  `SILKGATE_EGRESS_SECRET_<NAME>` from the host environment.
+A read-only web grant for recon guests: `** GET q:* h:*`. Never give it to a guest that holds
+a credential or sensitive files: it matches every destination.
 
-A wildcard-only, read-only web grant exists for recon guests:
+## The guest's context
 
-```
-** GET q:* h:*
-```
+**`/silkgate/CONTEXT.md` describes the sandbox to the guest. It's a courtesy, never a
+control.**
 
-Do not give this grant to a guest that holds a credential or sensitive workspace content.
-The pattern matches every destination, so anything the guest holds can leave.
+| Command in the guest | Sees the context |
+|---|---|
+| `silkgate-claude -p "…"` | yes |
+| `claude -p "…"` | yes, from `/root/.claude/CLAUDE.md` |
+| `claude --bare -p "…"` | only with `--append-system-prompt-file /silkgate/CONTEXT.md` |
+| any other harness | only if the prompt includes `$SILKGATE_CONTEXT` |
 
-## The guest's own context
-
-**The generated context is a courtesy to the guest, never a control — an adversarial
-guest ignores every word.** Each session writes a description of its own sandbox. It
-names the installed profiles, the allowlist, the mounts, the dummy key, and the
-launch-time status of each injected credential. It lands at `/silkgate/CONTEXT.md` and in
-`$SILKGATE_CONTEXT`, which holds the text itself, not a path. `silkgate-claude` passes it
-for you and does not pass `--bare`.
-
-The claude profile also writes the context to `/root/.claude/CLAUDE.md`, and a plain
-`claude -p` reads that copy. Claude Code's own `--bare` turns that discovery off, and
-skills, hooks, and MCP with it. Under `--bare`, the `--append-system-prompt-file` flag is
-the only route left. If your harness has neither, compose the text into the prompt:
-
-```sh
-./cli/silkgate exec foo \
-    -- \
-    sh -c 'claude -p "$SILKGATE_CONTEXT
-
-Now: <task>"'
-```
-
-`--no-context` skips all of it. Rely on the context for nothing. What it buys is fewer
-wasted turns, and blocked requests reported as requests instead of retried in a loop.
-
-A launch also forwards the host's Claude Code model configuration. The two keys `model`
-and `effortLevel` resolve from the host's settings files and land at each profile's
-`settings_path` — `/root/.claude/settings.json` for the claude profile. The guest agent
-then defaults to the same model and reasoning effort as the host. Only those two keys
-leave the host. `--no-settings` skips the projection.
+`--no-context` skips it.
 
 ## Gotchas
 
-**Each item below cost real debugging time, so read the list before your first launch.**
+**Each of these cost real debugging time.**
 
-- A denied request is not a crash. Plain http gets a 403 whose body says
-  `no matching rule`. A denied https destination is refused earlier, at CONNECT, and the
-  client reports a failed CONNECT that names 403 (curl says
-  `CONNECT tunnel failed, response 403`). The agent usually reports either one and
-  carries on. Read the audit log before you conclude the task failed.
-- `-t` changes how the command behaves, not just how it looks. It hands the guest a real
-  terminal, so programs colorize, emit cursor control, and merge stdout into stderr. That
-  merge corrupts a JSON stream. If you intend to parse the output, leave `-t` off.
-- An agent that needs git gets `--checkout` or `--branch`, not a repository mount. Both
-  run from inside the repository with `--with git` and hand the guest a real clone at
-  `/workspace`. A plain `--checkout [REF]` guest is disposable: read the code, run the
-  tests, commit locally, and nothing returns. `--branch <new-name>` is for deliverable
-  commits. They land in the host repository as that branch at `run` teardown, at `down`,
-  or earlier with `silkgate harvest NAME`. `run` prints its session name at startup:
-  six hex characters, for example `1f2a3b`. A second terminal can harvest that name
-  mid-run, and `silkgate ls` lists the live sessions. A final harvest that cannot
-  bank everything makes `run` and `down` exit 1 and keep the workspace, even when the
-  guest command exited 0. The ingest fast-forwards only and fetches under fsck
-  (`test/test_cli_branch_ingest.py` pins that rule). Uncommitted files die with the
-  session. File modes ride in the commits, so the old exec-bit ritual is gone. In both
-  modes, the host repository's `.git` is mounted read-only. With LFS in use, `.git/lfs`
-  is the one host-writable piece. A hostile guest can cost you a re-download there,
-  never content substitution, because content is checked against SHA-256 on read. Host
-  hooks are copied into the clone verbatim, so a hook that references host paths fails
-  in the guest. Pass `--no-verify`, or fix the hook. One surprise is `--branch`-only:
-  `GIT_DIR` and `GIT_WORK_TREE` are in every exec's environment there, so an unrelated
-  clone inside that guest needs `env -u GIT_DIR -u GIT_WORK_TREE git clone …`. A
-  `--checkout` clone is a normal clone, with `.git` inside `/workspace` and no env pair.
-- git does not work in a mounted worktree: its `.git` file points at a host path outside
-  the mount. A read-write mount of the whole repository is not the fix. Write access to
-  `.git` is host code execution, via hooks or `core.fsmonitor`, the next time a human
-  runs git there. So silkgate refuses a read-write mount that holds a `.git` directory
-  anywhere under it, unless you pass `--allow-git-dir`. It also refuses `/`, `$HOME`,
-  and its own checkout and state, in either mode. A read-only mount skips the `.git`
-  refusal, because the hook risk needs guest writes. A linked worktree's `.git` file
-  passes either mode, with a printed note. For git-free work under a read-write mount,
-  mount the subdirectory that holds the work, as the `run` example does. The fallback
-  from before `--branch` still works: `--with git`, clone inside the guest, then on the
-  host `git fetch <dir> branch:branch`. Never run git in a directory a guest wrote — the
-  hook risk applies in full.
-- A backgrounded launch needs no stdin ritual on a current checkout: silkgate's own
-  probe and harvest execs close their stdin (`test/test_tier1_probe.py` pins it). On
-  a checkout older than 2026-08-13, append `</dev/null` to the invocation. There,
-  `msb exec` inherits the caller's stdin and waits for EOF, and a detached shell's
-  pipe never closes, so the Tier-1 probe times out (`msb exec did not return within
-  15s`) while the guest is healthy and the session is refused — a clean teardown,
-  exit 1, nothing leaks.
-- An exit of 137 with one bare `Killed` line means the kernel inside the VM ended the
-  guest command, most often the OOM killer. Give the guest more memory and rerun. A
-  `--branch` teardown still harvests: the commits survive, and only an unwritten
-  report is lost.
-- Nothing bounds a runaway agent: silkgate has no timeout and no cost ceiling. If that
-  matters, wrap the invocation in `timeout 600 …`. The teardown is clean, but the clock
-  includes the image build, so a cold profile set spends part of the budget on docker.
-- Host sleep kills every guest at once. Suspend freezes the VMs and the proxy together,
-  and on wake every upstream connection is dead, so each guest's API stream idles out. An
-  interactive session recovers: you resume, and it retries. A `-p` run does not recover:
-  the process exits, and everything since its last file write is gone. Three parallel
-  agents were lost that way mid-batch, about seventeen turns each, with nothing written.
-  For a long unattended batch, prefer a machine that does not sleep. Otherwise, use a
-  session: its conversation can be resumed, while a `run` must be restarted.
-- A custom `--image` needs `sh` and `mkfifo` for the live-output relay. An image too
-  minimal for those can still run under `-t`, which needs neither, at the cost of merged
-  streams.
-- An in-guest `claude -p` run waits at most 600 seconds for background subagents, then
-  terminates them. Set `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` in the guest command,
-  or run subagents in the foreground.
-- Guest clones see host branches as `origin/<name>`. If a brief names a bare branch,
-  write `origin/<name>` in it, or create the branch on the host first.
-- Plain `--with git` no longer reaches GitHub: it installs git and git-lfs and opens
-  nothing. `--with github` is the anonymous public-read floor (clone and fetch any
-  public repository, no credential). `--with github-read:OWNER/REPO` and
-  `--with github-write:OWNER/REPO` are the credentialed grants, one repository each,
-  repeatable. The secret is unchanged: `SILKGATE_EGRESS_SECRET_GITHUB` holds the full
-  header line (`Authorization: Basic base64(x-access-token:<PAT>)`), and a missing
-  value warns at launch and shows in the guest context. For non-git operations the
-  guest calls the REST API at `api.github.com/repos/OWNER/REPO/...` — `gh` is not
-  installed and GraphQL is not reachable.
+- A deny isn't a crash. Plain HTTP gets a 403 with `no matching rule`. HTTPS fails at
+  CONNECT: curl says `CONNECT tunnel failed, response 403`. The agent usually carries on.
+- `-t` hands the guest a real terminal: colors, cursor codes, and stdout merged into
+  stderr. That corrupts a JSON stream. Leave `-t` off for anything you parse.
+- Exit 137 with a bare `Killed` is usually the guest's OOM killer. Give it more memory. A
+  `--branch` teardown still harvests.
+- Nothing bounds a runaway agent. Wrap it in `timeout 600 …` if that matters. The clock
+  includes a cold image build.
+- Host sleep kills every guest's API stream at once. A `-p` run exits and loses its
+  unwritten work. Use a machine that stays awake, or a session you can resume.
+- A guest `claude -p` waits at most 600 s for background subagents, then kills them. Set
+  `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` in the guest command, or run them in the
+  foreground.
+- A custom `--image` needs `sh` and `mkfifo` for the output relay. Without them, use `-t`.
+- `--with git` opens nothing. Add `--with github` for public repos, or
+  `github-read:OWNER/REPO` / `github-write:OWNER/REPO` with
+  `SILKGATE_EGRESS_SECRET_GITHUB="Authorization: Basic <base64 of x-access-token:PAT>"`.
+- `gh` isn't installed and GraphQL is unreachable. Use REST:
+  `api.github.com/repos/OWNER/REPO/...`.
