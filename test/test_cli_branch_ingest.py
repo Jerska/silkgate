@@ -10,8 +10,6 @@ The one rule under test: a branch only ever fast-forwards, and refused commits s
 at the session's staging ref.
 """
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -22,22 +20,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import clipkg
+
 REPO = Path(__file__).resolve().parent.parent
 
 if shutil.which("git") is None:
     raise unittest.SkipTest("git is not installed — the ingest tests drive real repositories")
 
 
-def _load_cli():
-    loader = importlib.machinery.SourceFileLoader("silkgate_cli_ingest",
-                                                  str(REPO / "cli" / "silkgate"))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
-sg = _load_cli()
+sg = clipkg.load("sg_cli_branch_ingest").core
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-ingest-tests-"))

@@ -161,7 +161,7 @@ Details: [doc/GIT.md](doc/GIT.md).
 -v ~/scratch:/scratch:rw     # read-write
 ```
 
-<!-- Mirrors _forbidden_mounts, _RESERVED_DSTS, and _mount_args in cli/silkgate. Update both. -->
+<!-- Mirrors _forbidden_mounts, _RESERVED_DSTS, and _mount_args in cli/silkgate_cli/. Update both. -->
 | Refused | Why |
 |---|---|
 | `/`, your home, this checkout, `~/.silkgate` | they hold credentials and config |
@@ -176,7 +176,7 @@ Details: [doc/GIT.md](doc/GIT.md).
 
 **`run` takes all of these, and `up` all but `-t`. `exec` takes `-e` and `-t`.**
 
-<!-- Mirrors the run, up, and exec parsers in cli/silkgate's main(). Update both. -->
+<!-- Mirrors the run, up, and exec parsers in main() in cli/silkgate_cli/. Update both. -->
 | Flag | Does |
 |---|---|
 | `-e NAME=VALUE` | sets an env var in the guest. The journal keeps the name only. Proxy variables (`HTTPS_PROXY`, `NO_PROXY`, …) are refused. Secrets belong in `SILKGATE_EGRESS_SECRET_*`. |
@@ -197,7 +197,7 @@ Details: [doc/GIT.md](doc/GIT.md).
   `q:<n>` and `h:<n>` stripped query params and headers.
 - A session's page shows its activity, tool calls, and files, and can act on it:
 
-  <!-- Mirrors _control and _kill in cli/silkgate's _ui_server. Update both. -->
+  <!-- Mirrors _control and _kill in _ui_server in cli/silkgate_cli/. Update both. -->
   | Action | Effect |
   |---|---|
   | freeze | swaps in an empty ruleset: every request is denied, and the guest keeps running |
@@ -284,7 +284,8 @@ the proxy is only advisory.
 
 | Path | Holds |
 |---|---|
-| `cli/silkgate` | the host CLI, stdlib-only Python |
+| `cli/silkgate` | the host CLI's entry point |
+| `cli/silkgate_cli/` | the host CLI's code, stdlib-only Python |
 | `mitmaddon/` | the proxy addon and the rule engine |
 | `profiles/<name>/` | one capability each: install step, rules, env |
 | `ui/` | the audit UI: static ES modules, no build step |

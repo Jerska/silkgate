@@ -26,11 +26,9 @@ regex and run under bash against errno strings measured in a real microsandbox g
 file can fail when the classification is wrong without needing a second, deliberately-leaking
 sandbox to point it at.
 
-`cli/silkgate` has no .py suffix, so it is loaded through a SourceFileLoader. Importing it has
-no side effects on disk, and these tests touch none of its state paths.
+The CLI package is loaded through clipkg. Importing it has no side effects on disk, and
+these tests touch none of its state paths.
 """
-import importlib.machinery
-import importlib.util
 import re
 import shutil
 import subprocess
@@ -38,19 +36,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import clipkg
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "test" / "verify_guest.sh"
 
 
-def _load_cli():
-    loader = importlib.machinery.SourceFileLoader("silkgate_cli", str(REPO / "cli" / "silkgate"))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
-sg = _load_cli()
+sg = clipkg.load("sg_verify_checks").core
 TEXT = SCRIPT.read_text()
 
 ALL = frozenset(sg._VERIFY_CHECKS)

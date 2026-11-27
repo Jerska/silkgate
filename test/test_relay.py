@@ -18,8 +18,6 @@ hold on every path a guest's bytes can take through this process:
 Run: python3 test/test_relay.py
 """
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import subprocess
 import sys
@@ -27,25 +25,21 @@ import types
 import unittest
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-CLI = REPO / "cli" / "silkgate"
+import clipkg
 
-_loader = importlib.machinery.SourceFileLoader("silkgate_cli_relay", str(CLI))
-_spec = importlib.util.spec_from_loader("silkgate_cli_relay", _loader)
-sg = importlib.util.module_from_spec(_spec)
-_loader.exec_module(sg)
+REPO = Path(__file__).resolve().parent.parent
+
+sg = clipkg.load("sg_relay").core
 
 RS = sg._ERR_TAG        # tags a stderr line; also the mark on the host's own voice
 US = sg._OUT_TAG        # tags a stdout line
 
 # Runs in a child so the parent's stdout/stderr are real, separate pipes — the exact
-# thing a capturing consumer (or CI) sees. argv: cli-path, mode, guest-sh-script.
+# thing a capturing consumer (or CI) sees. argv: cli-dir, mode, guest-sh-script.
 DRIVER = r"""
-import importlib.machinery, importlib.util, sys
-loader = importlib.machinery.SourceFileLoader("silkgate_cli", sys.argv[1])
-spec = importlib.util.spec_from_loader("silkgate_cli", loader)
-sg = importlib.util.module_from_spec(spec)
-loader.exec_module(sg)
+import sys
+sys.path.insert(0, sys.argv[1])
+from silkgate_cli import core as sg
 mode, script = sys.argv[2], sys.argv[3]
 if mode == "run":               # the default path: wrapper + demux
     sys.exit(sg.run_guest(lambda argv: argv, ["sh", "-c", script], tty=False))
@@ -61,7 +55,7 @@ if mode == "bare":              # bytes on the PTY with no wrapper: msb noise, a
 
 
 def drive(mode, script):
-    return subprocess.run([sys.executable, "-c", DRIVER, str(CLI), mode, script],
+    return subprocess.run([sys.executable, "-c", DRIVER, str(clipkg.CLI_DIR), mode, script],
                           capture_output=True, timeout=60)
 
 

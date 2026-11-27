@@ -3,8 +3,8 @@
 
 Everything runs against a temp state tree — never ~/.silkgate — with the module's
 directory attributes reassigned in setUp (UI_DIR included, so the static routes serve a
-fixture directory: the real ui/ assets are not this module's contract). cli/silkgate has
-no .py extension, so it is loaded through SourceFileLoader; no mitmproxy is needed. The
+fixture directory: the real ui/ assets are not this module's contract). The CLI package
+is loaded through clipkg, as a copy private to this module; no mitmproxy is needed. The
 HTTP tests bind ("127.0.0.1", 0) and drive the server through http.client; the SSE tests
 speak the protocol over a raw socket with a deadline, because http.client has no notion
 of a response that never ends.
@@ -37,7 +37,6 @@ What is covered:
 import contextlib
 import hashlib
 import http.client
-import importlib.util
 import io
 import json
 import os
@@ -50,18 +49,15 @@ import threading
 import time
 import types
 import unittest
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
-REPO = Path(__file__).resolve().parents[1]
-CLI = Path(os.environ.get("SILKGATE_CLI", REPO / "cli" / "silkgate"))
+import clipkg
 
-_loader = SourceFileLoader("silkgate_cli_ui", str(CLI))
-_spec = importlib.util.spec_from_file_location("silkgate_cli_ui", CLI, loader=_loader)
-MOD = importlib.util.module_from_spec(_spec)
-sys.modules["silkgate_cli_ui"] = MOD
-_loader.exec_module(MOD)
+REPO = Path(__file__).resolve().parents[1]
+CLI = REPO / "cli" / "silkgate"
+
+MOD = clipkg.load("sg_ui").core
 
 
 def event(**kw):

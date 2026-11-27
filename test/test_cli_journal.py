@@ -12,8 +12,6 @@ touch a real ~/.silkgate: live sessions use it.
 """
 import contextlib
 import hashlib
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -27,19 +25,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import clipkg
+
 REPO = Path(__file__).resolve().parent.parent
 
 
-def _load_cli():
-    loader = importlib.machinery.SourceFileLoader("silkgate_cli_journal",
-                                                  str(REPO / "cli" / "silkgate"))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
-sg = _load_cli()
+sg = clipkg.load("sg_cli_journal").core
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-journal-tests-"))

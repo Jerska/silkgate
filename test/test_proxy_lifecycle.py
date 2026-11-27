@@ -3,12 +3,10 @@
 
 Everything runs against a temp state directory — never ~/.silkgate — with fake `msb` and
 `mitmdump` executables on PATH and stub unix control sockets standing in for the live
-proxy, so no docker, msb or mitmproxy is needed. cli/silkgate has no .py extension, so it
-is loaded through SourceFileLoader; SILKGATE_CLI overrides which copy is loaded, which is
-how the same tests demonstrate the pre-fix failures.
+proxy, so no docker, msb or mitmproxy is needed. The CLI package is loaded through
+clipkg, as a copy private to this module.
 
     python3 test/test_proxy_lifecycle.py -v
-    SILKGATE_CLI=/path/to/old/cli/silkgate python3 test/test_proxy_lifecycle.py -v
 
 What is covered:
   * pick_port under real concurrency (forked processes racing on one pool)
@@ -33,7 +31,6 @@ What is covered:
     in its own process group, fake msb/mitmdump holding each phase open long enough
     to land a signal in it (InterruptTest)
 """
-import importlib.util
 import json
 import multiprocessing
 import os
@@ -48,21 +45,18 @@ import termios
 import threading
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
+import clipkg
+
 REPO = Path(__file__).resolve().parents[1]
-CLI = Path(os.environ.get("SILKGATE_CLI", REPO / "cli" / "silkgate"))
+CLI = REPO / "cli" / "silkgate"
 
 # The module reads SILKGATE_PROXY_BIND at import; the tests assert the default.
 os.environ.pop("SILKGATE_PROXY_BIND", None)
 
-_loader = SourceFileLoader("silkgate_cli", str(CLI))
-_spec = importlib.util.spec_from_file_location("silkgate_cli", CLI, loader=_loader)
-MOD = importlib.util.module_from_spec(_spec)
-sys.modules["silkgate_cli"] = MOD
-_loader.exec_module(MOD)
+MOD = clipkg.load("sg_proxy_lifecycle").core
 
 RULE = "api.anthropic.com/** GET\n"
 
@@ -1310,13 +1304,9 @@ class InterruptSideEffectTest(_FakeToolsCase):
         self.addCleanup(os.close, ptm)
         raw = "import sys, tty; tty.setraw(sys.stdout.fileno())"
         driver = (
-            "import importlib.util, sys\n"
-            "from importlib.machinery import SourceFileLoader\n"
-            f"loader = SourceFileLoader('sg', {str(CLI)!r})\n"
-            f"spec = importlib.util.spec_from_file_location('sg', {str(CLI)!r},"
-            " loader=loader)\n"
-            "mod = importlib.util.module_from_spec(spec)\n"
-            "loader.exec_module(mod)\n"
+            "import sys\n"
+            f"sys.path.insert(0, {str(clipkg.CLI_DIR)!r})\n"
+            "from silkgate_cli import core as mod\n"
             f"sys.exit(mod.run_guest(lambda c: [sys.executable, '-c', {raw!r}],"
             " ['x'], tty=True))\n")
         proc = subprocess.Popen([sys.executable, "-c", driver],
@@ -1340,8 +1330,7 @@ class InterruptTest(unittest.TestCase):
     mitmdump on PATH holding the targeted phase open (FAKE_MSB_SRC). The signal goes to the
     whole group, as a terminal's Ctrl-C does. Assertions cover what survives: session dirs,
     port claims, proxy listeners, the exit status, and a traceback-free stderr. Proxy death
-    is checked on its listeners and socket, never kill -0, since its zombie would answer.
-    SILKGATE_CLI points these tests at another CLI, as it does the in-process ones."""
+    is checked on its listeners and socket, never kill -0, since its zombie would answer."""
 
     maxDiff = None
 

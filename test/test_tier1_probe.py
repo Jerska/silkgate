@@ -5,20 +5,17 @@ the decision taken on every probe outcome.
 
 Run: python3 test/test_tier1_probe.py
 """
-import importlib.machinery
-import importlib.util
 import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+import clipkg
+
 REPO = Path(__file__).resolve().parent.parent
 
-_loader = importlib.machinery.SourceFileLoader("silkgate_cli", str(REPO / "cli" / "silkgate"))
-_spec = importlib.util.spec_from_loader("silkgate_cli", _loader)
-sg = importlib.util.module_from_spec(_spec)
-_loader.exec_module(sg)
+sg = clipkg.load("sg_tier1_probe").core
 
 TARGET_HOST = sg.TIER1_PROBE_TARGET.partition(":")[0]
 

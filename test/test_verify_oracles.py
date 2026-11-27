@@ -20,13 +20,10 @@ image, that mitmproxy resolves `localhost` to the loopback the recorder bound, a
 guest's denied sendto really produces no arrival — are named in the report that accompanies
 these changes, each with the host command that settles it.
 
-`cli/silkgate` has no .py suffix, so it is loaded through a SourceFileLoader; importing it
-touches no state on disk. A fake `msb` goes on PATH for the argv and reaping tests, because
+The CLI package is loaded through clipkg; importing it touches no state on disk. A fake `msb` goes on PATH for the argv and reaping tests, because
 those call which() and would otherwise die naming an install command.
 """
 import http.client
-import importlib.machinery
-import importlib.util
 import json
 import os
 import socket
@@ -39,13 +36,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import clipkg
+
 REPO = Path(__file__).resolve().parents[1]
 
-_loader = importlib.machinery.SourceFileLoader("silkgate_cli", str(REPO / "cli" / "silkgate"))
-_spec = importlib.util.spec_from_loader("silkgate_cli", _loader)
-sg = importlib.util.module_from_spec(_spec)
-sys.modules["silkgate_cli"] = sg
-_loader.exec_module(sg)
+sg = clipkg.load("sg_verify_oracles").core
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet                                          # noqa: E402

@@ -3,12 +3,10 @@
 
 Everything runs against a temp state tree — never ~/.silkgate — with the module's
 directory attributes reassigned in setUp, fake executables on PATH where a binary is
-unavoidable, and mocks elsewhere, so no docker, msb or mitmproxy is needed. cli/silkgate
-has no .py extension, so it is loaded through SourceFileLoader; SILKGATE_CLI overrides
-which copy is loaded, which is how the same tests demonstrate the pre-fix failures.
+unavoidable, and mocks elsewhere, so no docker, msb or mitmproxy is needed. The CLI
+package is loaded through clipkg, as a copy private to this module.
 
     python3 test/test_cli_logs.py -v
-    SILKGATE_CLI=/path/to/old/cli/silkgate python3 test/test_cli_logs.py -v
 
 What is covered:
   * _prune_logs: removal needs BOTH beyond-count AND beyond-age; the log a live proxy
@@ -22,7 +20,6 @@ What is covered:
     identity over a pid that may have been recycled
 """
 import contextlib
-import importlib.util
 import io
 import itertools
 import json
@@ -36,22 +33,19 @@ import threading
 import time
 import types
 import unittest
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
+import clipkg
+
 REPO = Path(__file__).resolve().parents[1]
-CLI = Path(os.environ.get("SILKGATE_CLI", REPO / "cli" / "silkgate"))
+CLI = REPO / "cli" / "silkgate"
 
 # The module reads SILKGATE_PROXY_BIND at import; the tests assert the default.
 os.environ.pop("SILKGATE_PROXY_BIND", None)
 os.environ.pop("SILKGATE_LOG_RETAIN_DAYS", None)
 
-_loader = SourceFileLoader("silkgate_cli_logs", str(CLI))
-_spec = importlib.util.spec_from_file_location("silkgate_cli_logs", CLI, loader=_loader)
-MOD = importlib.util.module_from_spec(_spec)
-sys.modules["silkgate_cli_logs"] = MOD
-_loader.exec_module(MOD)
+MOD = clipkg.load("sg_cli_logs").core
 
 RULE = "api.anthropic.com/** GET"
 

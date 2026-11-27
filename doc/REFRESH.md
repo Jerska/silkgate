@@ -60,7 +60,7 @@ than widen a rule.
 |---|---|---|
 | mitmproxy `12.3.1` | `.github/workflows/ci.yml`, `test/linux/Dockerfile`, `test/test_proxy_lifecycle.py` | the `addon-mitmproxy-latest` canary job, and PyPI |
 | msb `0.6.8` in CI, `0.5.4` and `0.5.7` by hand | `README.md`, `doc/THREAT-MODEL.md`, `test/linux/Dockerfile` | `silkgate verify --full` per platform |
-| `debian:bookworm-slim` | `BASE_IMAGE` in `cli/silkgate`, `doc/PROFILES.md` | Debian's current stable |
+| `debian:bookworm-slim` | `BASE_IMAGE` in `cli/silkgate_cli/`, `doc/PROFILES.md` | Debian's current stable |
 | `ubuntu:24.04`, glibc 2.39 | `test/linux/Dockerfile`, `README.md` | `ldd` on the current msb binary |
 | action SHAs, tags in comments | `.github/workflows/ci.yml` | resolve each SHA. The comment can drift from it. |
 | python 3.12 and 3.13 in CI | `.github/workflows/ci.yml` | the Ubuntu LTS python3, and the latest CPython |
@@ -88,13 +88,13 @@ than widen a rule.
 
 | Observation | Where | Check |
 |---|---|---|
-| guest traffic arrives on loopback (macOS) | `cli/silkgate` | the peer address of a guest connection |
-| the first exec after a create can vanish, so the CLI retries once | `cli/silkgate` | 20 fresh creates: count first-exec timeouts |
-| rule grammar and scope names | `cli/silkgate` | release notes, then `silkgate verify` |
-| `--tail` honors `_SNAPSHOT_TAIL_LINES` (20000) | `cli/silkgate` | snapshot a guest that printed more |
+| guest traffic arrives on loopback (macOS) | `cli/silkgate_cli/` | the peer address of a guest connection |
+| the first exec after a create can vanish, so the CLI retries once | `cli/silkgate_cli/` | 20 fresh creates: count first-exec timeouts |
+| rule grammar and scope names | `cli/silkgate_cli/` | release notes, then `silkgate verify` |
+| `--tail` honors `_SNAPSHOT_TAIL_LINES` (20000) | `cli/silkgate_cli/` | snapshot a guest that printed more |
 | `host.microsandbox.internal` resolves in a guest | `test/verify_guest.sh` | the guest's `/etc/hosts` |
-| the installer URL, the brew tap, the repo owner, `--net-*` flags | `cli/silkgate`, `README.md` | HEAD the installer, resolve the tap, diff `msb run --help` |
-| a rename across two virtiofs mounts is EXDEV, and git-lfs 3.3.0 has no fallback | `cli/silkgate` | an LFS checkout across the mount |
+| the installer URL, the brew tap, the repo owner, `--net-*` flags | `cli/silkgate_cli/`, `README.md` | HEAD the installer, resolve the tap, diff `msb run --help` |
+| a rename across two virtiofs mounts is EXDEV, and git-lfs 3.3.0 has no fallback | `cli/silkgate_cli/` | an LFS checkout across the mount |
 | boot takes ~0.3 s | the skill | time `silkgate run -- true` |
 
 ## Observed Claude Code behavior
@@ -103,7 +103,7 @@ than widen a rule.
 
 | Observation | Where | Check on a bump |
 |---|---|---|
-| `ANTHROPIC_CUSTOM_HEADERS` carries `X-Silkgate-Exec` | `cli/silkgate` | an exec's allow lines carry `exec` |
+| `ANTHROPIC_CUSTOM_HEADERS` carries `X-Silkgate-Exec` | `cli/silkgate_cli/` | an exec's allow lines carry `exec` |
 | `claude -p` waits at most 600 s for background subagents, and one env var lifts it | the skill | run one background subagent, and grep the binary for the variable |
 | `CLAUDE_CODE_OAUTH_TOKEN` works for `claude -p` but not `--bare`, and `ANTHROPIC_API_KEY` outranks it | `profiles/claude/profile.conf`, `README.md` | under an `Authorization` secret: `silkgate-claude -p` answers, `claude --bare -p` says `Not logged in` |
 | the default model needs the subscription to have it | `profiles/claude/profile.conf` | a `claude -p` with no settings answers |
@@ -129,7 +129,7 @@ than widen a rule.
 | the log scan matches mitmdump 12.3.1's line format | `test/test_proxy_lifecycle.py` | the canary job |
 | `--full` fetches `https://registry.npmjs.org/lodash` | `test/verify_guest.sh` | fetch it from an open host |
 | `evil.com` is never allowed | `test/verify_guest.sh` | grep every rules file |
-| `1.1.1.1` answers TCP 443, ICMP, DNS. `192.0.2.1` never routes. | `test/verify_guest.sh`, `TIER1_PROBE_TARGET` in `cli/silkgate` | `curl -sv --connect-timeout 3 https://1.1.1.1/` from an open host |
+| `1.1.1.1` answers TCP 443, ICMP, DNS. `192.0.2.1` never routes. | `test/verify_guest.sh`, `TIER1_PROBE_TARGET` in `cli/silkgate_cli/` | `curl -sv --connect-timeout 3 https://1.1.1.1/` from an open host |
 
 ## Cross-file pairs
 

@@ -56,7 +56,7 @@ skill's description costs context.
 
 ## How the CLI finds itself
 
-**`cli/silkgate` finds everything relative to its own file, so an installed copy works from
+**The CLI finds everything relative to its own files, so an installed copy works from
 the plugin cache.**
 
 - It resolves `mitmaddon/` and `profiles/` from its own path, and keeps state in

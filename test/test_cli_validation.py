@@ -4,14 +4,12 @@
     python3 test/test_cli_validation.py [-v]
 
 Stdlib only, and no docker/msb/mitmproxy: every check here is about what the CLI refuses
-before it starts anything. `cli/silkgate` has no .py suffix, so it is loaded through a
-SourceFileLoader — importing it has no side effects on disk, but its state paths are
-derived from $HOME at import time, so they are repointed at a scratch directory below
-before any test runs. Nothing here may touch a real ~/.silkgate: live sessions use it.
+before it starts anything. The CLI package is loaded through clipkg, as a copy private to
+this module. Importing it has no side effects on disk, but its state paths are derived
+from $HOME at import time, so they are repointed at a scratch directory below before any
+test runs. Nothing here may touch a real ~/.silkgate: live sessions use it.
 """
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import itertools
 import json
@@ -24,18 +22,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import clipkg
+
 REPO = Path(__file__).resolve().parent.parent
 
 
-def _load_cli():
-    loader = importlib.machinery.SourceFileLoader("silkgate_cli", str(REPO / "cli" / "silkgate"))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
-sg = _load_cli()
+sg = clipkg.load("sg_cli_validation").core
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-tests-"))
@@ -393,6 +385,11 @@ class TestMountGuards(CliCase):
                      os.sep]:
             for mode in ("ro", "rw"):
                 self.refuses("refusing to mount", sg._mount_args, [f"{path}:/data:{mode}"])
+
+    def test_repo_is_the_checkout_this_cli_runs_from(self):
+        # REPO also anchors the profiles, the addon, and image builds.
+        self.assertEqual(sg.REPO, REPO)
+        self.refuses("silkgate checkout", sg._mount_args, [f"{REPO}:/data:ro"])
 
     def test_guest_destination_guards(self):
         src = self.tmp / "src"

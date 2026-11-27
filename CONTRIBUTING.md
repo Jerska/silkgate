@@ -34,8 +34,8 @@ python3 test/smoke_claude.py            # the claude profile in a real guest (CI
 ```
 
 - Comments alone: `python3 -m py_compile <file>`, `node --check <file>`, or `sh -n <file>`.
-  A docstring a program reads counts as code: `cli/silkgate`'s module docstring is its
-  `--help`.
+  A docstring a program reads counts as code: `cli/silkgate_cli/core.py`'s module
+  docstring is `silkgate --help`.
 - A new python test file goes in `SHARDS` at the top of `tests.py`. The runner refuses to
   start if discovery and `SHARDS` disagree.
 - A new ui test file (`ui/*.test.js`) needs no entry: the runner globs for them.
