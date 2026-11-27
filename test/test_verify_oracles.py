@@ -43,6 +43,7 @@ REPO = Path(__file__).resolve().parents[1]
 pkg = clipkg.load("sg_verify_oracles")
 sg = pkg.core
 vf = pkg.verify
+pt = pkg.paths
 
 sys.path.insert(0, str(REPO / "mitmaddon"))
 from rule_engine import RuleSet                                          # noqa: E402
@@ -1285,10 +1286,10 @@ class VerifyWiring(unittest.TestCase):
         os.environ["PATH"] = f"{binaries}{os.pathsep}{os.environ['PATH']}"
         self.addCleanup(os.environ.__setitem__, "PATH", os.environ["PATH"])
         self.port = _free_port(span=3)      # the proxy's, plus the two oracle ports
-        for patch in (mock.patch.object(sg, "REPO", self.tmp / "repo"),
-                      mock.patch.object(sg, "LOG_DIR", self.tmp / "logs"),
-                      mock.patch.object(sg, "SILK_DIR", self.tmp / "silk"),
-                      mock.patch.object(sg, "PROXY_JSON", self.tmp / "silk" / "proxy.json"),
+        for patch in (mock.patch.object(pt, "REPO", self.tmp / "repo"),
+                      mock.patch.object(pt, "LOG_DIR", self.tmp / "logs"),
+                      mock.patch.object(pt, "SILK_DIR", self.tmp / "silk"),
+                      mock.patch.object(pt, "PROXY_JSON", self.tmp / "silk" / "proxy.json"),
                       # The guest reaches the host by the alias; here the host is loopback.
                       mock.patch.object(sg, "PROXY_ALIAS", "127.0.0.1")):
             patch.start()
@@ -1408,7 +1409,7 @@ class VerifyWiring(unittest.TestCase):
         self.assertIn("host-side oracles skipped", said)
         self.assertNotIn("recorder", said)
         # and the ruleset the proxy was given holds no host-loopback rule at all
-        snapshot, = sg.LOG_DIR.glob("*.rules")
+        snapshot, = pt.LOG_DIR.glob("*.rules")
         self.assertNotIn(vf._RECORDER_HOST, snapshot.read_text())
 
     def test_the_negative_control_boots_a_second_guest_and_requires_check_3_to_fail(self):

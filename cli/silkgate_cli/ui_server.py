@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import core, git, logs
+from . import core, git, logs, paths
 
 
 # --- ui: a local web view over the events files -------------------------------------
@@ -18,7 +18,7 @@ from . import core, git, logs
 # a filtered read of the events files, live is a byte-offset tail, and the client joins
 # allow and response on `id`. So a dropped stream resumes from a plain Last-Event-ID.
 
-UI_DIR = core.REPO / "ui"
+UI_DIR = paths.REPO / "ui"
 DEFAULT_UI_PORT = 8642       # clear of the proxy pool (8090..8105) and common dev ports
 UI_EVENTS_LIMIT = 2000       # /api/events default page
 UI_EVENTS_LIMIT_MAX = 20000
@@ -53,7 +53,7 @@ def _events_files(pattern="events-*.jsonl"):
     """The retained files of one trail kind, oldest first — the stamp in the name is
     the order. The audit trail and the capture trail share the layout, so the glob is
     the only parameter."""
-    return sorted(core.LOG_DIR.glob(pattern))
+    return sorted(paths.LOG_DIR.glob(pattern))
 
 
 def _event_passes(rec, filters):
@@ -234,7 +234,7 @@ def _resolve_ident(ident):
         except SystemExit:
             return None, None, None
         if meta:
-            return meta, "archived", core.ARCHIVE_DIR / ident
+            return meta, "archived", paths.ARCHIVE_DIR / ident
     return None, None, None
 
 
@@ -428,9 +428,9 @@ def _search_files():
     keeps the freshest records."""
     entries = []
     for pattern, source in (("capture-*.jsonl", "capture"), ("events-*.jsonl", "audit")):
-        entries += [(p, source) for p in core.LOG_DIR.glob(pattern)]
-    if core.ARCHIVE_DIR.is_dir():
-        entries += [(d / "journal.jsonl", "journal") for d in core.ARCHIVE_DIR.iterdir()
+        entries += [(p, source) for p in paths.LOG_DIR.glob(pattern)]
+    if paths.ARCHIVE_DIR.is_dir():
+        entries += [(d / "journal.jsonl", "journal") for d in paths.ARCHIVE_DIR.iterdir()
                     if core._SID_RE.fullmatch(d.name) and (d / "journal.jsonl").is_file()]
 
     def mtime(entry):

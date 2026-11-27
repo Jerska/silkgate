@@ -61,6 +61,7 @@ pkg = clipkg.load("sg_ui")
 MOD = pkg.core
 UI = pkg.ui_server
 GIT = pkg.git
+PATHS = pkg.paths
 
 
 def event(**kw):
@@ -120,16 +121,16 @@ class UiTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         silk = self.root / "silk"
-        for module, name, path in ((MOD, "SILK_DIR", silk),
-                                   (MOD, "LOG_DIR", silk / "logs"),
-                                   (MOD, "SESSIONS_DIR", silk / "sessions"),
-                                   (MOD, "ARCHIVE_DIR", silk / "archive"),
-                                   (MOD, "PROXY_JSON", silk / "proxy.json"),
-                                   (MOD, "PROXY_SOCK", silk / "proxy.sock"),
+        for module, name, path in ((PATHS, "SILK_DIR", silk),
+                                   (PATHS, "LOG_DIR", silk / "logs"),
+                                   (PATHS, "SESSIONS_DIR", silk / "sessions"),
+                                   (PATHS, "ARCHIVE_DIR", silk / "archive"),
+                                   (PATHS, "PROXY_JSON", silk / "proxy.json"),
+                                   (PATHS, "PROXY_SOCK", silk / "proxy.sock"),
                                    (UI, "UI_DIR", self.root / "ui")):
             self.enterContext(mock.patch.object(module, name, path))
-        MOD.LOG_DIR.mkdir(parents=True)
-        MOD.SESSIONS_DIR.mkdir(parents=True)
+        PATHS.LOG_DIR.mkdir(parents=True)
+        PATHS.SESSIONS_DIR.mkdir(parents=True)
         UI.UI_DIR.mkdir()
         # The UI server's caches and busy set live once per process. Every test
         # starts them cold so no test reads another's answers.
@@ -152,19 +153,19 @@ class UiTest(unittest.TestCase):
     # -- helpers ---------------------------------------------------------------
 
     def events_file(self, name, *recs):
-        p = MOD.LOG_DIR / name
+        p = PATHS.LOG_DIR / name
         p.write_text("".join(json.dumps(r) + "\n" for r in recs))
         return p
 
     def proxy_meta(self, events=None, **extra):
         meta = {"pid": os.getpid(), "base_port": 8090,
                 "ports": list(range(8090, 8090 + MOD.POOL_SIZE)),
-                "log": str(MOD.LOG_DIR / "proxy-live.log"),
-                "sock": str(MOD.PROXY_SOCK), "started": "2026-08-04T11:00:00+00:00"}
+                "log": str(PATHS.LOG_DIR / "proxy-live.log"),
+                "sock": str(PATHS.PROXY_SOCK), "started": "2026-08-04T11:00:00+00:00"}
         if events is not None:
             meta["events"] = str(events)
         meta.update(extra)
-        MOD._write_json(MOD.PROXY_JSON, meta)
+        MOD._write_json(PATHS.PROXY_JSON, meta)
         return meta
 
     def write_session(self, name, port=8090, rules="api.anthropic.com/** GET\n",
@@ -179,7 +180,7 @@ class UiTest(unittest.TestCase):
     def write_archive(self, name="old1", **extra):
         """One archived session dir under the repointed ARCHIVE_DIR -> (sid, dir)."""
         sid = MOD._new_sid(name)
-        adir = MOD.ARCHIVE_DIR / sid
+        adir = PATHS.ARCHIVE_DIR / sid
         adir.mkdir(parents=True)
         MOD._write_json(adir / "meta.json",
                         {"name": name, "sandbox": "sg-" + name, "port": 8091,
@@ -217,7 +218,7 @@ class EventsTailerTest(UiTest):
 
     def test_cursor_resumes_mid_file(self):
         line_a, line_b = json.dumps(event(id="a")), json.dumps(event(id="b"))
-        p = MOD.LOG_DIR / "events-live.jsonl"
+        p = PATHS.LOG_DIR / "events-live.jsonl"
         p.write_text(line_a + "\n" + line_b + "\n")
         t = UI._EventsTailer(f"events-live.jsonl:{len(line_a) + 1}")
         out = t.poll({"events": str(p)})
@@ -255,7 +256,7 @@ class EventsTailerTest(UiTest):
         t = UI._EventsTailer()
         t.poll({"events": str(old)})
         line = json.dumps(event(id="fresh"))
-        new = MOD.LOG_DIR / "events-new.jsonl"
+        new = PATHS.LOG_DIR / "events-new.jsonl"
         new.write_text(line + "\n")
         out = t.poll({"events": str(new)})
         self.assertEqual(out[0], ("reset", None, "events-new.jsonl:0"))
@@ -408,7 +409,7 @@ class UiHttpTest(UiServerTest):
         self.assertIsNone(got["proxy"]["pid"])
 
     def test_sessions_reports_the_live_proxy_by_socket_identity(self):
-        srv = _ControlSock(MOD.PROXY_SOCK)
+        srv = _ControlSock(PATHS.PROXY_SOCK)
         self.addCleanup(srv.close)
         live = self.events_file("events-live.jsonl")
         self.proxy_meta(events=live)
@@ -557,7 +558,7 @@ class UiStreamTest(UiServerTest):
 
     def test_last_event_id_resume_yields_only_the_suffix(self):
         line_a, line_b = json.dumps(event(id="a")), json.dumps(event(id="b"))
-        live = MOD.LOG_DIR / "events-live.jsonl"
+        live = PATHS.LOG_DIR / "events-live.jsonl"
         live.write_text(line_a + "\n" + line_b + "\n")
         self.proxy_meta(events=live)
         s, body = self.sse_open(cursor_header=f"events-live.jsonl:{len(line_a) + 1}")
@@ -571,11 +572,11 @@ class UiStreamTest(UiServerTest):
         old = self.events_file("events-old.jsonl", event(id="x"))
         self.proxy_meta(events=old)
         s, _ = self.sse_open(cursor_header=f"events-old.jsonl:{old.stat().st_size}")
-        (MOD.LOG_DIR / "events-new.jsonl").write_text("")   # a restart begins empty …
-        self.proxy_meta(events=MOD.LOG_DIR / "events-new.jsonl")
+        (PATHS.LOG_DIR / "events-new.jsonl").write_text("")   # a restart begins empty …
+        self.proxy_meta(events=PATHS.LOG_DIR / "events-new.jsonl")
         got = self.read_until(s, b"event: reset")
         line = json.dumps(event(id="fresh"))
-        with open(MOD.LOG_DIR / "events-new.jsonl", "a") as fh:   # … then records land
+        with open(PATHS.LOG_DIR / "events-new.jsonl", "a") as fh:   # … then records land
             fh.write(line + "\n")
         data = self.read_until(s, line.encode(), got=got)
         self.assertIn(f"id: events-new.jsonl:{len(line) + 1}\ndata: {line}\n\n".encode(),

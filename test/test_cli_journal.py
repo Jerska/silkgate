@@ -33,16 +33,17 @@ REPO = Path(__file__).resolve().parent.parent
 pkg = clipkg.load("sg_cli_journal")
 sg = pkg.core
 gt = pkg.git
+pt = pkg.paths
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-journal-tests-"))
-sg.SILK_DIR = _SCRATCH / "silkgate"
-sg.SESSIONS_DIR = sg.SILK_DIR / "sessions"
-sg.ARCHIVE_DIR = sg.SILK_DIR / "archive"
-sg.LOG_DIR = sg.SILK_DIR / "logs"
-sg.CA_DIR = sg.SILK_DIR / "ca"
-sg.PROXY_JSON = sg.SILK_DIR / "proxy.json"
-sg.PROXY_SOCK = sg.SILK_DIR / "proxy.sock"
+pt.SILK_DIR = _SCRATCH / "silkgate"
+pt.SESSIONS_DIR = pt.SILK_DIR / "sessions"
+pt.ARCHIVE_DIR = pt.SILK_DIR / "archive"
+pt.LOG_DIR = pt.SILK_DIR / "logs"
+pt.CA_DIR = pt.SILK_DIR / "ca"
+pt.PROXY_JSON = pt.SILK_DIR / "proxy.json"
+pt.PROXY_SOCK = pt.SILK_DIR / "proxy.sock"
 
 for _knob in ("SILKGATE_LOG_RETAIN_DAYS", "SILKGATE_CAPTURE_RETAIN_DAYS",
               "SILKGATE_ARCHIVE_RETAIN_DAYS"):
@@ -59,13 +60,13 @@ class JournalCase(unittest.TestCase):
     """Shared fixture: fresh registry/archive dirs and the refusal assertion."""
 
     def setUp(self):
-        self.assertTrue(str(sg.SESSIONS_DIR).startswith(str(_SCRATCH)),
+        self.assertTrue(str(pt.SESSIONS_DIR).startswith(str(_SCRATCH)),
                         "tests must never point at a real ~/.silkgate")
         self.tmp = Path(tempfile.mkdtemp(dir=_SCRATCH))
-        sg.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-        sg.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-        self.addCleanup(shutil.rmtree, sg.SESSIONS_DIR, ignore_errors=True)
-        self.addCleanup(shutil.rmtree, sg.ARCHIVE_DIR, ignore_errors=True)
+        pt.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        pt.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(shutil.rmtree, pt.SESSIONS_DIR, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, pt.ARCHIVE_DIR, ignore_errors=True)
 
     def refuses(self, needle, fn, *args, **kwargs):
         err = io.StringIO()
@@ -199,7 +200,7 @@ class TestArchivedMetaReads(JournalCase):
     SID = "20250101T000000Z-aaa111-abcdef"
 
     def plant_archive(self, sid, meta):
-        adir = sg.ARCHIVE_DIR / sid
+        adir = pt.ARCHIVE_DIR / sid
         adir.mkdir(parents=True, exist_ok=True)
         (adir / "meta.json").write_text(json.dumps(meta))
 
@@ -262,7 +263,7 @@ class TestArchivedMetaReads(JournalCase):
         newer = "20250101T000000Z-new-abcdef"
         self.plant_archive(newer, {"name": "new", "sid": newer})
         self.plant_archive(older, {"name": "old", "sid": older})
-        (sg.ARCHIVE_DIR / "not-a-sid").mkdir()
+        (pt.ARCHIVE_DIR / "not-a-sid").mkdir()
         self.assertEqual([m["sid"] for m in sg.list_archived_metas()], [older, newer])
 
 
@@ -282,7 +283,7 @@ class TestTeardownArchive(JournalCase):
         return err.getvalue()
 
     def claim(self, port, name):
-        d = sg.SESSIONS_DIR / ".ports"
+        d = pt.SESSIONS_DIR / ".ports"
         d.mkdir(exist_ok=True)
         (d / str(port)).write_text(json.dumps({"name": name, "pid": os.getpid()}))
         return d / str(port)
@@ -294,7 +295,7 @@ class TestTeardownArchive(JournalCase):
                     env_names=[], via="exec")
         claim = self.claim(8090, "t1")
         self.teardown(meta)
-        adir = sg.ARCHIVE_DIR / sid
+        adir = pt.ARCHIVE_DIR / sid
         self.assertFalse(sg.session_dir("t1").exists())
         self.assertFalse(claim.exists(), "the port claim outlived the session")
         archived = json.loads((adir / "meta.json").read_text())
@@ -308,7 +309,7 @@ class TestTeardownArchive(JournalCase):
     def test_prefeature_meta_gets_a_sid_minted(self):
         meta = self.write_session("t2")                  # no sid, as old metas have none
         self.teardown(meta)
-        entries = [d for d in sg.ARCHIVE_DIR.iterdir() if d.is_dir()]
+        entries = [d for d in pt.ARCHIVE_DIR.iterdir() if d.is_dir()]
         self.assertEqual(len(entries), 1)
         self.assertTrue(sg._SID_RE.fullmatch(entries[0].name), entries[0].name)
         self.assertEqual(json.loads((entries[0] / "meta.json").read_text())["sid"],
@@ -319,7 +320,7 @@ class TestTeardownArchive(JournalCase):
         meta = self.write_session("t3", sid=sid)
         err = self.teardown(meta, logs=(None, "guest is gone"))
         self.assertIn("no guest-output snapshot", err)
-        adir = sg.ARCHIVE_DIR / sid
+        adir = pt.ARCHIVE_DIR / sid
         self.assertTrue((adir / "meta.json").exists(), "teardown must finish regardless")
         self.assertFalse((adir / "output.log").exists())
 
@@ -327,14 +328,14 @@ class TestTeardownArchive(JournalCase):
         meta = self.write_session("t4", sid=sg._new_sid("t4"))
         self.teardown(meta, archive=False)
         self.assertFalse(sg.session_dir("t4").exists())
-        self.assertEqual(list(sg.ARCHIVE_DIR.iterdir()), [],
+        self.assertEqual(list(pt.ARCHIVE_DIR.iterdir()), [],
                          "a session never handed over leaves no archive")
 
     def test_rename_failure_warns_and_teardown_completes(self):
         meta = self.write_session("t5", sid=sg._new_sid("t5"))
         blocker = self.tmp / "blocker"
         blocker.write_text("")                           # ARCHIVE_DIR.mkdir must fail
-        with mock.patch.object(sg, "ARCHIVE_DIR", blocker / "archive"):
+        with mock.patch.object(pt, "ARCHIVE_DIR", blocker / "archive"):
             err = self.teardown(meta)
         self.assertIn("could not archive", err)
         self.assertFalse(sg.session_dir("t5").exists(),
@@ -350,14 +351,14 @@ class TestTeardownArchive(JournalCase):
             sg._teardown_session(meta)
         self.assertTrue(sg.session_dir("t6").exists(),
                         "enforcement stays fail-closed: no removal, no archive")
-        self.assertEqual(list(sg.ARCHIVE_DIR.iterdir()), [])
+        self.assertEqual(list(pt.ARCHIVE_DIR.iterdir()), [])
 
     def test_snapshot_is_bounded(self):
         sid = sg._new_sid("t7")
         meta = self.write_session("t7", sid=sid)
         big = ["x" * 1000] * 2000                        # ~2 MiB of guest chatter
         self.teardown(meta, logs=(big, None))
-        size = (sg.ARCHIVE_DIR / sid / "output.log").stat().st_size
+        size = (pt.ARCHIVE_DIR / sid / "output.log").stat().st_size
         self.assertLessEqual(size, sg._SNAPSHOT_MAX_BYTES)
 
     def test_snapshot_byte_knob_slices_before_the_write_keeping_the_tail(self):
@@ -367,7 +368,7 @@ class TestTeardownArchive(JournalCase):
         os.environ["SILKGATE_SNAPSHOT_MAX_BYTES"] = "1024"
         self.addCleanup(os.environ.pop, "SILKGATE_SNAPSHOT_MAX_BYTES", None)
         self.teardown(meta, logs=(lines, None))
-        data = (sg.ARCHIVE_DIR / sid / "output.log").read_bytes()
+        data = (pt.ARCHIVE_DIR / sid / "output.log").read_bytes()
         self.assertLessEqual(len(data), 1024)
         self.assertTrue(data.endswith((lines[-1] + "\n").encode()),
                         "the snapshot keeps the tail, not the head")
@@ -408,7 +409,7 @@ class TestTeardownArchive(JournalCase):
                              types.SimpleNamespace(name=name))
             self.assertTrue(sg.session_dir(name).exists(),
                             "the refusal must come before any move")
-            escaped = (sg.ARCHIVE_DIR / bad).resolve()
+            escaped = (pt.ARCHIVE_DIR / bad).resolve()
             self.assertFalse(escaped.exists(),
                              f"the session dir escaped to {escaped}")
 
@@ -419,7 +420,7 @@ class TestPruneArchive(JournalCase):
 
     def archive_dir(self, i, age_days):
         sid = f"20200101T{i:06d}Z-s{i}-abcdef"
-        d = sg.ARCHIVE_DIR / sid
+        d = pt.ARCHIVE_DIR / sid
         d.mkdir(parents=True)
         past = time.time() - age_days * 86400
         os.utime(d, (past, past))
@@ -443,13 +444,13 @@ class TestPruneArchive(JournalCase):
         for i in range(5):
             self.archive_dir(i, age_days=400 + i)
         sg._prune_archive()
-        self.assertEqual(len(list(sg.ARCHIVE_DIR.iterdir())), 5)
+        self.assertEqual(len(list(pt.ARCHIVE_DIR.iterdir())), 5)
 
     def test_count_alone_never_prunes(self):
         for i in range(sg.ARCHIVE_RETAIN_COUNT + 10):
             self.archive_dir(i, age_days=0)
         sg._prune_archive()
-        self.assertEqual(len(list(sg.ARCHIVE_DIR.iterdir())),
+        self.assertEqual(len(list(pt.ARCHIVE_DIR.iterdir())),
                          sg.ARCHIVE_RETAIN_COUNT + 10)
 
     def test_retention_zero_keeps_everything(self):
@@ -458,11 +459,11 @@ class TestPruneArchive(JournalCase):
         os.environ["SILKGATE_ARCHIVE_RETAIN_DAYS"] = "0"
         self.addCleanup(os.environ.pop, "SILKGATE_ARCHIVE_RETAIN_DAYS", None)
         sg._prune_archive()
-        self.assertEqual(len(list(sg.ARCHIVE_DIR.iterdir())),
+        self.assertEqual(len(list(pt.ARCHIVE_DIR.iterdir())),
                          sg.ARCHIVE_RETAIN_COUNT + 10)
 
     def test_foreign_dirs_are_never_touched(self):
-        foreign = sg.ARCHIVE_DIR / "keep-me"
+        foreign = pt.ARCHIVE_DIR / "keep-me"
         foreign.mkdir()
         past = time.time() - 400 * 86400
         os.utime(foreign, (past, past))
@@ -770,7 +771,7 @@ class TestExecBrief(JournalCase):
                 self.assertRaises(SystemExit) as caught:
             pkg.main.main()
         self.assertEqual(caught.exception.code, 0)
-        sdirs = [d for d in sg.SESSIONS_DIR.iterdir() if not d.name.startswith(".")]
+        sdirs = [d for d in pt.SESSIONS_DIR.iterdir() if not d.name.startswith(".")]
         self.assertEqual(len(sdirs), 1)
         recs = sg._read_journal(sdirs[0] / "journal.jsonl")
         start = next(r for r in recs if r["event"] == "exec_start")
@@ -903,7 +904,7 @@ class TestLsAll(JournalCase):
 
     def archive_session(self, name="old1", rc=3):
         sid = sg._new_sid(name)
-        adir = sg.ARCHIVE_DIR / sid
+        adir = pt.ARCHIVE_DIR / sid
         adir.mkdir(parents=True)
         sg._write_json(adir / "meta.json", {"name": name, "sid": sid, "port": 8091,
                                             "created": sg.now_iso(),
@@ -1039,8 +1040,8 @@ class TestCaptureWiring(JournalCase):
 
     def setUp(self):
         super().setUp()
-        sg.LOG_DIR.mkdir(parents=True, exist_ok=True)
-        self.addCleanup(shutil.rmtree, sg.LOG_DIR, ignore_errors=True)
+        pt.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(shutil.rmtree, pt.LOG_DIR, ignore_errors=True)
 
     @staticmethod
     def fake_proc():
@@ -1066,7 +1067,7 @@ class TestCaptureWiring(JournalCase):
     def test_start_proxy_names_a_capture_file(self):
         (_, log_path), env = self.spawn(sg.start_proxy, RULE, 18090)
         capture = env["SILKGATE_EGRESS_CAPTURE_FILE"]
-        self.assertEqual(Path(capture).parent, sg.LOG_DIR)
+        self.assertEqual(Path(capture).parent, pt.LOG_DIR)
         self.assertRegex(Path(capture).name, r"^capture-.*\.jsonl$")
 
     def test_start_shared_proxy_records_capture_in_its_meta(self):
@@ -1092,7 +1093,7 @@ class TestCaptureWiring(JournalCase):
         self.assertIn("SILKGATE_EGRESS_CAPTURE_FILE", seen["env"])
 
     def log_file(self, name, age_days):
-        p = sg.LOG_DIR / name
+        p = pt.LOG_DIR / name
         p.write_text("x\n")
         past = time.time() - age_days * 86400
         os.utime(p, (past, past))
@@ -1106,7 +1107,7 @@ class TestCaptureWiring(JournalCase):
             self.log_file(f"events-{i:02d}.jsonl", age_days=age)
         with contextlib.redirect_stderr(io.StringIO()):
             sg._prune_logs()
-        names = sorted(p.name for p in sg.LOG_DIR.iterdir())
+        names = sorted(p.name for p in pt.LOG_DIR.iterdir())
         self.assertIn("capture-00.jsonl", names)
         self.assertNotIn(f"capture-{n - 1:02d}.jsonl", names,
                          "capture beyond count+week must go")
@@ -1122,7 +1123,7 @@ class TestCaptureWiring(JournalCase):
         self.addCleanup(os.environ.pop, "SILKGATE_CAPTURE_RETAIN_DAYS", None)
         with contextlib.redirect_stderr(io.StringIO()):
             sg._prune_logs()
-        names = sorted(p.name for p in sg.LOG_DIR.iterdir())
+        names = sorted(p.name for p in pt.LOG_DIR.iterdir())
         self.assertIn(f"capture-{n - 1:02d}.jsonl", names,
                       "the capture knob at 0 keeps every capture file")
         self.assertNotIn(f"proxy-{n - 1:02d}.log", names,
@@ -1130,8 +1131,8 @@ class TestCaptureWiring(JournalCase):
 
     def test_live_capture_file_survives_a_full_prune(self):
         live = self.log_file("capture-00-live.jsonl", age_days=90)
-        sg._write_json(sg.PROXY_JSON, {"pid": os.getpid(), "capture": str(live)})
-        self.addCleanup(sg.PROXY_JSON.unlink)
+        sg._write_json(pt.PROXY_JSON, {"pid": os.getpid(), "capture": str(live)})
+        self.addCleanup(pt.PROXY_JSON.unlink)
         for i in range(1, sg.LOG_RETAIN_COUNT + 6):
             self.log_file(f"capture-{i:02d}.jsonl", age_days=40 + i)
         with contextlib.redirect_stderr(io.StringIO()):

@@ -31,16 +31,17 @@ pkg = clipkg.load("sg_cli_validation")
 sg = pkg.core
 vf = pkg.verify
 gt = pkg.git
+pt = pkg.paths
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-tests-"))
-sg.SILK_DIR = _SCRATCH / "silkgate"
-sg.SESSIONS_DIR = sg.SILK_DIR / "sessions"
-sg.LOG_DIR = sg.SILK_DIR / "logs"
-sg.CA_DIR = sg.SILK_DIR / "ca"
-sg.DOCKER_CFG_DIR = sg.SILK_DIR / "docker"
-sg.PROXY_JSON = sg.SILK_DIR / "proxy.json"
-sg.PROXY_SOCK = sg.SILK_DIR / "proxy.sock"
+pt.SILK_DIR = _SCRATCH / "silkgate"
+pt.SESSIONS_DIR = pt.SILK_DIR / "sessions"
+pt.LOG_DIR = pt.SILK_DIR / "logs"
+pt.CA_DIR = pt.SILK_DIR / "ca"
+pt.DOCKER_CFG_DIR = pt.SILK_DIR / "docker"
+pt.PROXY_JSON = pt.SILK_DIR / "proxy.json"
+pt.PROXY_SOCK = pt.SILK_DIR / "proxy.sock"
 sg.CLAUDE_SETTINGS = _SCRATCH / "claude" / "settings.json"
 
 
@@ -65,7 +66,7 @@ class CliCase(unittest.TestCase):
     """Shared assertions. die() exits non-zero after printing one line to stderr."""
 
     def setUp(self):
-        self.assertTrue(str(sg.SESSIONS_DIR).startswith(str(_SCRATCH)),
+        self.assertTrue(str(pt.SESSIONS_DIR).startswith(str(_SCRATCH)),
                         "tests must never point at a real ~/.silkgate")
         # Resolved, because _mount_pair resolves what it is given and macOS hands out
         # temp paths under /var, which is a symlink to /private/var.
@@ -273,31 +274,31 @@ class TestSessionNames(CliCase):
     def test_traversing_name_is_refused_before_it_reads_anything(self):
         outside = self.tmp / "planted"
         self.plant(outside, {"name": "planted", "sandbox": "sg-planted", "port": 8090})
-        sg.SESSIONS_DIR = self.tmp / "sessions"
-        sg.SESSIONS_DIR.mkdir()
-        self.addCleanup(setattr, sg, "SESSIONS_DIR", sg.SILK_DIR / "sessions")
+        pt.SESSIONS_DIR = self.tmp / "sessions"
+        pt.SESSIONS_DIR.mkdir()
+        self.addCleanup(setattr, pt, "SESSIONS_DIR", pt.SILK_DIR / "sessions")
         self.assertTrue((sg.session_dir("../planted") / "meta.json").is_file())
         for name in ["../planted", "../../etc", "/tmp/planted", "foo/../../planted", "..",
                      ".", "a b", "-x", "", "x" * 33, "sg;id"]:
             self.refuses("invalid session name", sg.read_meta, name)
 
     def test_meta_must_agree_with_its_directory(self):
-        sg.SESSIONS_DIR = self.tmp / "sessions"
-        self.addCleanup(setattr, sg, "SESSIONS_DIR", sg.SILK_DIR / "sessions")
-        self.plant(sg.SESSIONS_DIR / "good", {"name": "good", "sandbox": "sg-good", "port": 8090})
+        pt.SESSIONS_DIR = self.tmp / "sessions"
+        self.addCleanup(setattr, pt, "SESSIONS_DIR", pt.SILK_DIR / "sessions")
+        self.plant(pt.SESSIONS_DIR / "good", {"name": "good", "sandbox": "sg-good", "port": 8090})
         self.assertEqual(sg.read_meta("good")["sandbox"], "sg-good")
         self.assertIsNone(sg.read_meta("absent"))
-        self.plant(sg.SESSIONS_DIR / "liar", {"name": "victim", "sandbox": "sg-victim"})
+        self.plant(pt.SESSIONS_DIR / "liar", {"name": "victim", "sandbox": "sg-victim"})
         self.refuses("refusing it", sg.read_meta, "liar")
-        self.plant(sg.SESSIONS_DIR / "flag", {"name": "flag", "sandbox": "--net-rule=allow@x"})
+        self.plant(pt.SESSIONS_DIR / "flag", {"name": "flag", "sandbox": "--net-rule=allow@x"})
         self.refuses("refusing it", sg.read_meta, "flag")
 
     def test_list_metas_skips_what_silkgate_did_not_create(self):
-        sg.SESSIONS_DIR = self.tmp / "sessions"
-        self.addCleanup(setattr, sg, "SESSIONS_DIR", sg.SILK_DIR / "sessions")
-        self.plant(sg.SESSIONS_DIR / "good", {"name": "good", "sandbox": "sg-good", "port": 8090})
-        self.plant(sg.SESSIONS_DIR / ".tmp-staging", {"name": "staging", "sandbox": "sg-x"})
-        self.plant(sg.SESSIONS_DIR / "not a session", {"name": "elsewhere", "sandbox": "sg-y"})
+        pt.SESSIONS_DIR = self.tmp / "sessions"
+        self.addCleanup(setattr, pt, "SESSIONS_DIR", pt.SILK_DIR / "sessions")
+        self.plant(pt.SESSIONS_DIR / "good", {"name": "good", "sandbox": "sg-good", "port": 8090})
+        self.plant(pt.SESSIONS_DIR / ".tmp-staging", {"name": "staging", "sandbox": "sg-x"})
+        self.plant(pt.SESSIONS_DIR / "not a session", {"name": "elsewhere", "sandbox": "sg-y"})
         self.assertEqual([m["name"] for m in sg.list_metas()], ["good"])
 
 
@@ -378,11 +379,11 @@ class TestMountGuards(CliCase):
                          [f"{path}:/workspace:rw"], allow_git_dir=True)
 
     def test_host_state_and_home_are_refused_in_both_modes(self):
-        sg.SILK_DIR = self.tmp / "state" / "silkgate"
-        sg.SILK_DIR.mkdir(parents=True)
-        self.addCleanup(setattr, sg, "SILK_DIR", _SCRATCH / "silkgate")
-        for path in [str(sg.SILK_DIR),                      # silkgate's own state
-                     str(sg.SILK_DIR.parent),               # a directory containing it
+        pt.SILK_DIR = self.tmp / "state" / "silkgate"
+        pt.SILK_DIR.mkdir(parents=True)
+        self.addCleanup(setattr, pt, "SILK_DIR", _SCRATCH / "silkgate")
+        for path in [str(pt.SILK_DIR),                      # silkgate's own state
+                     str(pt.SILK_DIR.parent),               # a directory containing it
                      str(Path.home()),
                      str(REPO),                             # the checkout this CLI runs from
                      os.sep]:
@@ -391,7 +392,7 @@ class TestMountGuards(CliCase):
 
     def test_repo_is_the_checkout_this_cli_runs_from(self):
         # REPO also anchors the profiles, the addon, and image builds.
-        self.assertEqual(sg.REPO, REPO)
+        self.assertEqual(pt.REPO, REPO)
         self.refuses("silkgate checkout", sg._mount_args, [f"{REPO}:/data:ro"])
 
     def test_guest_destination_guards(self):
@@ -507,9 +508,9 @@ class TestProfileRequires(CliCase):
             (pdir / name).mkdir(parents=True)
             if conf:
                 (pdir / name / "profile.conf").write_text(conf)
-        self._profile_dir = sg.PROFILE_DIR
-        sg.PROFILE_DIR = pdir
-        self.addCleanup(setattr, sg, "PROFILE_DIR", self._profile_dir)
+        self._profile_dir = pt.PROFILE_DIR
+        pt.PROFILE_DIR = pdir
+        self.addCleanup(setattr, pt, "PROFILE_DIR", self._profile_dir)
 
     def test_missing_requirement_is_refused_and_named(self):
         message = self.refuses("requires helper", sg.resolve_profiles, ["needy"])
@@ -539,9 +540,9 @@ class ArgProfileCase(CliCase):
             (pdir / name).mkdir(parents=True)
             for fname, content in files.items():
                 (pdir / name / fname).write_text(content)
-        previous = sg.PROFILE_DIR
-        sg.PROFILE_DIR = pdir
-        self.addCleanup(setattr, sg, "PROFILE_DIR", previous)
+        previous = pt.PROFILE_DIR
+        pt.PROFILE_DIR = pdir
+        self.addCleanup(setattr, pt, "PROFILE_DIR", previous)
         return pdir
 
 
@@ -1142,7 +1143,7 @@ class TestPreflight(CliCase):
         if ca:
             ca_path.write_text("not a real CA")
         with mock.patch.object(sg, "preflight", spy), \
-                mock.patch.object(sg, "MITM_CA", ca_path), \
+                mock.patch.object(pt, "MITM_CA", ca_path), \
                 mock.patch.object(sys, "argv", ["silkgate"] + argv), \
                 contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as caught:
@@ -1153,7 +1154,7 @@ class TestPreflight(CliCase):
     def test_the_per_command_matrix(self):
         # `down` validates the session exists before asking after the toolchain, so it
         # needs one to tear down.
-        sdir = sg.SESSIONS_DIR / "pf3"
+        sdir = pt.SESSIONS_DIR / "pf3"
         sdir.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, sdir, ignore_errors=True)
         (sdir / "meta.json").write_text(json.dumps(
@@ -1182,7 +1183,7 @@ class TestPreflight(CliCase):
     def test_one_run_names_every_missing_tool(self):
         err = io.StringIO()
         with self.path_holding(), \
-                mock.patch.object(sg, "MITM_CA", self.tmp / "absent-ca.pem"), \
+                mock.patch.object(pt, "MITM_CA", self.tmp / "absent-ca.pem"), \
                 mock.patch.object(sys, "argv", ["silkgate", "run", "--", "true"]), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
             pkg.main.main()
@@ -1233,7 +1234,7 @@ class TestPreflight(CliCase):
     def test_a_single_tool_command_names_its_tool_at_the_moment_of_use(self):
         # exec (like attach/proxy/logs) needs one tool, so lazy which() already reports
         # its full shortfall in one run — no preflight, and the message names the fix.
-        sdir = sg.SESSIONS_DIR / "lazy1"
+        sdir = pt.SESSIONS_DIR / "lazy1"
         sdir.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, sdir, ignore_errors=True)
         (sdir / "meta.json").write_text(json.dumps(
@@ -1550,7 +1551,7 @@ class TestBranchGuards(GitRepoCase):
         self.refuses("leftover workspace", gt._branch_workspace, self.spec_for(root), "n1")
 
     def test_branch_workspace_refuses_silkgates_own_state(self):
-        root = Path(sg.SILK_DIR) / "somerepo"
+        root = Path(pt.SILK_DIR) / "somerepo"
         self.refuses("silkgate's own state", gt._branch_workspace, self.spec_for(root), "n1")
 
     def test_mount_guard_accepts_the_nested_sandbox_dir(self):
@@ -1567,7 +1568,7 @@ class TestBranchGuards(GitRepoCase):
     # --- meta as input ----------------------------------------------------------
 
     def plant_meta(self, name, **extra):
-        sdir = sg.SESSIONS_DIR / name
+        sdir = pt.SESSIONS_DIR / name
         sdir.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, sdir, ignore_errors=True)
         (sdir / "meta.json").write_text(json.dumps(
@@ -1902,7 +1903,7 @@ class TestCheckoutSessions(GitRepoCase):
     # --- a branchless session at harvest/down -------------------------------------
 
     def plant_checkout_meta(self, name):
-        sdir = sg.SESSIONS_DIR / name
+        sdir = pt.SESSIONS_DIR / name
         sdir.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, sdir, ignore_errors=True)
         (sdir / "meta.json").write_text(json.dumps(
@@ -2174,7 +2175,7 @@ class TestGithubProfiles(CliCase):
     # --- the image-baked credential stubs ---
 
     def grant_setup(self, name):
-        return (sg.PROFILE_DIR / name / "setup.sh").read_text()
+        return (pt.PROFILE_DIR / name / "setup.sh").read_text()
 
     def test_grant_setup_scripts_are_byte_identical(self):
         self.assertEqual(self.grant_setup("github-read"), self.grant_setup("github-write"))

@@ -9,7 +9,7 @@ import threading
 import time
 from uuid import uuid4
 
-from . import core
+from . import core, paths
 
 
 # The full check installs its own probe tools *through* the proxy, then trusts the CA so
@@ -45,7 +45,7 @@ FULL_SETUP = ("export DEBIAN_FRONTEND=noninteractive && "
 #
 # If the script can't be read, the sets are empty and _verify_shortfall refuses the run.
 # Other commands don't need them, and still work.
-_VERIFY_SCRIPT = core.REPO / "test" / "verify_guest.sh"
+_VERIFY_SCRIPT = paths.REPO / "test" / "verify_guest.sh"
 _CHECK_DECL = re.compile(r"^#\s*CHECK\s+(\d+)\s+tools:(\S+)(?:\s+subject:(\S+))?", re.M)
 
 
@@ -948,7 +948,7 @@ def cmd_verify(args):
         rules_text += oracles.rules()
     core.load_ruleset(rules_text)
     script = "bash /mnt/poc/test/verify_guest.sh"
-    mounts = [f"{core.REPO}:/mnt/poc:ro"]
+    mounts = [f"{paths.REPO}:/mnt/poc:ro"]
     if args.full:
         mounts.append(f"{core.ensure_ca().parent}:/mnt/ca:ro")
         script = FULL_SETUP + script

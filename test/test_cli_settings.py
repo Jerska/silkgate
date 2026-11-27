@@ -28,16 +28,17 @@ REPO = Path(__file__).resolve().parent.parent
 
 pkg = clipkg.load("sg_cli_settings")
 sg = pkg.core
+pt = pkg.paths
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-settings-tests-"))
-sg.SILK_DIR = _SCRATCH / "silkgate"
-sg.SESSIONS_DIR = sg.SILK_DIR / "sessions"
-sg.LOG_DIR = sg.SILK_DIR / "logs"
-sg.CA_DIR = sg.SILK_DIR / "ca"
-sg.DOCKER_CFG_DIR = sg.SILK_DIR / "docker"
-sg.PROXY_JSON = sg.SILK_DIR / "proxy.json"
-sg.PROXY_SOCK = sg.SILK_DIR / "proxy.sock"
+pt.SILK_DIR = _SCRATCH / "silkgate"
+pt.SESSIONS_DIR = pt.SILK_DIR / "sessions"
+pt.LOG_DIR = pt.SILK_DIR / "logs"
+pt.CA_DIR = pt.SILK_DIR / "ca"
+pt.DOCKER_CFG_DIR = pt.SILK_DIR / "docker"
+pt.PROXY_JSON = pt.SILK_DIR / "proxy.json"
+pt.PROXY_SOCK = pt.SILK_DIR / "proxy.sock"
 sg.CLAUDE_SETTINGS = _SCRATCH / "claude" / "settings.json"
 
 
@@ -50,7 +51,7 @@ class SettingsCase(unittest.TestCase):
     test writes per rank, and a user-rank file outside it."""
 
     def setUp(self):
-        self.assertTrue(str(sg.SESSIONS_DIR).startswith(str(_SCRATCH)),
+        self.assertTrue(str(pt.SESSIONS_DIR).startswith(str(_SCRATCH)),
                         "tests must never point at a real ~/.silkgate")
         self.tmp = Path(tempfile.mkdtemp(dir=_SCRATCH)).resolve()
         self.workspace = self.tmp / "project"

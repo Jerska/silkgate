@@ -18,21 +18,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-REPO = Path(__file__).resolve().parents[2]
-ADDON = REPO / "mitmaddon" / "proxy_addon.py"
-PROFILE_DIR = REPO / "profiles"
-MITM_CA = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
-SILK_DIR = Path.home() / ".silkgate"
-LOG_DIR = SILK_DIR / "logs"
-SESSIONS_DIR = SILK_DIR / "sessions"
-ARCHIVE_DIR = SILK_DIR / "archive"            # ended sessions, one dir per sid
-CA_DIR = SILK_DIR / "ca"                      # public MITM cert only, never the key
-DOCKER_CFG_DIR = SILK_DIR / "docker"          # our own DOCKER_CONFIG — see docker_env()
 GUEST_CONTEXT = "/silkgate/CONTEXT.md"        # what the guest is told about its sandbox
 GUEST_BRIEF = "/silkgate/BRIEF.md"            # where --brief lands the operator's task
 GUEST_EXECS = "/silkgate/execs"               # one pidfile per exec, <exec_id>.pid
-PROXY_JSON = SILK_DIR / "proxy.json"          # shared-proxy meta (pid/ports/log/sock)
-PROXY_SOCK = SILK_DIR / "proxy.sock"          # control socket (line-delimited JSON)
 # Mirrored in doc/PROXY.md (The port pool). Update both.
 POOL_SIZE = 16                                 # base_port .. base_port+15
 DEFAULT_BASE_PORT = 8090
@@ -43,9 +31,9 @@ IMAGE_NS = "silkgate"                # generated images: silkgate/<slug>:<hash12
 TIER1_PROBE_TARGET = "1.1.1.1:443"   # must be a live public service: the probe passes only
                                      # when a connect that WOULD succeed is denied (tier1_fault)
 
-from . import git
+from . import git, paths
 
-sys.path.insert(0, str(REPO / "mitmaddon"))
+sys.path.insert(0, str(paths.REPO / "mitmaddon"))
 from rule_engine import RuleSet, _parse_secret
 
 
@@ -106,7 +94,7 @@ def _build_tools():
     """What building an image dials: docker and msb (build_image), plus mitmdump while
     the mitmproxy CA does not exist yet — write_build_context runs ensure_ca, which
     shells out to mitmdump only to generate that CA."""
-    return ("docker", "msb") + (() if MITM_CA.is_file() else ("mitmdump",))
+    return ("docker", "msb") + (() if paths.MITM_CA.is_file() else ("mitmdump",))
 
 
 def tail(path, lines=10):
@@ -192,9 +180,9 @@ class Profile:
 
     def __init__(self, name, version=None, arg=None):
         # The keys read here are mirrored in doc/PROFILES.md (profile.conf keys). Update both.
-        self.name, self.dir = name, PROFILE_DIR / name
+        self.name, self.dir = name, paths.PROFILE_DIR / name
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) or not self.dir.is_dir():
-            avail = ", ".join(sorted(p.name for p in PROFILE_DIR.iterdir() if p.is_dir()))
+            avail = ", ".join(sorted(p.name for p in paths.PROFILE_DIR.iterdir() if p.is_dir()))
             die(f"unknown profile {name!r} (available: {avail})")
         self.conf = _parse_conf(self.dir / "profile.conf")
         self.rules = _read_if(self.dir / "rules.txt")
@@ -579,7 +567,7 @@ def _prune_kind(pattern, cutoff, live):
     """One kind's removals under the policy above: only files BOTH beyond the newest
     LOG_RETAIN_COUNT of the kind AND older than `cutoff`, never one in `live`."""
     stamped = []
-    for p in LOG_DIR.glob(pattern):
+    for p in paths.LOG_DIR.glob(pattern):
         try:
             stamped.append((p.stat().st_mtime, p))
         except OSError:                          # vanished mid-scan: already gone
@@ -617,7 +605,7 @@ def _prune_logs():
         for pattern in patterns:
             pruned += _prune_kind(pattern, cutoff, live)
     if pruned:
-        say(f"pruned {pruned} audit log file(s) past retention from {LOG_DIR} "
+        say(f"pruned {pruned} audit log file(s) past retention from {paths.LOG_DIR} "
             f"(the {LOG_RETAIN_COUNT} newest of each kind always stay; "
             "SILKGATE_LOG_RETAIN_DAYS=0 and SILKGATE_CAPTURE_RETAIN_DAYS=0 keep "
             "everything)")
@@ -633,13 +621,13 @@ def start_proxy(rules_text, port):
     mitmdump = which("mitmdump", "pip install mitmproxy")
     if not _port_free(port):
         die(_port_in_use_error(port))
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
-    log_path = LOG_DIR / f"proxy-{stamp}.log"
-    events_path = LOG_DIR / f"events-{stamp}.jsonl"
-    capture_path = LOG_DIR / f"capture-{stamp}.jsonl"
-    rules_file = LOG_DIR / f"proxy-{stamp}.rules"
+    log_path = paths.LOG_DIR / f"proxy-{stamp}.log"
+    events_path = paths.LOG_DIR / f"events-{stamp}.jsonl"
+    capture_path = paths.LOG_DIR / f"capture-{stamp}.jsonl"
+    rules_file = paths.LOG_DIR / f"proxy-{stamp}.rules"
     rules_file.write_text(rules_text)
     env = dict(os.environ, SILKGATE_EGRESS_RULES=str(rules_file),
                SILKGATE_EGRESS_EVENTS_FILE=str(events_path),
@@ -647,7 +635,7 @@ def start_proxy(rules_text, port):
     env.pop("SILKGATE_EGRESS_SESSIONS_DIR", None)
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
-    argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"] + _modes(port)
+    argv = [mitmdump, "-s", str(paths.ADDON), "--set", "rawtcp=false"] + _modes(port)
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
@@ -767,7 +755,7 @@ def ensure_ca():
     startup is done, writes the CA and never listens. A listener here would be a proxy
     with no rules.
     """
-    if not MITM_CA.is_file():
+    if not paths.MITM_CA.is_file():
         mitmdump = which("mitmdump", "pip install mitmproxy")
         say("generating the mitmproxy CA (first run)…")
         with tempfile.TemporaryDirectory(prefix="silkgate-ca-") as tmp:
@@ -777,18 +765,18 @@ def ensure_ca():
                              "def running():\n"
                              "    ctx.master.shutdown()\n")
             argv = [mitmdump, "--no-server", "-s", str(addon),
-                    "--set", f"confdir={MITM_CA.parent}"]
+                    "--set", f"confdir={paths.MITM_CA.parent}"]
             try:
                 proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
             except subprocess.TimeoutExpired:
-                die(f"mitmdump did not finish generating {MITM_CA} within 60s")
-        if not MITM_CA.is_file():
+                die(f"mitmdump did not finish generating {paths.MITM_CA} within 60s")
+        if not paths.MITM_CA.is_file():
             detail = (proc.stderr or proc.stdout).strip().splitlines()
-            die(f"mitmdump did not create {MITM_CA}"
+            die(f"mitmdump did not create {paths.MITM_CA}"
                 + (f" — {detail[-1]}" if detail else ""))
-    CA_DIR.mkdir(parents=True, exist_ok=True)
-    cert = CA_DIR / "egress-ca.pem"
-    shutil.copyfile(MITM_CA, cert)
+    paths.CA_DIR.mkdir(parents=True, exist_ok=True)
+    cert = paths.CA_DIR / "egress-ca.pem"
+    shutil.copyfile(paths.MITM_CA, cert)
     return cert
 
 
@@ -896,15 +884,15 @@ def docker_env():
     """
     if os.environ.get("DOCKER_CONFIG"):
         return None
-    DOCKER_CFG_DIR.mkdir(parents=True, exist_ok=True)
-    config = DOCKER_CFG_DIR / "config.json"
+    paths.DOCKER_CFG_DIR.mkdir(parents=True, exist_ok=True)
+    config = paths.DOCKER_CFG_DIR / "config.json"
     if not config.is_file():
         config.write_text("{}\n")
-    plugins = DOCKER_CFG_DIR / "cli-plugins"
+    plugins = paths.DOCKER_CFG_DIR / "cli-plugins"
     user_plugins = Path.home() / ".docker" / "cli-plugins"
     if user_plugins.is_dir() and not plugins.exists():
         plugins.symlink_to(user_plugins)
-    return dict(os.environ, DOCKER_CONFIG=str(DOCKER_CFG_DIR))
+    return dict(os.environ, DOCKER_CONFIG=str(paths.DOCKER_CFG_DIR))
 
 
 def build_image(profiles, *, base=BASE_IMAGE, platform_=None):
@@ -1145,7 +1133,7 @@ def _read_json(path):
 
 
 def session_dir(name):
-    return SESSIONS_DIR / name
+    return paths.SESSIONS_DIR / name
 
 
 def sandbox_name(name):
@@ -1343,10 +1331,10 @@ def read_meta(name):
 
 
 def list_metas():
-    if not SESSIONS_DIR.is_dir():
+    if not paths.SESSIONS_DIR.is_dir():
         return []
     metas = []
-    for d in sorted(SESSIONS_DIR.iterdir()):
+    for d in sorted(paths.SESSIONS_DIR.iterdir()):
         if d.name.startswith(".") or not _name_ok(d.name):   # not something silkgate created
             continue
         m = read_meta(d.name)
@@ -1363,7 +1351,7 @@ def read_archived_meta(sid):
     fields into git argv."""
     if not _SID_RE.fullmatch(sid or ""):
         die(f"invalid archive sid {sid!r}")
-    meta = _read_json(ARCHIVE_DIR / sid / "meta.json")
+    meta = _read_json(paths.ARCHIVE_DIR / sid / "meta.json")
     if meta is None:
         return None
     if meta.get("sid") != sid:
@@ -1378,10 +1366,10 @@ def read_archived_meta(sid):
 def list_archived_metas():
     """Every archived session's meta, oldest first — a sid opens with its UTC stamp, so
     the plain name sort is chronological."""
-    if not ARCHIVE_DIR.is_dir():
+    if not paths.ARCHIVE_DIR.is_dir():
         return []
     metas = []
-    for d in sorted(ARCHIVE_DIR.iterdir()):
+    for d in sorted(paths.ARCHIVE_DIR.iterdir()):
         if not _SID_RE.fullmatch(d.name):            # not something silkgate archived
             continue
         m = read_archived_meta(d.name)
@@ -1393,7 +1381,7 @@ def list_archived_metas():
 # --- shared proxy -----------------------------------------------------------
 
 def read_proxy():
-    return _read_json(PROXY_JSON)
+    return _read_json(paths.PROXY_JSON)
 
 
 def proxy_alive(pid):
@@ -1439,12 +1427,12 @@ def _proxy_ident():
     Only the process bound to our control socket can answer a ping, and the kernel names
     that peer. proxy.json can outlive or misname its process. Returns 0 for a proxy that
     answered but whose pid the kernel couldn't report."""
-    if not PROXY_SOCK.exists():
+    if not paths.PROXY_SOCK.exists():
         return None
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(2)
-            s.connect(str(PROXY_SOCK))
+            s.connect(str(paths.PROXY_SOCK))
             f = s.makefile("rw")
             f.write('{"op": "ping"}\n')
             f.flush()
@@ -1468,8 +1456,8 @@ class _proxy_lock:
 
     def __enter__(self):
         import fcntl
-        SILK_DIR.mkdir(parents=True, exist_ok=True)
-        self._fd = os.open(SILK_DIR / "proxy.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        paths.SILK_DIR.mkdir(parents=True, exist_ok=True)
+        self._fd = os.open(paths.SILK_DIR / "proxy.lock", os.O_RDWR | os.O_CREAT, 0o600)
         fcntl.flock(self._fd, fcntl.LOCK_EX)
 
     def __exit__(self, *exc):
@@ -1477,7 +1465,7 @@ class _proxy_lock:
 
 
 def _clear_proxy_files():
-    for p in (PROXY_JSON, PROXY_SOCK):
+    for p in (paths.PROXY_JSON, paths.PROXY_SOCK):
         try:
             p.unlink()
         except OSError:
@@ -1495,21 +1483,21 @@ def start_shared_proxy(base_port, ports=None):
     mitmdump = which("mitmdump", "pip install mitmproxy")
     if ports is None:
         ports = _find_free_pool(base_port)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    paths.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
-    log_path = LOG_DIR / f"proxy-{stamp}.log"
-    events_path = LOG_DIR / f"events-{stamp}.jsonl"
-    capture_path = LOG_DIR / f"capture-{stamp}.jsonl"
+    log_path = paths.LOG_DIR / f"proxy-{stamp}.log"
+    events_path = paths.LOG_DIR / f"events-{stamp}.jsonl"
+    capture_path = paths.LOG_DIR / f"capture-{stamp}.jsonl"
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
-    argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"]
+    argv = [mitmdump, "-s", str(paths.ADDON), "--set", "rawtcp=false"]
     for p in ports:
         argv += _modes(p)
     # Multi-session mode: SILKGATE_EGRESS_SESSIONS_DIR on, SILKGATE_EGRESS_RULES off (addon needs exactly one).
-    env = dict(os.environ, SILKGATE_EGRESS_SESSIONS_DIR=str(SESSIONS_DIR),
-               SILKGATE_EGRESS_CONTROL_SOCK=str(PROXY_SOCK),
+    env = dict(os.environ, SILKGATE_EGRESS_SESSIONS_DIR=str(paths.SESSIONS_DIR),
+               SILKGATE_EGRESS_CONTROL_SOCK=str(paths.PROXY_SOCK),
                SILKGATE_EGRESS_EVENTS_FILE=str(events_path),
                SILKGATE_EGRESS_CAPTURE_FILE=str(capture_path))
     env.pop("SILKGATE_EGRESS_RULES", None)
@@ -1522,10 +1510,10 @@ def start_shared_proxy(base_port, ports=None):
     meta = {"pid": proc.pid, "base_port": ports[0], "ports": ports,
             "log": str(log_path), "events": str(events_path),
             "capture": str(capture_path),
-            "sock": str(PROXY_SOCK), "started": now_iso()}
+            "sock": str(paths.PROXY_SOCK), "started": now_iso()}
     try:
         _wait_proxy_ready(proc, ports, log_path)
-        _write_json(PROXY_JSON, meta)
+        _write_json(paths.PROXY_JSON, meta)
     except BaseException:       # incl. a Ctrl-C mid-wait: until proxy.json lands, no
         stop(proc)              # other command can ever find this mitmdump to stop
         raise                   # it (stop is a no-op where the wait already did)
@@ -1575,11 +1563,11 @@ def _ensure_proxy_locked(base_port):
     ident = _proxy_ident()
     if ident is not None:                      # something live answers on our socket path
         if meta is None:
-            die(f"a proxy (pid {ident or 'unknown'}) holds {PROXY_SOCK} but {PROXY_JSON} "
-                "is gone — kill that process and retry")
+            die(f"a proxy (pid {ident or 'unknown'}) holds {paths.PROXY_SOCK} but "
+                f"{paths.PROXY_JSON} is gone — kill that process and retry")
         if ident and meta.get("pid") != ident:
             meta["pid"] = ident                # proxy.json outlived the proxy it described;
-            _write_json(PROXY_JSON, meta)      # the socket's owner is the identity
+            _write_json(paths.PROXY_JSON, meta)      # the socket's owner is the identity
         return meta
     pinned = _pinned_pool(meta)                # read while the stale record still exists
     if meta:                                   # record of a proxy that no longer answers
@@ -1625,7 +1613,7 @@ def stop_proxy(meta):
 # addon from reading claims as sessions.
 
 def _port_claims_dir():
-    return SESSIONS_DIR / ".ports"
+    return paths.SESSIONS_DIR / ".ports"
 
 
 def _claim_path(port):
@@ -1722,12 +1710,12 @@ def pick_port(proxy, name):
 
 def _sock_call(req):
     """One line-delimited JSON request/response against the proxy control socket."""
-    if not PROXY_SOCK.exists():
+    if not paths.PROXY_SOCK.exists():
         die("shared proxy control socket missing — is a session up?")
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(5)
-            s.connect(str(PROXY_SOCK))
+            s.connect(str(paths.PROXY_SOCK))
             f = s.makefile("rw")
             f.write(json.dumps(req) + "\n")
             f.flush()
@@ -1756,7 +1744,7 @@ def _wait_control_sock(timeout, pid=None):
         if ident is not None:
             if pid is None or ident in (0, pid):
                 return
-            die(f"control socket {PROXY_SOCK} is answered by pid {ident}, not the "
+            die(f"control socket {paths.PROXY_SOCK} is answered by pid {ident}, not the "
                 f"proxy just started (pid {pid})")
         time.sleep(0.2)
     die("shared proxy control socket did not become ready")
@@ -2123,8 +2111,9 @@ def _relay(line, *, newline, on_line=None):
 # This, _RESERVED_DSTS, and _mount_args are mirrored in README.md (Mounts). Update both.
 def _forbidden_mounts():
     return ((Path.home(), "your home directory"),
-            (SILK_DIR, "silkgate's own state (session rulesets, the control socket, the CA)"),
-            (REPO, "the silkgate checkout this CLI runs from"))
+            (paths.SILK_DIR,
+             "silkgate's own state (session rulesets, the control socket, the CA)"),
+            (paths.REPO, "the silkgate checkout this CLI runs from"))
 
 
 def _find_git_dir(root):
@@ -2258,7 +2247,7 @@ def _provision_session(name, image, port, rules_text, ruleset, mounts, ws, env, 
     sdir = session_dir(name)
     if sdir.exists():
         die(f"session already exists: {sdir}")
-    tmp = SESSIONS_DIR / f".tmp-{name}"                  # dot-prefixed: invisible to registries
+    tmp = paths.SESSIONS_DIR / f".tmp-{name}"            # dot-prefixed: invisible to registries
     shutil.rmtree(tmp, ignore_errors=True)               # stale leftover from a crash
     tmp.mkdir(parents=True)
     owned = False                                        # whether the rename made sdir ours
@@ -2396,7 +2385,7 @@ def _prune_archive():
     cutoff = time.time() - days * 86400
     stamped = []
     try:
-        entries = list(ARCHIVE_DIR.iterdir())
+        entries = list(paths.ARCHIVE_DIR.iterdir())
     except OSError:
         return
     for d in entries:
@@ -2414,7 +2403,7 @@ def _prune_archive():
         shutil.rmtree(d, ignore_errors=True)
         pruned += not d.exists()
     if pruned:
-        say(f"pruned {pruned} archived session(s) older than {days:g}d from {ARCHIVE_DIR} "
+        say(f"pruned {pruned} archived session(s) older than {days:g}d from {paths.ARCHIVE_DIR} "
             f"(the {ARCHIVE_RETAIN_COUNT} newest always stay; SILKGATE_ARCHIVE_RETAIN_DAYS=0 "
             "keeps everything)")
 
@@ -2454,8 +2443,8 @@ def _teardown_session(meta, archive=True):
             except OSError as e:
                 say(f"warning: could not stamp 'ended' into {name!r}'s meta: {e}")
             try:
-                ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-                sdir.rename(ARCHIVE_DIR / sid)
+                paths.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+                sdir.rename(paths.ARCHIVE_DIR / sid)
             except OSError as e:
                 say(f"warning: could not archive session {name!r} ({e}) — removing it "
                     "instead")
@@ -2499,7 +2488,7 @@ def cmd_profiles(args):
         return
     width = shutil.get_terminal_size((80, 24)).columns
     blocks = [_profile_block(Profile(d.name), width)
-              for d in sorted(p for p in PROFILE_DIR.iterdir() if p.is_dir())]
+              for d in sorted(p for p in paths.PROFILE_DIR.iterdir() if p.is_dir())]
     print("\n\n".join(blocks))
 
 
@@ -2571,12 +2560,12 @@ def cmd_proxy(args):
         die("no rules — pass --with PROFILE and/or --rule 'host/path GET'")
     check_secrets(load_ruleset(rules_text))
     mitmdump = which("mitmdump", "pip install mitmproxy")
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
     _prune_logs()
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
-    rules_file = LOG_DIR / f"standalone-{stamp}.rules"
-    events_path = LOG_DIR / f"events-{stamp}.jsonl"
-    capture_path = LOG_DIR / f"capture-{stamp}.jsonl"
+    rules_file = paths.LOG_DIR / f"standalone-{stamp}.rules"
+    events_path = paths.LOG_DIR / f"events-{stamp}.jsonl"
+    capture_path = paths.LOG_DIR / f"capture-{stamp}.jsonl"
     rules_file.write_text(rules_text)
     env = dict(os.environ, SILKGATE_EGRESS_RULES=str(rules_file),
                SILKGATE_EGRESS_EVENTS_FILE=str(events_path),
@@ -2584,7 +2573,7 @@ def cmd_proxy(args):
     env.pop("SILKGATE_EGRESS_SESSIONS_DIR", None)
     # rawtcp=false: a CONNECT whose payload mitmproxy cannot read as TLS is refused
     # instead of becoming an opaque tunnel around the addon's per-request checks.
-    argv = [mitmdump, "-s", str(ADDON), "--set", "rawtcp=false"] + _modes(args.port)
+    argv = [mitmdump, "-s", str(paths.ADDON), "--set", "rawtcp=false"] + _modes(args.port)
     proc = subprocess.Popen(argv, env=env)
     try:
         sys.exit(wait_foreground(proc))
@@ -3134,7 +3123,7 @@ def cmd_ls(args):
             # from the end, the moment an archived session's clock stopped.
             rows.append((m.get("name") or "-", "archived", "-", _mounts_cell(m),
                          _age(m.get("ended") or m.get("created")),
-                         *_journal_summary(ARCHIVE_DIR / m["sid"] / "journal.jsonl"),
+                         *_journal_summary(paths.ARCHIVE_DIR / m["sid"] / "journal.jsonl"),
                          m["sid"]))
         _print_table(rows)
     proxy = read_proxy()
@@ -3142,8 +3131,8 @@ def cmd_ls(args):
     if ident is None:                    # after an unclean exit proxy.json survives and its
         print("proxy: not running")      # pid may belong to a recycled, unrelated process
     elif proxy is None:
-        print(f"proxy: pid {ident or 'unknown'} answers on {PROXY_SOCK} but {PROXY_JSON} "
-              "is gone — kill that process and retry")
+        print(f"proxy: pid {ident or 'unknown'} answers on {paths.PROXY_SOCK} but "
+              f"{paths.PROXY_JSON} is gone — kill that process and retry")
     else:
         pool = proxy["ports"]
         pid = ident or proxy.get("pid")  # 0 = answered, but the kernel could not name it

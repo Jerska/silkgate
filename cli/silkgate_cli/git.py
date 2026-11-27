@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import core
+from . import core, paths
 
 
 # --- checkout/branch sessions: a clone in the guest, from the host repo ---------
@@ -147,7 +147,7 @@ def _branch_workspace(spec, name):
     of the repo root itself keeps holding for everyone else — and it is silkgate's to delete at
     teardown, which is why a user-named -v mount can never reach this path."""
     ws_dir = Path(spec["repo_root"]) / ".silkgate" / "sandboxes" / name
-    silk = Path(core.SILK_DIR).resolve()
+    silk = Path(paths.SILK_DIR).resolve()
     if silk == ws_dir.resolve() or silk in ws_dir.resolve().parents:
         core.die(f"refusing to keep branch workspaces under {ws_dir}: that is inside silkgate's "
                  "own state — a repository rooted at your home directory cannot use --branch")

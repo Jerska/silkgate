@@ -31,11 +31,12 @@ if shutil.which("git") is None:
 pkg = clipkg.load("sg_cli_branch_ingest")
 sg = pkg.core
 gt = pkg.git
+pt = pkg.paths
 
 # Everything the CLI would write lives under one scratch tree for the whole run.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="silkgate-ingest-tests-"))
-sg.SILK_DIR = _SCRATCH / "silkgate"
-sg.SESSIONS_DIR = sg.SILK_DIR / "sessions"
+pt.SILK_DIR = _SCRATCH / "silkgate"
+pt.SESSIONS_DIR = pt.SILK_DIR / "sessions"
 
 
 def tearDownModule():
@@ -201,7 +202,7 @@ class TestFirstHarvest(IngestCase):
         self.assertEqual(self.host_ref(f"refs/heads/{self.BRANCH}"), tip)
 
     def test_meta_records_the_ingested_tip(self):
-        sdir = sg.SESSIONS_DIR / self.NAME
+        sdir = pt.SESSIONS_DIR / self.NAME
         sdir.mkdir(parents=True)
         (sdir / "meta.json").write_text(json.dumps(self.meta()))
         self.addCleanup(shutil.rmtree, sdir, ignore_errors=True)

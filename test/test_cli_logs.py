@@ -48,6 +48,7 @@ os.environ.pop("SILKGATE_LOG_RETAIN_DAYS", None)
 pkg = clipkg.load("sg_cli_logs")
 MOD = pkg.core
 LOGS = pkg.logs
+PATHS = pkg.paths
 
 RULE = "api.anthropic.com/** GET"
 
@@ -140,30 +141,30 @@ class SilkgateTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         silk = self.root / "silk"
-        self._saved = {k: getattr(MOD, k) for k in
+        self._saved = {k: getattr(PATHS, k) for k in
                        ("SILK_DIR", "LOG_DIR", "SESSIONS_DIR", "ARCHIVE_DIR",
                         "PROXY_JSON", "PROXY_SOCK", "CA_DIR", "MITM_CA")}
         self.addCleanup(self._restore)
-        MOD.SILK_DIR = silk
-        MOD.LOG_DIR = silk / "logs"
-        MOD.SESSIONS_DIR = silk / "sessions"
-        MOD.ARCHIVE_DIR = silk / "archive"
-        MOD.PROXY_JSON = silk / "proxy.json"
-        MOD.PROXY_SOCK = silk / "proxy.sock"
-        MOD.CA_DIR = silk / "ca"
-        MOD.MITM_CA = self.root / "mitmproxy" / "mitmproxy-ca-cert.pem"
-        MOD.LOG_DIR.mkdir(parents=True)
-        MOD.SESSIONS_DIR.mkdir(parents=True)
+        PATHS.SILK_DIR = silk
+        PATHS.LOG_DIR = silk / "logs"
+        PATHS.SESSIONS_DIR = silk / "sessions"
+        PATHS.ARCHIVE_DIR = silk / "archive"
+        PATHS.PROXY_JSON = silk / "proxy.json"
+        PATHS.PROXY_SOCK = silk / "proxy.sock"
+        PATHS.CA_DIR = silk / "ca"
+        PATHS.MITM_CA = self.root / "mitmproxy" / "mitmproxy-ca-cert.pem"
+        PATHS.LOG_DIR.mkdir(parents=True)
+        PATHS.SESSIONS_DIR.mkdir(parents=True)
         os.environ.pop("SILKGATE_LOG_RETAIN_DAYS", None)
 
     def _restore(self):
         for k, v in self._saved.items():
-            setattr(MOD, k, v)
+            setattr(PATHS, k, v)
 
     # -- helpers ---------------------------------------------------------------
 
     def log_file(self, name, age_days=0.0, text="x\n"):
-        p = MOD.LOG_DIR / name
+        p = PATHS.LOG_DIR / name
         p.write_text(text)
         if age_days:
             past = time.time() - age_days * 86400
@@ -173,11 +174,11 @@ class SilkgateTest(unittest.TestCase):
     def proxy_meta(self, pid=None, log=None, events=None, base=8090):
         meta = {"pid": pid or os.getpid(), "base_port": base,
                 "ports": list(range(base, base + MOD.POOL_SIZE)),
-                "log": str(log or (MOD.LOG_DIR / "proxy-live.log")),
-                "sock": str(MOD.PROXY_SOCK)}
+                "log": str(log or (PATHS.LOG_DIR / "proxy-live.log")),
+                "sock": str(PATHS.PROXY_SOCK)}
         if events is not None:
             meta["events"] = str(events)
-        MOD._write_json(MOD.PROXY_JSON, meta)
+        MOD._write_json(PATHS.PROXY_JSON, meta)
         return meta
 
     def write_session(self, name, port=8090):
@@ -188,7 +189,7 @@ class SilkgateTest(unittest.TestCase):
                         {"name": name, "sandbox": "sg-" + name, "port": port})
 
     def log_names(self):
-        return sorted(p.name for p in MOD.LOG_DIR.iterdir())
+        return sorted(p.name for p in PATHS.LOG_DIR.iterdir())
 
     def start_sleeper(self):
         """A live process that is definitely not the proxy. Cleanups run LIFO: kill,
@@ -311,7 +312,7 @@ class CreationSitePruneTest(SilkgateTest):
         n = MOD.LOG_RETAIN_COUNT + 3
         for i in range(n):
             self.log_file(f"proxy-{i:02d}.log", age_days=MOD.LOG_RETAIN_DAYS + 10 + i)
-        return MOD.LOG_DIR / f"proxy-{n - 1:02d}.log"
+        return PATHS.LOG_DIR / f"proxy-{n - 1:02d}.log"
 
     def test_start_proxy_applies_retention(self):
         doomed = self._overfull()
@@ -388,7 +389,7 @@ class CmdProxyTest(SilkgateTest):
         self.assertNotIn("SILKGATE_EGRESS_SESSIONS_DIR", env,
                          "the addon needs exactly one ruleset source")
         rules_file = Path(env["SILKGATE_EGRESS_RULES"])
-        self.assertEqual(rules_file.parent, MOD.LOG_DIR)
+        self.assertEqual(rules_file.parent, PATHS.LOG_DIR)
         self.assertTrue(rules_file.name.startswith("standalone-"))
         self.assertIn(RULE, rules_file.read_text())
 
@@ -421,19 +422,19 @@ class EnsureCaTest(SilkgateTest):
         """CA generation on first run starts no listening mitmdump: a rule-less server on
         a wildcard port would be open while it runs. The fake refuses to run as a server."""
         cert = MOD.ensure_ca()
-        self.assertEqual(cert, MOD.CA_DIR / "egress-ca.pem")
+        self.assertEqual(cert, PATHS.CA_DIR / "egress-ca.pem")
         self.assertEqual(cert.read_text(), "CERT\n")
         argv = json.loads(self.argv_rec.read_text())
         self.assertIn("--no-server", argv)
-        self.assertIn(f"confdir={MOD.MITM_CA.parent}", argv)
+        self.assertIn(f"confdir={PATHS.MITM_CA.parent}", argv)
         self.assertNotIn("--listen-port", argv)
         self.assertNotIn("--listen-host", argv)
-        self.assertFalse((MOD.CA_DIR / "mitmproxy-ca.pem").exists(),
+        self.assertFalse((PATHS.CA_DIR / "mitmproxy-ca.pem").exists(),
                          "the private key must never leave the confdir")
 
     def test_existing_ca_starts_nothing(self):
-        MOD.MITM_CA.parent.mkdir(parents=True)
-        MOD.MITM_CA.write_text("EXISTING\n")
+        PATHS.MITM_CA.parent.mkdir(parents=True)
+        PATHS.MITM_CA.write_text("EXISTING\n")
         cert = MOD.ensure_ca()
         self.assertEqual(cert.read_text(), "EXISTING\n")
         self.assertFalse(self.argv_rec.exists(), "mitmdump ran though the CA exists")
@@ -466,7 +467,7 @@ class AuditMatchTest(SilkgateTest):
 class ReadFromTest(SilkgateTest):
 
     def test_only_whole_lines_advance_the_offset(self):
-        p = MOD.LOG_DIR / "a.log"
+        p = PATHS.LOG_DIR / "a.log"
         p.write_bytes(b"one\ntwo\npart")
         lines, off = LOGS._read_from(p, 0)
         self.assertEqual((lines, off), (["one", "two"], 8))
@@ -477,7 +478,7 @@ class ReadFromTest(SilkgateTest):
         self.assertEqual(lines, ["partial done"])
 
     def test_unreadable_file_reports_none(self):
-        self.assertEqual(LOGS._read_from(MOD.LOG_DIR / "gone.log", 5), (None, 5))
+        self.assertEqual(LOGS._read_from(PATHS.LOG_DIR / "gone.log", 5), (None, 5))
 
 
 # -- logs --audit ------------------------------------------------------------------
@@ -485,7 +486,7 @@ class ReadFromTest(SilkgateTest):
 class LogsAuditTest(SilkgateTest):
 
     def audit_log(self, *recs, name="proxy-live.log"):
-        path = MOD.LOG_DIR / name
+        path = PATHS.LOG_DIR / name
         lines = ["[12:00:00.000] " + (json.dumps(r) if isinstance(r, dict) else r)
                  for r in recs]
         path.write_text("".join(ln + "\n" for ln in lines))
@@ -545,7 +546,7 @@ class LogsAuditTest(SilkgateTest):
         path = self.audit_log({"session": "foo", "decision": "allow", "host": "a"})
         self.proxy_meta(log=path)
         self.write_session("foo")
-        srv = _ControlSock(MOD.PROXY_SOCK)
+        srv = _ControlSock(PATHS.PROXY_SOCK)
         self.addCleanup(srv.close)
         steps = itertools.count()
 
@@ -591,7 +592,7 @@ class CmdLsTest(SilkgateTest):
         self.assertIn("proxy: not running", self.ls_output())
 
     def test_socket_owner_is_reported_alive_over_a_stale_record(self):
-        srv = _ControlSock(MOD.PROXY_SOCK)
+        srv = _ControlSock(PATHS.PROXY_SOCK)
         self.addCleanup(srv.close)
         self.proxy_meta(pid=_dead_pid())                 # record lies; the socket doesn't
         out = self.ls_output()
@@ -600,7 +601,7 @@ class CmdLsTest(SilkgateTest):
                       "the pid shown must be the socket owner's, not the record's")
 
     def test_socket_without_record_is_reported_not_silently_dropped(self):
-        srv = _ControlSock(MOD.PROXY_SOCK)
+        srv = _ControlSock(PATHS.PROXY_SOCK)
         self.addCleanup(srv.close)
         out = self.ls_output()
         self.assertIn("proxy.json", out)

@@ -56,7 +56,9 @@ CLI = REPO / "cli" / "silkgate"
 # The module reads SILKGATE_PROXY_BIND at import; the tests assert the default.
 os.environ.pop("SILKGATE_PROXY_BIND", None)
 
-MOD = clipkg.load("sg_proxy_lifecycle").core
+pkg = clipkg.load("sg_proxy_lifecycle")
+MOD = pkg.core
+PATHS = pkg.paths
 
 RULE = "api.anthropic.com/** GET\n"
 
@@ -383,16 +385,16 @@ class _FakeToolsCase(unittest.TestCase):
         root = Path(self._tmp.name)
         silk = root / "silk"
         silk.mkdir()
-        self._saved = {k: getattr(MOD, k) for k in
+        self._saved = {k: getattr(PATHS, k) for k in
                        ("SILK_DIR", "LOG_DIR", "SESSIONS_DIR", "ARCHIVE_DIR",
                         "PROXY_JSON", "PROXY_SOCK")}
-        MOD.SILK_DIR = silk
-        MOD.LOG_DIR = silk / "logs"
-        MOD.SESSIONS_DIR = silk / "sessions"
-        MOD.ARCHIVE_DIR = silk / "archive"
-        MOD.PROXY_JSON = silk / "proxy.json"
-        MOD.PROXY_SOCK = silk / "proxy.sock"
-        MOD.SESSIONS_DIR.mkdir()
+        PATHS.SILK_DIR = silk
+        PATHS.LOG_DIR = silk / "logs"
+        PATHS.SESSIONS_DIR = silk / "sessions"
+        PATHS.ARCHIVE_DIR = silk / "archive"
+        PATHS.PROXY_JSON = silk / "proxy.json"
+        PATHS.PROXY_SOCK = silk / "proxy.sock"
+        PATHS.SESSIONS_DIR.mkdir()
         # Fake tools first on PATH; env telling them where to record what they saw.
         fakebin = root / "bin"
         fakebin.mkdir()
@@ -412,7 +414,7 @@ class _FakeToolsCase(unittest.TestCase):
 
     def tearDown(self):
         for k, v in self._saved.items():
-            setattr(MOD, k, v)
+            setattr(PATHS, k, v)
         for k, v in self._env.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -428,10 +430,10 @@ class _FakeToolsCase(unittest.TestCase):
         return (self.msb_dir / "log").read_text()
 
     def claim_path(self, port):
-        return MOD.SESSIONS_DIR / ".ports" / str(port)
+        return PATHS.SESSIONS_DIR / ".ports" / str(port)
 
     def write_claim(self, port, name, pid):
-        d = MOD.SESSIONS_DIR / ".ports"
+        d = PATHS.SESSIONS_DIR / ".ports"
         d.mkdir(exist_ok=True)
         (d / str(port)).write_text(json.dumps({"name": name, "pid": pid}))
 
@@ -444,12 +446,12 @@ class _FakeToolsCase(unittest.TestCase):
 
     def proxy_meta(self, pid, base=8090):
         meta = {"pid": pid, "base_port": base, "ports": list(range(base, base + MOD.POOL_SIZE)),
-                "log": str(MOD.LOG_DIR / "proxy.log"), "sock": str(MOD.PROXY_SOCK)}
-        MOD._write_json(MOD.PROXY_JSON, meta)
+                "log": str(PATHS.LOG_DIR / "proxy.log"), "sock": str(PATHS.PROXY_SOCK)}
+        MOD._write_json(PATHS.PROXY_JSON, meta)
         return meta
 
     def start_stub_sock(self):
-        proc = subprocess.Popen([sys.executable, "-c", STUB_SOCK_SRC, str(MOD.PROXY_SOCK)],
+        proc = subprocess.Popen([sys.executable, "-c", STUB_SOCK_SRC, str(PATHS.PROXY_SOCK)],
                                 stdout=subprocess.PIPE, text=True)
         self.addCleanup(self._kill, proc)
         self.assertEqual(proc.stdout.readline().strip(), "ready")
@@ -560,10 +562,10 @@ class _FakeToolsCase(unittest.TestCase):
         """Reset the temp state dir between retry_port_theft attempts: a dead
         attempt can leave a port claim, a session dir or a proxy.json that would
         pin a retry to the very range the thief holds."""
-        shutil.rmtree(MOD.SESSIONS_DIR, ignore_errors=True)
-        MOD.SESSIONS_DIR.mkdir()
-        MOD.PROXY_JSON.unlink(missing_ok=True)
-        MOD.PROXY_SOCK.unlink(missing_ok=True)
+        shutil.rmtree(PATHS.SESSIONS_DIR, ignore_errors=True)
+        PATHS.SESSIONS_DIR.mkdir()
+        PATHS.PROXY_JSON.unlink(missing_ok=True)
+        PATHS.PROXY_SOCK.unlink(missing_ok=True)
 
     def squat(self, port, host="127.0.0.1"):
         """A live foreign listener on `port` — what an orphaned proxy looks like."""
@@ -658,7 +660,7 @@ class LifecycleTest(_FakeToolsCase):
                 _autoreap(started["pid"])
                 self.addCleanup(self._kill_pid, started["pid"])
             self.assertEqual(port, base)
-            self.assertTrue(_ping(MOD.PROXY_SOCK),
+            self.assertTrue(_ping(PATHS.PROXY_SOCK),
                             "picked a port but no proxy is listening for the session")
         self.retry_port_theft(body)
 
@@ -678,7 +680,7 @@ class LifecycleTest(_FakeToolsCase):
         meta = self.proxy_meta(pid=sleeper.pid)
         MOD.stop_proxy(meta)
         self.assertIsNone(sleeper.poll(), "SIGTERM/SIGKILL went to a recycled pid")
-        self.assertFalse(MOD.PROXY_JSON.exists(), "stale proxy.json not cleared")
+        self.assertFalse(PATHS.PROXY_JSON.exists(), "stale proxy.json not cleared")
 
     def test_stop_proxy_kills_the_socket_owner(self):
         """When proxy.json lies about the pid, the socket's owner is the proxy."""
@@ -695,7 +697,7 @@ class LifecycleTest(_FakeToolsCase):
         self.assertIsNotNone(stub.poll(),
                              "the process holding the control socket was not stopped")
         self.assertIsNone(sleeper.poll(), "the pid named by proxy.json was killed instead")
-        self.assertFalse(MOD.PROXY_JSON.exists())
+        self.assertFalse(PATHS.PROXY_JSON.exists())
 
     def test_proxy_alive_reaps_the_zombie_of_its_own_child(self):
         """stop_proxy's grace loop polls proxy_alive on the mitmdump this very process
@@ -737,7 +739,7 @@ class LifecycleTest(_FakeToolsCase):
         self.write_claim(8090, "starting", os.getpid())
         MOD.stop_proxy(meta)
         self.assertIsNone(stub.poll(), "proxy killed under a starting session")
-        self.assertTrue(MOD.PROXY_JSON.exists(), "proxy.json cleared under a starting session")
+        self.assertTrue(PATHS.PROXY_JSON.exists(), "proxy.json cleared under a starting session")
 
     def test_maybe_stop_proxy_leaves_proxy_for_inflight_claim(self):
         stub = self.start_stub_sock()
@@ -753,7 +755,7 @@ class LifecycleTest(_FakeToolsCase):
         MOD._maybe_stop_proxy()
         stub.wait(5)
         self.assertIsNotNone(stub.poll(), "idle proxy left running")
-        self.assertFalse(MOD.PROXY_JSON.exists())
+        self.assertFalse(PATHS.PROXY_JSON.exists())
 
     # -- provisioning and teardown -------------------------------------------------
 
@@ -770,7 +772,7 @@ class LifecycleTest(_FakeToolsCase):
             MOD._provision_session("prov1", "img", port, RULE, ruleset,
                                    [], None, [], {"profiles": [], "command": None})
         self.assertFalse(MOD.session_dir("prov1").exists())
-        self.assertFalse((MOD.SESSIONS_DIR / ".tmp-prov1").exists())
+        self.assertFalse((PATHS.SESSIONS_DIR / ".tmp-prov1").exists())
         self.assertFalse(self.claim_path(port).exists(), "port claim leaked")
         self.assertIn("rm sg-prov1", self.msb_log(),
                       "the half-created sandbox was left behind in msb")
@@ -850,7 +852,7 @@ class LifecycleTest(_FakeToolsCase):
         self._settle(stub)
         self.assertIsNotNone(stub.poll(),
                              "the proxy outlived its last session — the #29 orphan")
-        self.assertFalse(MOD.PROXY_JSON.exists())
+        self.assertFalse(PATHS.PROXY_JSON.exists())
 
     def test_teardown_keeps_proxy_while_other_sessions_remain(self):
         stub = self.start_stub_sock()
@@ -859,7 +861,7 @@ class LifecycleTest(_FakeToolsCase):
         self.write_session("staying", 8091)
         MOD._teardown_session(MOD.read_meta("going"))
         self.assertIsNone(stub.poll(), "proxy stopped while a session still needs it")
-        self.assertTrue(MOD.PROXY_JSON.exists())
+        self.assertTrue(PATHS.PROXY_JSON.exists())
 
     def test_teardown_keeps_proxy_under_inflight_claim(self):
         """`down <last>` racing an `up`: the claim of a session being born must keep
@@ -870,7 +872,7 @@ class LifecycleTest(_FakeToolsCase):
         self.write_claim(8091, "starting", os.getpid())
         MOD._teardown_session(MOD.read_meta("going"))
         self.assertIsNone(stub.poll(), "proxy killed under a starting session")
-        self.assertTrue(MOD.PROXY_JSON.exists())
+        self.assertTrue(PATHS.PROXY_JSON.exists())
 
     def test_concurrent_run_teardowns_leave_no_orphan(self):
         """#29 as observed: four concurrent `run`s finish, `ls` says no sessions, the
@@ -888,7 +890,7 @@ class LifecycleTest(_FakeToolsCase):
         self._settle(stub)
         self.assertIsNotNone(stub.poll(),
                              "no sessions remain yet the proxy is still up — the #29 orphan")
-        self.assertFalse(MOD.PROXY_JSON.exists())
+        self.assertFalse(PATHS.PROXY_JSON.exists())
         self.assertEqual(MOD._live_claims(), [])
 
     def test_concurrent_down_teardowns_stop_the_proxy(self):
@@ -905,7 +907,7 @@ class LifecycleTest(_FakeToolsCase):
         self.run_teardown_race(names, down_style=True)
         self._settle(stub)
         self.assertIsNotNone(stub.poll(), "racing downs all deferred; proxy orphaned")
-        self.assertFalse(MOD.PROXY_JSON.exists())
+        self.assertFalse(PATHS.PROXY_JSON.exists())
 
     def test_provision_failure_stops_proxy_left_without_sessions(self):
         """A first `up` whose provisioning fails must not leave the proxy it caused to
@@ -922,7 +924,7 @@ class LifecycleTest(_FakeToolsCase):
         self._settle(stub)
         self.assertIsNotNone(stub.poll(),
                              "proxy left running with no session and no claim")
-        self.assertFalse(MOD.PROXY_JSON.exists())
+        self.assertFalse(PATHS.PROXY_JSON.exists())
 
     # -- readiness is identity, not liveness (#30) ---------------------------------
 
@@ -969,9 +971,9 @@ class LifecycleTest(_FakeToolsCase):
                              "the squatted port ended up inside the pool")
             self.assertEqual(meta["base_port"], meta["ports"][0],
                              "proxy.json base_port does not match the actual first port")
-            self.assertTrue(MOD.PROXY_JSON.exists())
+            self.assertTrue(PATHS.PROXY_JSON.exists())
             MOD.stop_proxy(meta)
-            self.assertFalse(MOD.PROXY_JSON.exists())
+            self.assertFalse(PATHS.PROXY_JSON.exists())
         self.retry_port_theft(body)
 
     def test_port_free_sees_an_ipv6_only_squatter(self):
@@ -1001,7 +1003,7 @@ class LifecycleTest(_FakeToolsCase):
                       "the scanned extent is not named")
         for p in squatted:
             self.assertIn(str(p), msg, "a blocking port is not named")
-        self.assertFalse(MOD.PROXY_JSON.exists())
+        self.assertFalse(PATHS.PROXY_JSON.exists())
 
     def test_find_free_pool_never_probes_past_65535(self):
         """A scan whose window would cross the top of port space stops at 65535
@@ -1121,7 +1123,7 @@ class LifecycleTest(_FakeToolsCase):
                 with self.assertRaises(OSError, msg=f"pool port reachable via LAN addr {lan}"):
                     socket.create_connection((lan, base), timeout=2).close()
             MOD.stop_proxy(meta)
-            self.assertFalse(MOD.PROXY_JSON.exists())
+            self.assertFalse(PATHS.PROXY_JSON.exists())
         self.retry_port_theft(body)
 
     def test_start_shared_proxy_events_file(self):
