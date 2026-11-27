@@ -2,13 +2,10 @@
 
 Read this to contribute to silkgate as a coding agent.
 
-- The rules of @CONTRIBUTING.md apply to agents in full: setup, code constraints,
-  tests, and commit conventions.
-- Documentation follows the [Documentation style](CONTRIBUTING.md#documentation-style)
-  section of CONTRIBUTING.md. Run its self-check before you commit prose.
-- Run the test suite before and after a change, as CONTRIBUTING.md describes. If your
-  sandbox cannot run it, say so in your report instead of a claim of success.
-- Do not use the assistant's persistent memory for this project unless the user
-  explicitly requires it. Create no memories, and rely on none. The committed tree is
-  the source of truth: README.md, doc/, CONTRIBUTING.md, and git history.
-  Memory rots as parallel sessions advance the repository.
+- @CONTRIBUTING.md applies in full: setup, code, tests, commits, and the
+  [documentation style](CONTRIBUTING.md#documentation-style).
+- Run the suite before and after a change. If your sandbox can't run it, say so instead of
+  reporting success.
+- Don't use persistent memory for this project unless the user asks for it. The committed
+  tree and git history are the source of truth, and memory goes stale as parallel sessions
+  move the repository forward.
