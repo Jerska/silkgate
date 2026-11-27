@@ -57,7 +57,9 @@ import clipkg
 REPO = Path(__file__).resolve().parents[1]
 CLI = REPO / "cli" / "silkgate"
 
-MOD = clipkg.load("sg_ui").core
+pkg = clipkg.load("sg_ui")
+MOD = pkg.core
+UI = pkg.ui_server
 
 
 def event(**kw):
@@ -117,25 +119,22 @@ class UiTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         silk = self.root / "silk"
-        self._saved = {k: getattr(MOD, k) for k in
-                       ("SILK_DIR", "LOG_DIR", "SESSIONS_DIR", "ARCHIVE_DIR",
-                        "PROXY_JSON", "PROXY_SOCK", "UI_DIR")}
-        self.addCleanup(self._restore)
-        MOD.SILK_DIR = silk
-        MOD.LOG_DIR = silk / "logs"
-        MOD.SESSIONS_DIR = silk / "sessions"
-        MOD.ARCHIVE_DIR = silk / "archive"
-        MOD.PROXY_JSON = silk / "proxy.json"
-        MOD.PROXY_SOCK = silk / "proxy.sock"
-        MOD.UI_DIR = self.root / "ui"
+        for module, name, path in ((MOD, "SILK_DIR", silk),
+                                   (MOD, "LOG_DIR", silk / "logs"),
+                                   (MOD, "SESSIONS_DIR", silk / "sessions"),
+                                   (MOD, "ARCHIVE_DIR", silk / "archive"),
+                                   (MOD, "PROXY_JSON", silk / "proxy.json"),
+                                   (MOD, "PROXY_SOCK", silk / "proxy.sock"),
+                                   (UI, "UI_DIR", self.root / "ui")):
+            self.enterContext(mock.patch.object(module, name, path))
         MOD.LOG_DIR.mkdir(parents=True)
         MOD.SESSIONS_DIR.mkdir(parents=True)
-        MOD.UI_DIR.mkdir()
+        UI.UI_DIR.mkdir()
         # The UI server's caches and busy set live once per process. Every test
         # starts them cold so no test reads another's answers.
-        MOD._METRICS_CACHE.update(at=None, payload=None)
-        MOD._OUTPUT_CACHE.clear()
-        MOD._DIFF_BUSY.clear()
+        UI._METRICS_CACHE.update(at=None, payload=None)
+        UI._OUTPUT_CACHE.clear()
+        UI._DIFF_BUSY.clear()
         self.assets = {"index.html": "<!doctype html><title>silkgate</title>\n",
                        "app.js": "export {};\n", "store.js": "export const x = 1;\n",
                        "style.css": "body { }\n",
@@ -145,13 +144,9 @@ class UiTest(unittest.TestCase):
                        "views/session.js": "export {};\n",
                        "views/calls.js": "export {};\n"}
         for name, text in self.assets.items():
-            p = MOD.UI_DIR / name
+            p = UI.UI_DIR / name
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text)
-
-    def _restore(self):
-        for k, v in self._saved.items():
-            setattr(MOD, k, v)
 
     # -- helpers ---------------------------------------------------------------
 
@@ -197,7 +192,7 @@ class UiTest(unittest.TestCase):
 class EventsTailerTest(UiTest):
 
     def test_no_proxy_yields_nothing_and_keeps_waiting(self):
-        t = MOD._EventsTailer()
+        t = UI._EventsTailer()
         self.assertEqual(t.poll(None), [])
         self.assertEqual(t.poll({}), [])
         self.assertEqual(t.poll({"log": "x"}), [])   # a meta without an events file
@@ -206,7 +201,7 @@ class EventsTailerTest(UiTest):
         first = event(id="old")
         p = self.events_file("events-live.jsonl", first)
         meta = {"events": str(p)}
-        t = MOD._EventsTailer()
+        t = UI._EventsTailer()
         self.assertEqual(t.poll(meta), [], "history is /api/events' job, not the stream's")
         line_a, line_b = json.dumps(event(id="a")), json.dumps(event(id="b"))
         with open(p, "a") as fh:
@@ -223,7 +218,7 @@ class EventsTailerTest(UiTest):
         line_a, line_b = json.dumps(event(id="a")), json.dumps(event(id="b"))
         p = MOD.LOG_DIR / "events-live.jsonl"
         p.write_text(line_a + "\n" + line_b + "\n")
-        t = MOD._EventsTailer(f"events-live.jsonl:{len(line_a) + 1}")
+        t = UI._EventsTailer(f"events-live.jsonl:{len(line_a) + 1}")
         out = t.poll({"events": str(p)})
         self.assertEqual([(k, v) for k, v, _ in out], [("record", line_b)],
                          "resume must yield only what follows the cursor")
@@ -231,7 +226,7 @@ class EventsTailerTest(UiTest):
     def test_torn_trailing_line_waits_for_its_newline(self):
         p = self.events_file("events-live.jsonl")
         meta = {"events": str(p)}
-        t = MOD._EventsTailer()
+        t = UI._EventsTailer()
         t.poll(meta)
         line = json.dumps(event(id="a"))
         with open(p, "a") as fh:
@@ -247,7 +242,7 @@ class EventsTailerTest(UiTest):
         line_a = json.dumps(event(id="a"))
         p = self.events_file("events-live.jsonl", event(id="x"), event(id="y"))
         meta = {"events": str(p)}
-        t = MOD._EventsTailer()
+        t = UI._EventsTailer()
         t.poll(meta)                                 # now at EOF of the two-line file
         p.write_text(line_a + "\n")                  # shorter: truncated in place
         out = t.poll(meta)
@@ -256,7 +251,7 @@ class EventsTailerTest(UiTest):
 
     def test_proxy_restart_swaps_the_file_and_adopts_it_from_zero(self):
         old = self.events_file("events-old.jsonl", event(id="x"))
-        t = MOD._EventsTailer()
+        t = UI._EventsTailer()
         t.poll({"events": str(old)})
         line = json.dumps(event(id="fresh"))
         new = MOD.LOG_DIR / "events-new.jsonl"
@@ -268,7 +263,7 @@ class EventsTailerTest(UiTest):
 
     def test_stale_cursor_resets_to_the_live_files_eof(self):
         p = self.events_file("events-live.jsonl", event(id="x"))
-        t = MOD._EventsTailer("events-gone.jsonl:57")
+        t = UI._EventsTailer("events-gone.jsonl:57")
         out = t.poll({"events": str(p)})
         size = p.stat().st_size
         self.assertEqual(out, [("reset", None, f"events-live.jsonl:{size}")],
@@ -279,7 +274,7 @@ class EventsTailerTest(UiTest):
     def test_garbage_line_is_skipped_but_advances_the_cursor(self):
         p = self.events_file("events-live.jsonl")
         meta = {"events": str(p)}
-        t = MOD._EventsTailer()
+        t = UI._EventsTailer()
         t.poll(meta)
         line = json.dumps(event(id="a"))
         with open(p, "a") as fh:
@@ -298,13 +293,13 @@ class EventsHistoryTest(UiTest):
         p = self.events_file("events-01.jsonl", event(id="a"), event(id="b"))
         with open(p, "a") as fh:
             fh.write("mitmdump chatter, not json\n[7]\n")   # a list parses; only dicts pass
-        got = MOD._events_history({}, 100)
+        got = UI._events_history({}, 100)
         self.assertEqual([r["id"] for r in got], ["a", "b", "c"],
                          "filename order is chronological order")
 
     def test_limit_keeps_the_newest(self):
         self.events_file("events-01.jsonl", *(event(id=f"r{i}") for i in range(6)))
-        got = MOD._events_history({}, 2)
+        got = UI._events_history({}, 2)
         self.assertEqual([r["id"] for r in got], ["r4", "r5"])
 
     def test_every_filter(self):
@@ -317,7 +312,7 @@ class EventsHistoryTest(UiTest):
         self.events_file("events-01.jsonl", *recs)
 
         def ids(filters):
-            return [r["id"] for r in MOD._events_history(filters, 100)]
+            return [r["id"] for r in UI._events_history(filters, 100)]
 
         self.assertEqual(ids({"session": "demo"}), ["a"])
         self.assertEqual(ids({"session": "null"}), ["c"],
@@ -339,7 +334,7 @@ class EventsHistoryTest(UiTest):
                          event(id="b", ts="2026-08-04T12:00:00"),      # naive: unusable
                          event(id="c", ts="2026-08-04T12:00:00+00:00"))
         since = datetime.fromisoformat("2026-08-04T00:00:00+00:00")
-        got = MOD._events_history({"since": since}, 100)
+        got = UI._events_history({"since": since}, 100)
         self.assertEqual([r["id"] for r in got], ["c"],
                          "a record that cannot be placed in time fails a time filter")
 
@@ -351,7 +346,7 @@ class UiServerTest(UiTest):
 
     def setUp(self):
         super().setUp()
-        self.server = MOD._ui_server(0)
+        self.server = UI._ui_server(0)
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -481,7 +476,7 @@ class UiHttpTest(UiServerTest):
 
     def test_events_limit_is_capped(self):
         self.events_file("events-01.jsonl", event(id="a"))
-        resp, got = self.get_json(f"/api/events?limit={MOD.UI_EVENTS_LIMIT_MAX * 10}")
+        resp, got = self.get_json(f"/api/events?limit={UI.UI_EVENTS_LIMIT_MAX * 10}")
         self.assertEqual(resp.status, 200)
         self.assertEqual(len(got["events"]), 1)
 
@@ -497,8 +492,8 @@ class UiStreamTest(UiServerTest):
     def setUp(self):
         super().setUp()
         # Real time still passes; only the waits shrink so the suite stays fast.
-        self._patches = [mock.patch.object(MOD, "UI_STREAM_POLL", 0.02),
-                         mock.patch.object(MOD, "UI_STREAM_HEARTBEAT", 0.2)]
+        self._patches = [mock.patch.object(UI, "UI_STREAM_POLL", 0.02),
+                         mock.patch.object(UI, "UI_STREAM_HEARTBEAT", 0.2)]
         for p in self._patches:
             p.start()
             self.addCleanup(p.stop)
@@ -602,8 +597,8 @@ class UiWave2StaticTest(UiServerTest):
             self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
 
     def test_traversal_and_test_files_stay_unserved(self):
-        (MOD.UI_DIR / "store.test.js").write_text("export {};\n")
-        (MOD.UI_DIR / "fixtures.test.js").write_text("export {};\n")
+        (UI.UI_DIR / "store.test.js").write_text("export {};\n")
+        (UI.UI_DIR / "fixtures.test.js").write_text("export {};\n")
         for path in ("/views/../store.js", "/views/../../silk/proxy.json",
                      "/store.test.js", "/fixtures.test.js", "/views/",
                      "/views/nope.js"):
@@ -687,7 +682,7 @@ class UiSessionsListTest(UiServerTest):
                          "newest first")
         self.assertEqual(set(got["archived"][0]), {"sid", "name", "created", "ended"},
                          "reduced rows; /api/session/<sid> has the rest")
-        with mock.patch.object(MOD, "UI_ARCHIVED_LIMIT", 2):
+        with mock.patch.object(UI, "UI_ARCHIVED_LIMIT", 2):
             _, got = self.get_json("/api/sessions")
         self.assertEqual(len(got["archived"]), 2)
         self.assertEqual(got["archived"][0]["sid"], old[-1])
@@ -797,15 +792,15 @@ class UiSessionDetailTest(UiServerTest):
 
     def test_briefs_are_capped_and_marked_truncated(self):
         sdir = self.write_session("s5")
-        (sdir / "brief.md").write_bytes(b"x" * (MOD.UI_BRIEF_MAX_BYTES + 5))
+        (sdir / "brief.md").write_bytes(b"x" * (UI.UI_BRIEF_MAX_BYTES + 5))
         (sdir / "briefs").mkdir()
         (sdir / "briefs" / "cafe1234.md").write_bytes(
-            b"y" * (MOD.UI_BRIEF_MAX_BYTES + 5))
+            b"y" * (UI.UI_BRIEF_MAX_BYTES + 5))
         _, got = self.get_json("/api/session/s5")
         for key in ("default", "cafe1234"):
             self.assertTrue(got["briefs"][key]["truncated"], key)
             self.assertEqual(len(got["briefs"][key]["text"]),
-                             MOD.UI_BRIEF_MAX_BYTES, key)
+                             UI.UI_BRIEF_MAX_BYTES, key)
 
     def test_archived_session_detail_without_workspace_fallback(self):
         sid, adir = self.write_archive("olda", workspace=str(self.root / "ws"))
@@ -873,7 +868,7 @@ class UiOutputTest(UiServerTest):
         self.assertEqual(got["source"], "live")
         self.assertEqual(got["lines"], ["line"])
         self.assertFalse(got["truncated"], "a short tail means msb had no more")
-        self.assertEqual(calls, [("sg-s1", MOD.UI_OUTPUT_TAIL)],
+        self.assertEqual(calls, [("sg-s1", UI.UI_OUTPUT_TAIL)],
                          "two requests inside the TTL cost one msb call")
         self.assertEqual(again, got)
 
@@ -905,7 +900,7 @@ class UiOutputTest(UiServerTest):
 
         with mock.patch.object(MOD, "_run_msb_logs", fake_logs):
             self.get_json("/api/session/s3/output?tail=999999")
-        self.assertEqual(seen, [MOD.UI_OUTPUT_TAIL_MAX])
+        self.assertEqual(seen, [UI.UI_OUTPUT_TAIL_MAX])
 
     def test_unknown_ident_is_404(self):
         resp, _ = self.get_json("/api/session/none/output")
@@ -918,12 +913,12 @@ class UiMetricsTest(UiServerTest):
 
     def test_empty_registry_skips_the_subprocess(self):
         calls = []
-        with mock.patch.object(MOD, "_run_msb_metrics",
+        with mock.patch.object(UI, "_run_msb_metrics",
                                lambda: calls.append(1) or []):
             resp, got = self.get_json("/api/metrics")
         self.assertEqual(resp.status, 200)
         self.assertEqual(got["metrics"], [])
-        self.assertEqual(got["ttl"], MOD.UI_METRICS_TTL)
+        self.assertEqual(got["ttl"], UI.UI_METRICS_TTL)
         self.assertIn("sampled", got)
         self.assertEqual(calls, [], "no live sessions: nothing to ask msb about")
 
@@ -935,7 +930,7 @@ class UiMetricsTest(UiServerTest):
             calls.append(1)
             return [{"name": "sg-s1", "cpu_pct": 12, "mem_mib": 256}]
 
-        with mock.patch.object(MOD, "_run_msb_metrics", fake_metrics):
+        with mock.patch.object(UI, "_run_msb_metrics", fake_metrics):
             _, first = self.get_json("/api/metrics")
             _, second = self.get_json("/api/metrics")
         self.assertEqual(len(calls), 1)
@@ -952,7 +947,7 @@ class UiMetricsTest(UiServerTest):
             calls.append(1)
             return None
 
-        with mock.patch.object(MOD, "_run_msb_metrics", broken):
+        with mock.patch.object(UI, "_run_msb_metrics", broken):
             _, got = self.get_json("/api/metrics")
             self.get_json("/api/metrics")
         self.assertEqual(got["metrics"], [])
@@ -965,7 +960,7 @@ class UiMetricsTest(UiServerTest):
         self.write_session("s1")
         fake = [{"name": "sg-s1", "cpu_percent": 3, "memory_bytes": 880_000_000,
                  "memory_limit_bytes": 512 << 20, "uptime_secs": 60}]
-        with mock.patch.object(MOD, "_run_msb_metrics", lambda: fake):
+        with mock.patch.object(UI, "_run_msb_metrics", lambda: fake):
             _, got = self.get_json("/api/metrics")
         row = got["metrics"][0]
         self.assertEqual(row["memory_rss_bytes"], 880_000_000)
@@ -998,7 +993,7 @@ class UiDiffTest(UiServerTest):
             seen["meta"] = meta
             return " M a.py\n", "diff --git a/a.py b/a.py\n", None
 
-        with mock.patch.object(MOD, "_diff_in_guest", fake_diff):
+        with mock.patch.object(UI, "_diff_in_guest", fake_diff):
             resp, got = self.post_json("/api/session/b1/diff")
         self.assertEqual(resp.status, 200)
         self.assertEqual(got, {"mode": "guest", "status": " M a.py\n",
@@ -1008,7 +1003,7 @@ class UiDiffTest(UiServerTest):
 
     def test_live_checkout_diff_is_guest_mode_too(self):
         self.write_session("c1", checkout="HEAD", base=_BASE, git_dir="/g/.git")
-        with mock.patch.object(MOD, "_diff_in_guest",
+        with mock.patch.object(UI, "_diff_in_guest",
                                lambda meta: ("", "the diff", None)):
             resp, got = self.post_json("/api/session/c1/diff")
         self.assertEqual(resp.status, 200)
@@ -1022,7 +1017,7 @@ class UiDiffTest(UiServerTest):
 
     def test_guest_failure_is_409(self):
         self.branch_session()
-        with mock.patch.object(MOD, "_diff_in_guest",
+        with mock.patch.object(UI, "_diff_in_guest",
                                lambda meta: (None, None, "guest did not answer")):
             resp, got = self.post_json("/api/session/b1/diff")
         self.assertEqual(resp.status, 409)
@@ -1030,20 +1025,20 @@ class UiDiffTest(UiServerTest):
 
     def test_diff_is_capped_and_marked_truncated(self):
         self.branch_session()
-        with mock.patch.object(MOD, "_diff_in_guest",
+        with mock.patch.object(UI, "_diff_in_guest",
                                lambda meta: ("", "d" * 64, None)), \
-                mock.patch.object(MOD, "_DIFF_MAX_BYTES", 16):
+                mock.patch.object(UI, "_DIFF_MAX_BYTES", 16):
             _, got = self.post_json("/api/session/b1/diff")
         self.assertTrue(got["truncated"])
         self.assertEqual(got["diff"], "d" * 16)
 
     def test_busy_session_answers_429(self):
         self.branch_session()
-        MOD._DIFF_BUSY.add("b1")
+        UI._DIFF_BUSY.add("b1")
         try:
             resp, got = self.post_json("/api/session/b1/diff")
         finally:
-            MOD._DIFF_BUSY.discard("b1")
+            UI._DIFF_BUSY.discard("b1")
         self.assertEqual(resp.status, 429)
         self.assertIn("already running", got["error"])
 
@@ -1106,7 +1101,7 @@ class UiDiffTest(UiServerTest):
 
             with mock.patch.object(MOD, "_msb", lambda: "msb"), \
                     mock.patch.object(MOD.subprocess, "run", fake_run):
-                MOD._diff_in_guest(meta)
+                UI._diff_in_guest(meta)
             script = seen["argv"][seen["argv"].index("-c") + 1]
             self.assertIn("git --no-pager status --porcelain", script)
             self.assertIn('git --no-pager diff "$1"', script)
@@ -1245,7 +1240,7 @@ class UiSearchTest(UiServerTest):
     def test_scanned_bytes_ceiling_stops_the_scan(self):
         self.events_file("events-01.jsonl", event(id="a", host="pypi.org"))
         self.events_file("events-02.jsonl", event(id="b", host="pypi.org"))
-        with mock.patch.object(MOD, "UI_SEARCH_MAX_BYTES", 1):
+        with mock.patch.object(UI, "UI_SEARCH_MAX_BYTES", 1):
             _, got = self.get_json("/api/search?q=pypi")
         self.assertEqual(len(got["results"]), 1, "one file read, then the ceiling")
         self.assertTrue(got["truncated"])
@@ -1345,7 +1340,7 @@ class UiControlTest(UiServerTest):
 
     def test_kill_without_a_pidfile_is_409(self):
         self.write_session("k3")
-        with mock.patch.object(MOD, "_kill_in_guest",
+        with mock.patch.object(UI, "_kill_in_guest",
                                lambda meta, eid: ("SILKGATE_NO_PIDFILE", "")):
             resp, got = self.post_json("/api/session/k3/exec/cafe1234/kill")
         self.assertEqual(resp.status, 409)
@@ -1393,7 +1388,7 @@ class ShippedAssetInvariantsTest(unittest.TestCase):
     whatever actually ships."""
 
     def served(self):
-        for key, (name, _) in MOD._UI_ROUTES.items():
+        for key, (name, _) in UI._UI_ROUTES.items():
             path = REPO / "ui" / name
             if path.is_file():
                 yield key, path
@@ -1419,7 +1414,7 @@ class ShippedAssetInvariantsTest(unittest.TestCase):
                     continue                     # not this server's to serve
                 resolved = posixpath.normpath(
                     posixpath.join(posixpath.dirname(key), ref))
-                self.assertIn(resolved, MOD._UI_ROUTES,
+                self.assertIn(resolved, UI._UI_ROUTES,
                               f"{path.name} references {ref!r} ({resolved}), "
                               "which the server does not route")
 
@@ -1432,15 +1427,15 @@ class CmdUiTest(UiTest):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit) as ctx:
-                MOD.cmd_ui(types.SimpleNamespace(port=port))
+                UI.cmd_ui(types.SimpleNamespace(port=port))
         self.assertNotEqual(ctx.exception.code, 0)
         return err.getvalue()
 
     def test_dies_understandably_without_ui_assets(self):
-        (MOD.UI_DIR / "index.html").unlink()
+        (UI.UI_DIR / "index.html").unlink()
         msg = self.cmd_ui(port=0)
         self.assertIn("ui", msg)
-        self.assertIn(str(MOD.UI_DIR), msg)
+        self.assertIn(str(UI.UI_DIR), msg)
 
     def test_dies_naming_the_holder_when_the_port_is_taken(self):
         holder = socket.socket()

@@ -16,7 +16,7 @@ import re
 import signal
 import sys
 
-from . import core, verify
+from . import core, ui_server, verify
 
 
 # The two argument types that reach a generated Dockerfile or an msb argv are checked by
@@ -238,9 +238,9 @@ def main():
     p.set_defaults(fn=core.cmd_logs)
 
     p = sub.add_parser("ui", help="serve the audit UI on 127.0.0.1")
-    p.add_argument("--port", type=int, default=core.DEFAULT_UI_PORT,
-                   help=f"listen port (default: {core.DEFAULT_UI_PORT})")
-    p.set_defaults(fn=core.cmd_ui)
+    p.add_argument("--port", type=int, default=ui_server.DEFAULT_UI_PORT,
+                   help=f"listen port (default: {ui_server.DEFAULT_UI_PORT})")
+    p.set_defaults(fn=ui_server.cmd_ui)
 
     p = sub.add_parser("harvest", help="bring a --branch session's commits back now, "
                                        "without stopping it")
