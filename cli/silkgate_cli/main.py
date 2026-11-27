@@ -16,7 +16,7 @@ import re
 import signal
 import sys
 
-from . import core, ui_server, verify
+from . import core, logs, ui_server, verify
 
 
 # The two argument types that reach a generated Dockerfile or an msb argv are checked by
@@ -235,7 +235,7 @@ def main():
                    help="print this session's allow and deny decisions")
     p.add_argument("--interval", type=float, default=1.0, metavar="SECS",
                    help="poll interval for -f (default: 1.0)")
-    p.set_defaults(fn=core.cmd_logs)
+    p.set_defaults(fn=logs.cmd_logs)
 
     p = sub.add_parser("ui", help="serve the audit UI on 127.0.0.1")
     p.add_argument("--port", type=int, default=ui_server.DEFAULT_UI_PORT,

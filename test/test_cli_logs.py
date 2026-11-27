@@ -45,7 +45,9 @@ CLI = REPO / "cli" / "silkgate"
 os.environ.pop("SILKGATE_PROXY_BIND", None)
 os.environ.pop("SILKGATE_LOG_RETAIN_DAYS", None)
 
-MOD = clipkg.load("sg_cli_logs").core
+pkg = clipkg.load("sg_cli_logs")
+MOD = pkg.core
+LOGS = pkg.logs
 
 RULE = "api.anthropic.com/** GET"
 
@@ -443,22 +445,22 @@ class AuditMatchTest(SilkgateTest):
 
     def test_matches_prefixed_record_for_the_session_only(self):
         line = '[12:00:00.123] {"decision": "allow", "host": "h", "session": "foo"}'
-        self.assertTrue(MOD._audit_match(line, "foo"))
-        self.assertFalse(MOD._audit_match(line, "bar"))
+        self.assertTrue(LOGS._audit_match(line, "foo"))
+        self.assertFalse(LOGS._audit_match(line, "bar"))
 
     def test_matches_records_carrying_new_fields(self):
         """The audit record is growing (a date, a response status, byte counts): the
         reader filters on "session" alone, so unknown fields must never break it."""
         rec = {"date": "2026-08-04", "status": 200, "bytes_in": 512, "bytes_out": 2048,
                "decision": "allow", "host": "h", "path": "/", "session": "foo"}
-        self.assertTrue(MOD._audit_match("[12:00:00.123] " + json.dumps(rec), "foo"))
+        self.assertTrue(LOGS._audit_match("[12:00:00.123] " + json.dumps(rec), "foo"))
 
     def test_rejects_chatter_and_broken_records(self):
         for line in ("[12:00:00.123] client connect",
                      "no braces at all",
                      '[12:00:00.123] {"session": "foo"',       # cut-off JSON
                      ""):
-            self.assertFalse(MOD._audit_match(line, "foo"), repr(line))
+            self.assertFalse(LOGS._audit_match(line, "foo"), repr(line))
 
 
 class ReadFromTest(SilkgateTest):
@@ -466,16 +468,16 @@ class ReadFromTest(SilkgateTest):
     def test_only_whole_lines_advance_the_offset(self):
         p = MOD.LOG_DIR / "a.log"
         p.write_bytes(b"one\ntwo\npart")
-        lines, off = MOD._read_from(p, 0)
+        lines, off = LOGS._read_from(p, 0)
         self.assertEqual((lines, off), (["one", "two"], 8))
-        self.assertEqual(MOD._read_from(p, off), ([], 8),
+        self.assertEqual(LOGS._read_from(p, off), ([], 8),
                          "a half-written trailing line must be left for the next poll")
         p.write_bytes(b"one\ntwo\npartial done\n")
-        lines, _ = MOD._read_from(p, off)
+        lines, _ = LOGS._read_from(p, off)
         self.assertEqual(lines, ["partial done"])
 
     def test_unreadable_file_reports_none(self):
-        self.assertEqual(MOD._read_from(MOD.LOG_DIR / "gone.log", 5), (None, 5))
+        self.assertEqual(LOGS._read_from(MOD.LOG_DIR / "gone.log", 5), (None, 5))
 
 
 # -- logs --audit ------------------------------------------------------------------
@@ -499,7 +501,7 @@ class LogsAuditTest(SilkgateTest):
         self.write_session("foo")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            MOD._logs_audit(_args("foo"))
+            LOGS._logs_audit(_args("foo"))
         lines = out.getvalue().splitlines()
         self.assertEqual(len(lines), 2)
         self.assertTrue(all('"session": "foo"' in ln for ln in lines))
@@ -514,7 +516,7 @@ class LogsAuditTest(SilkgateTest):
         self.write_session("foo")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            MOD._logs_audit(_args("foo", tail=1))
+            LOGS._logs_audit(_args("foo", tail=1))
         self.assertEqual(len(out.getvalue().splitlines()), 1)
         self.assertIn('"host": "c"', out.getvalue())
 
@@ -536,7 +538,7 @@ class LogsAuditTest(SilkgateTest):
         with mock.patch.object(MOD.time, "sleep", guarded_sleep), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit):
-                MOD._logs_audit(_args("foo", follow=True))
+                LOGS._logs_audit(_args("foo", follow=True))
         self.assertIn("shared proxy is gone", err.getvalue())
 
     def test_follow_emits_new_lines_while_the_proxy_answers(self):
@@ -563,7 +565,7 @@ class LogsAuditTest(SilkgateTest):
         with mock.patch.object(MOD.time, "sleep", scripted_sleep), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit):
-                MOD._logs_audit(_args("foo", follow=True))
+                LOGS._logs_audit(_args("foo", follow=True))
         lines = out.getvalue().splitlines()
         self.assertEqual(len(lines), 2, out.getvalue())
         self.assertIn('"host": "a"', lines[0])

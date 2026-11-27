@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import core
+from . import core, logs
 
 
 # --- ui: a local web view over the events files -------------------------------------
@@ -172,7 +172,7 @@ class _EventsTailer:
         if size is not None and size < self._offset:     # truncated in place
             self._offset = 0
             out.append(("reset", None, f"{self._path.name}:0"))
-        lines, new_offset = core._read_from(self._path, self._offset)
+        lines, new_offset = logs._read_from(self._path, self._offset)
         if lines is None:                        # unreadable this pass: try again later
             return out
         pos = self._offset
