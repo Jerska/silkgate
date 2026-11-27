@@ -22,7 +22,8 @@ The README's [Layout](README.md#layout) maps the directories.
 
 ## Tests
 
-**Run the suite before and after your change.**
+**Run the suite before and after your change. A change to comments alone needs only a
+syntax check.**
 
 ```sh
 python3 tests.py                        # everything, sharded, ~15 s
@@ -31,6 +32,9 @@ python3 mitmaddon/rule_engine.py        # rule-engine self-tests
 ./cli/silkgate verify --full            # containment; needs docker and msb (CI runs it)
 ```
 
+- Comments alone: `python3 -m py_compile <file>`, `node --check <file>`, or `sh -n <file>`.
+  A docstring a program reads counts as code: `cli/silkgate`'s module docstring is its
+  `--help`.
 - A new python test file goes in `SHARDS` at the top of `tests.py`. The runner refuses to
   start if discovery and `SHARDS` disagree.
 - A new ui test file (`ui/*.test.js`) needs no entry: the runner globs for them.
