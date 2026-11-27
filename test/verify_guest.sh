@@ -1,53 +1,39 @@
 #!/usr/bin/env bash
 # Tier 1 verification — run as ROOT INSIDE the microsandbox guest (Debian + bash).
 #
-# WHAT A BLOCKED-DIRECTION CHECK HAS TO SHOW HERE
-#
-# Both sides insist on an answer. On the allow side, check 0 requires the proxy's own 403,
-# not a connect. On the deny side, `tcp()` keeps the errno, because "the boundary refused
-# this in 1ms" and "this guest's own stack never emitted a packet" are both rc=1, and only
-# the first proves containment:
+# EVERY VERDICT NEEDS AN ANSWER. On the allow side, check 0 requires the proxy's own 403,
+# not just a connect. On the deny side, `tcp()` keeps the errno: "the boundary refused" and
+# "the guest never sent a packet" are both rc=1, and only the first proves containment.
 #
 #   connected  the handshake completed          -> the check FAILS, egress reached it
 #   refused    ECONNREFUSED / ECONNRESET        -> the boundary answered: containment, PASS
 #   dead       ENETUNREACH / EINVAL / no name   -> the boundary was never asked: SKIP
 #   silent     nothing at all within $T         -> depends on the manner control, below
 #
-# `silent` is the only ambiguous one, so the manner of denial is measured rather than
-# assumed: control 0b connects to TEST-NET-1 (192.0.2.1), an address nothing routes to and
-# nothing can answer from, and whatever the boundary does to it is what "denied" looks like
-# on this platform. Where it refuses, a silent probe is unexplained and SKIPs; where it
-# drops, silence is its answer and passes. Neither reading is baked in.
+# `silent` is ambiguous, so the manner of denial is measured: control 0b connects to
+# TEST-NET-1 (192.0.2.1), which nothing can answer. If the boundary refuses there, a silent
+# probe is unexplained and SKIPs. If it drops, silence is its answer and passes.
 #
-# TOOLS. The `# CHECK n tools:` line opening each check below is the single source of truth
-# for what it needs installed, and `silkgate verify` reads those lines to decide which
-# checks a bare run must produce. The CLI derives the set from this file and never restates
-# it, so the two can't disagree. `tools:none` means bash built-ins plus coreutils and grep,
-# which debian:bookworm-slim has: no `curl`, `dig`, `ip` or `ping`.
+# TOOLS. The `# CHECK n tools:` line opening each check names what it needs installed, and
+# `silkgate verify` reads it to know which checks a bare run must produce. `tools:none`
+# means bash built-ins, coreutils, and grep: no `curl`, `dig`, `ip`, or `ping`.
 #
-# SUBJECTS. A fourth verdict, UNAVAILABLE, is for a check whose subject does not exist on
-# this guest — a v6 probe on a platform with no v6 path has nothing to ask the boundary,
-# which is neither a pass, nor a failure, nor an inability to run something that could have
-# run. It is declared, not improvised: `subject:<capability>` on the CHECK line names the
-# one thing whose absence the check may report, and `silkgate verify` refuses the verdict
-# from any check that declares none, so an output string alone can never widen it. The
-# absence itself must be read from the guest's own tables (/proc/net/ipv6_route,
-# /proc/net/if_inet6, /etc/hosts) and never from a probe's errno alone: `dead` from a probe
-# that could have worked is a broken probe until proven otherwise, and stays a SKIP.
+# SUBJECTS. UNAVAILABLE is for a check whose subject doesn't exist here, like a v6 probe
+# with no v6 path. `subject:<capability>` on the CHECK line declares it, and `verify`
+# refuses UNAVAILABLE from a check that declares none. The absence must come from the
+# guest's tables (/proc/net/ipv6_route, /proc/net/if_inet6, /etc/hosts), never from a
+# probe's errno: a `dead` probe that could have worked stays a SKIP.
 #
-# PORT 53 ALWAYS ANSWERS, from msb's own stub, on TCP and UDP, for every destination
-# including unroutable ones. So on 53 a reply is never egress; the discriminator is
-# byte-identity with the reply from TEST-NET, which can only have been synthesized locally.
-# That also means 53 must never appear in a host-port sweep: it connects on a healthy guest.
+# PORT 53 ALWAYS ANSWERS, from msb's stub, for every destination. So on 53 a reply is never
+# egress: the test is byte-identity with TEST-NET's reply. And 53 never goes in a port
+# sweep, since it connects on a healthy guest.
 #
-# WHAT MUTATES THE GUEST runs last (7 changes routing, 14 changes addressing), restores what
-# it changed, and re-proves control 0 afterwards; if the restore fails, `mech` drops to 0 so
-# nothing downstream can read the damage as containment.
+# CHECKS THAT MUTATE THE GUEST run last (7 changes routing, 14 addressing), restore what
+# they changed, and re-prove control 0. If a restore fails, `mech` drops to 0, so nothing
+# later reads the damage as containment.
 #
-# The last two lines are for the caller: which checks ran (with the skipped and unavailable
-# sets beside them), and the pass/fail totals. A SKIP and an UNAVAILABLE are neither, and
-# `silkgate verify` asserts the set it expected to run — accepting an absent subject only
-# from a check declared able to have one.
+# The last two lines report which checks ran (beside the skipped and unavailable ones) and
+# the pass/fail totals.
 
 export LC_ALL=C   # bash and curl report connect failures through strerror(3) and the checks
                   # below read that text; C keeps it English. It also pins EPOCHREALTIME's
@@ -73,23 +59,18 @@ _us(){ local t=${EPOCHREALTIME:-0}; t=${t/[.,]/}; printf '%s' "${t:-0}"; }
 
 # classify RC TEXT -> one of connected|refused|dead|silent|unknown.
 #
-# The whole deny side of this script turns on this function, so it is a pure function of an
-# exit code and a message: test/test_verify_checks.py lifts it out of this file and feeds it
-# the strings measured in a real guest, which is the only way a discriminator gets tested
-# without a second, deliberately-leaking sandbox. `unknown` is never a pass — an unrecognized
-# failure is a failure to interpret, and the check that got it SKIPs.
+# The deny side turns on this, so it's a pure function of an exit code and a message:
+# test/test_verify_checks.py feeds it strings measured in a real guest. `unknown` is never
+# a pass: the check SKIPs.
 classify(){
   # A completed handshake is decided by the exit code alone and before any text is read: it
   # is the one outcome that means a blocked-direction check FAILS, and no message a future
   # bash might add on a successful connect may be allowed to talk it down into a refusal.
   [ "$1" = 0 ] && { printf connected; return; }
-  # A refusal ANYWHERE in the message wins over a dead end, and that order is deliberate.
-  # bash's /dev/tcp walks every address getaddrinfo returns and only reports failure once it
-  # has exhausted them, printing a line per attempt (verified: a name whose first address was
-  # a refused 172.16.3.140 still connected via its second, and glibc — not /etc/hosts order —
-  # decides which comes first). So the host-by-name sweeps see one message per family, and a
-  # family the guest cannot reach at all is not a channel: what matters is that some address
-  # got a policy answer and none of them connected.
+  # A refusal ANYWHERE in the message beats a dead end. /dev/tcp tries every address
+  # getaddrinfo returns, one line per failure, so a by-name sweep sees one message per
+  # family. An unreachable family isn't a channel: what matters is that some address got a
+  # policy answer and none connected.
   case $2 in
     *"Connection refused"*|*"Connection reset"*) printf refused; return ;;
     *"Network is unreachable"*|*"No route to host"*|*"Host is unreachable"* \
@@ -134,12 +115,9 @@ grade(){
   esac
 }
 
-# sweep port|addr HOST/PORT ... — connect to each in turn, sorting the outcomes into
-# $sw_hit, $sw_ref, $sw_dead, $sw_silent. The first argument is how to name a destination in
-# those lists: a sweep of one host's ports names ports, a sweep of one port across addresses
-# names addresses, and either way the verdict has to name what it actually probed. A sweep
-# that would outrun $T stops and leaves the rest in $sw_left — a truncated sweep reported as
-# a clean one is a list of destinations nobody probed.
+# sweep port|addr HOST/PORT ... — connect to each, sorting outcomes into $sw_hit, $sw_ref,
+# $sw_dead, $sw_silent, named by port or by address. A sweep that would outrun $T stops,
+# and leaves the rest in $sw_left, so a truncated sweep never reads as clean.
 sweep(){
   local how=$1 spec h p tag deadline
   shift
@@ -187,18 +165,13 @@ sweep_verdict(){
 # responder answers — silence that reads exactly like containment.
 dns_query(){ printf '\052\052\001\000\000\001\000\000\000\000\000\000\007example\003com\000\000\001\000\001'; }
 
-# A connect alone proves nothing: microsandbox's guest->host NAT completes the TCP handshake
-# inside the VMM, so /dev/tcp reports success even with no listener on the host at all
-# (observed with the proxy stopped). The control therefore speaks HTTP and requires the
-# proxy's own answer — a request no ruleset allows, so it is refused from the proxy's memory
-# and needs neither an allow-rule nor any upstream egress to succeed.
+# A connect alone proves nothing: msb's NAT completes the handshake inside the VMM, even
+# with no listener on the host. So the control speaks HTTP, and needs the proxy's own
+# refusal of a request no ruleset allows, which needs no allow rule or upstream.
 #
-# Returns 0 for silkgate's own refusal, 2 for some other HTTP 4xx, 1 for anything else. The
-# 4xx alone was not enough: any HTTP server holding the port satisfies it, and a pool-port
-# collision has already surfaced in the field as session-mode 403s inside a verify guest.
-# X-Silkgate: deny is on every refusal this addon issues — it raises the bar from "an HTTP
-# server" to "something claiming to be silkgate", which is all a mark can do. The addon says
-# so itself: a destination could imitate it, so nothing may treat it as proof of identity.
+# Returns 0 for silkgate's refusal, 2 for another HTTP 4xx, 1 otherwise. A bare 4xx isn't
+# enough, since any HTTP server on the port would give one. X-Silkgate: deny raises the bar
+# to "something claiming to be silkgate", which is all a mark can do.
 control(){
   local line status="" mark=""
   exec 3<>"/dev/tcp/$1/$2" || return 1
@@ -221,12 +194,9 @@ SPLICE=$(declare -f control dns_query)
 
 control_rc(){ timeout "$T" bash -c "$SPLICE; control $1 $2" >/dev/null 2>&1; }
 
-# dns_udp_hex HOST / dns_tcp_hex HOST — the bytes HOST:53 answers with, as hex, empty if
-# nothing came back. `read` cannot be used to collect them (it swallows NULs, of which a DNS
-# message is mostly made), so the reply comes back through dd and od. The TCP form asks for
-# exactly 31 bytes: 2 length + 12 header + 17 question is the shortest valid response to
-# this query, so a full read either completes or the probe timed out, and a real resolution
-# differs inside the first 31 bytes (its flags and ANCOUNT cannot match a REFUSED).
+# dns_udp_hex HOST / dns_tcp_hex HOST — HOST:53's reply as hex, or empty. dd and od read it,
+# since `read` drops NULs. TCP reads exactly 31 bytes (2 length, 12 header, 17 question),
+# the shortest valid reply, and a real resolution differs from REFUSED within them.
 dns_udp_hex(){
   local hex
   hex=$(timeout "$T" bash -c "$SPLICE"'
@@ -246,14 +216,11 @@ dns_tcp_hex(){
   hex=${hex# }; printf '%s' "${hex% }"
 }
 
-# udp_reply KIND HOST PORT — exit 0 = something answered within $T. UDP has no handshake, so
-# sending always "succeeds"; only a reply carries information, and read -t bounds the only
-# step that can block. The payloads are requests a real server answers: a DNS query for
-# example.com, an NTP v3 client packet, and a 1200-byte QUIC long header in an unknown
-# version, which RFC 9000 §6.1 obliges a QUIC server to meet with a Version Negotiation
-# packet. Every write on the socket is its own datagram, so the pieces go through one
-# full-block dd — split across two writes they arrive as fragments no real server would
-# answer, and the probe would read as containment on an open network.
+# udp_reply KIND HOST PORT — exit 0 if something answered within $T. A UDP send always
+# "succeeds", so only a reply means anything. The payloads are ones real servers answer: a
+# DNS query, an NTP v3 packet, and a 1200-byte QUIC long header in an unknown version
+# (RFC 9000 §6.1 requires a Version Negotiation reply). Each goes out in one dd write: two
+# writes would be two fragments no server answers, which would look like containment.
 udp_reply(){
   exec 3<>"/dev/udp/$2/$3" || return 1
   case $1 in
@@ -275,17 +242,12 @@ curl_why(){
   printf '%s' "$l"
 }
 
-# Does this guest have a route for the family at all? Silence from a family the guest cannot
-# address is in-guest configuration, which THREAT-MODEL.md excludes from the boundary, so the
-# v6 checks gate on this rather than reading a missing route as containment.
-#
-# And can it source a packet down that route? Scope 00 in /proc/net/if_inet6 is an address
-# connect(2) may pick for a global destination — a ULA prints scope 00 and counts, and erring
-# that way is safe: it can only keep a verdict at SKIP that might have been UNAVAILABLE,
-# never the reverse. A ::/0 route with nothing to source it from cannot emit a packet, and
-# the errno that produces (ENETUNREACH) is byte-identical to a broken probe's; this table is
-# what tells the two apart. Both functions take an alternate path so the tests can hand them
-# another guest's measured tables.
+# Does the guest have a route for the family, and an address to send from? A missing route
+# is guest configuration, outside the boundary, so the v6 checks gate on it instead of
+# reading it as containment. Scope 00 in /proc/net/if_inet6 counts as a source (a ULA too:
+# that errs toward SKIP, never toward UNAVAILABLE). A route with no source address fails
+# with the same ENETUNREACH as a broken probe, and only this table tells them apart. Both
+# functions take an alternate path, so tests can pass another guest's tables.
 has_v6_default(){ grep -qE '^0{32} 00 ' "${1:-/proc/net/ipv6_route}" 2>/dev/null; }
 has_v6_global(){ grep -qE '^[0-9a-f]{32} +[0-9a-f]+ +[0-9a-f]{2} +00 ' "${1:-/proc/net/if_inet6}" 2>/dev/null; }
 
@@ -358,13 +320,9 @@ else
   S 1 "allowed host via proxy (curl not installed — see README 'full check')"
 fi
 
-# CHECK 2 tools:curl — an unlisted host must be refused BY THE PROXY. The refusal may arrive
-# in-band (403 to the request) or as a rejected CONNECT, which the proxy answers 403 before
-# any tunnel exists; curl reports code 000 then and names the 403 on stderr. Reading the
-# number alone cannot tell the proxy's 403 from the destination's — parked and CDN-fronted
-# domains answer 403 routinely, so a ruleset wide enough to let the request through would
-# pass this check while the allowlist was void. Both denial shapes carry X-Silkgate: deny on
-# the wire (verified in-band and on the refused CONNECT), so the header is what is matched.
+# CHECK 2 tools:curl — an unlisted host must be refused BY THE PROXY: a 403 in-band, or a
+# refused CONNECT (curl's code 000, with the 403 on stderr). A bare 403 isn't enough, since
+# parked domains answer 403 too. Both shapes carry X-Silkgate: deny, so that's matched.
 if have curl; then
   said=$(curl -sSv -o /dev/null --max-time $T -w 'code=%{http_code}' -x "$PROXY" https://evil.com 2>&1)
   mark=""; printf '%s\n' "$said" | grep -qi '^< *x-silkgate: *deny' && mark=1
@@ -395,13 +353,11 @@ else
   S 3 "direct TCP egress (control 0 failed: no working /dev/tcp probe)"
 fi
 
-# CHECK 4 tools:dig,getent,python3 — resolution through whatever /etc/resolv.conf names,
-# which in a healthy guest is msb's stub. Test the ANSWER, not the exit code: dig and getent
-# both succeed on NXDOMAIN. This proves the CONFIGURED resolver resolves nothing, which is
-# less than "the guest cannot reach a resolver" — resolv.conf is guest-mutable and the threat
-# model disowns it, and an empty or unreachable one makes the check vacuous rather than true.
-# So the two ways of passing without asking anything are excluded first, and check 12 covers
-# the resolvers the guest picks for itself.
+# CHECK 4 tools:dig,getent,python3 — resolution through /etc/resolv.conf's resolver, msb's
+# stub in a healthy guest. Test the ANSWER: dig and getent both succeed on NXDOMAIN. This
+# only proves the configured resolver resolves nothing, and an empty or unreachable one
+# would make it vacuous, so those cases are excluded first. Check 12 covers resolvers the
+# guest picks itself.
 if ! grep -qE '^[[:space:]]*nameserver[[:space:]]+[^[:space:]]' /etc/resolv.conf 2>/dev/null; then
   S 4 "DNS via the configured resolver: /etc/resolv.conf names no nameserver, so nothing would be asked and a pass would mean nothing"
 elif [ -f /etc/nsswitch.conf ] && ! grep -qE '^[[:space:]]*hosts:.*\bdns\b' /etc/nsswitch.conf; then
@@ -417,20 +373,12 @@ else
   S 4 "DNS (no dig/getent/python3)"
 fi
 
-# CHECK 5 tools:none subject:ipv6 — IPv6 egress, an IP literal so no DNS is involved. bash's
-# /dev/tcp takes a bare IPv6 literal, so this needs no curl and joins the bare run; curl's
-# exit 7 used to cover "refused", "no route" and "no v6 address configured" alike, and only
-# the first is containment. A guest with no v6 path has no subject for this check, and that
-# comes in two shapes, both read from the kernel rather than from the probe: no ::/0 route in
-# /proc/net/ipv6_route (nothing can be addressed), and a ::/0 route with no global-scope
-# source address in /proc/net/if_inet6 — Linux/KVM guests ship with the route and nothing to
-# source it from, and connect(2) then dies inside the guest with the same ENETUNREACH a
-# broken probe shows. So wherever a route exists the probe still runs — a handshake that
-# completes is a FAIL and a refusal is a PASS whatever the address table says — and only a
-# probe that DIED is read against the table: no source address means the death is this
-# guest's own addressing and the check is UNAVAILABLE; with an address it stays a SKIP,
-# because dead from a probe that could have worked is precisely the ambiguity this file
-# refuses to bless.
+# CHECK 5 tools:none subject:ipv6 — IPv6 egress to an IP literal, with bash's /dev/tcp, so
+# it needs no DNS and no curl, and only "refused" counts as containment. With no v6 path,
+# the check has no subject: no ::/0 route, or a route with no source address (Linux/KVM
+# guests have the route and no address). Where a route exists, the probe runs anyway: a
+# connect FAILS, a refusal PASSES. Only a probe that died is read against the address table:
+# no source address makes it UNAVAILABLE, and with one it stays a SKIP.
 if [ "$mech" != 1 ]; then
   S 5 "IPv6 egress (control 0 failed: no working /dev/tcp probe)"
 elif ! has_v6_default; then
@@ -444,11 +392,9 @@ else
   fi
 fi
 
-# CHECK 6 tools:ping — ICMP, with the local positive control it lacked. Any non-zero ping exit
-# used to pass, including `socket: Operation not permitted` and a missing capability: a check
-# that passes when the tool never sent a packet cannot fail. The proxy host answers echo
-# requests (verified by raw socket in a guest), so it is the control — if ICMP does not work
-# to it either, silence from 1.1.1.1 is not evidence and this SKIPs.
+# CHECK 6 tools:ping — ICMP, with a positive control. A ping that never sent a packet
+# (`Operation not permitted`) must not pass. The proxy host answers echo requests, so it's
+# the control: if ICMP fails there too, silence from 1.1.1.1 proves nothing, and this SKIPs.
 if ! have ping; then
   S 6 "ICMP (no ping)"
 else
@@ -462,12 +408,10 @@ else
   fi
 fi
 
-# CHECK 8 tools:none — TCP/53, a general-purpose tunnel if it egresses, and the one port that
-# ANSWERS: msb's stub returns an identical REFUSED for every destination, TEST-NET included,
-# so "a reply arrived" is never "it egressed". It needed dig, so it skipped on exactly the run
-# the README lists first; the query is 31 bytes of printf here instead. The old rc==9 branch
-# passed on the reply its own comment documents as always present having disappeared — which
-# is also what a deleted default route produces, and check 7 used to run just before it.
+# CHECK 8 tools:none — TCP/53, a tunnel if it egresses, and the one port that ANSWERS: msb's
+# stub returns the same REFUSED for every destination, TEST-NET included. So a reply isn't
+# egress: a reply identical to TEST-NET's is the pass. The query is 31 bytes of printf, so
+# it runs in the bare check. A missing reply isn't a pass: a deleted route causes that too.
 if [ "$mech" != 1 ]; then
   S 8 "TCP/53 (control 0 failed: no working /dev/tcp probe)"
 else
@@ -495,13 +439,10 @@ fi
 # datagram to TEST-NET on 53, whose "answer" can only be msb's stub — one exchange proving
 # both that the send/read path works and that port-53 replies are synthesized locally.
 #
-# Read the pass text carefully. A reply that TEST-NET does not mirror is a leak and this can
-# say so; but the usual branch is silence from all three authorities, and nothing IN THE
-# GUEST distinguishes "denied" from "that authority stopped answering" — a send to a denied
-# UDP destination raises no errno, on any of three tries. Three independent authorities make
-# one going quiet less likely; they do not make the branch evidence. Closing it needs the
-# host, which has real egress, to probe the same authorities and force a SKIP when it gets no
-# answer either. Until then this check can catch an answered leak and not a silent one.
+# A reply TEST-NET doesn't mirror is a leak, and this says so. But silence from all three
+# authorities can't be told apart from "they stopped answering" inside the guest: a denied
+# UDP send raises no errno. So this catches an answered leak, not a silent one. Closing
+# that needs the host to probe the same authorities, and SKIP when it gets no answer.
 if udp_reply dns 192.0.2.1 53 2>/dev/null; then
   UTMP="/tmp/verify-udp.$$"
   ( udp_reply quic 1.1.1.1 443 2>/dev/null && : >"$UTMP.quic1" ) &
@@ -543,19 +484,14 @@ else
   S 10 "host ports beside the proxy's (control 0 failed: no working /dev/tcp probe)"
 fi
 
-# CHECK 12 tools:none — UDP/53 to resolvers the GUEST picks. Check 4 asks whatever
-# resolv.conf names, which is msb's stub, and check 8 covers TCP; nothing sent a UDP datagram
-# to a resolver of the guest's own choosing, which is the first exfil channel THREAT-MODEL
-# names. The failure this catches is msb's UDP/53 interception narrowing — a redirect that
-# only matches dst == gateway, a policy DNS passthrough, an operator's allow@host:udp:53 —
-# after which resolv.conf still points at the stub, names still do not resolve, and
-# `<data>.attacker.example` starts leaving with no proxy, no TLS and no audit line.
+# CHECK 12 tools:none — UDP/53 to resolvers the GUEST picks, the first exfil channel the
+# threat model names. Check 4 asks the configured stub, check 8 covers TCP. This catches
+# msb's UDP/53 interception narrowing (a gateway-only redirect, a DNS passthrough, an
+# allow@host:udp:53), after which `<data>.attacker.example` leaves with no audit line.
 #
-# The discriminator is byte-identity with TEST-NET's reply: nothing routes to 192.0.2.1 or
-# 2001:db8::1, so a reply "from" there is definitionally local, and an identical reply from
-# 1.1.1.1 is the same local responder. Silence must NOT pass — a DNS tunnel needs the query
-# to arrive, not the answer to come back — so a resolver that goes quiet while the unroutable
-# mirror answers is a leak candidate and fails.
+# The test is byte-identity with TEST-NET's reply: nothing routes to 192.0.2.1 or
+# 2001:db8::1, so their reply is local, and an identical one from 1.1.1.1 is the same local
+# responder. Silence fails: a tunnel needs only the query to arrive.
 mir4=$(dns_udp_hex 192.0.2.1)
 if [ -z "$mir4" ]; then
   S 12 "UDP/53 to the guest's own choice of resolver: msb's stub did not answer TEST-NET 192.0.2.1:53, so there is no local control and silence would prove nothing"
@@ -586,14 +522,12 @@ else
   fi
 fi
 
-# CHECK 13 tools:none — the host's other listeners, beyond the two ports check 10 samples.
-# What this catches is an allow rule widening from tcp:<port> to the host generally, or a
-# future msb reading allow@host:tcp:N as allow@host. The consequence is not "one more
-# service": the guest reaches msb's own API on the host and asks the supervisor for a sandbox
-# with no --net-* flags at all — Tier 1 escaped by requisitioning an unpoliced guest, no
-# hypervisor bug required. Docker's 2375/2376 and any host loopback dev server are the same
-# class. A denial is instant, so a long list is nearly free; port 53 is excluded because msb's
-# stub always connects there, and the proxy's own port because it is supposed to.
+# CHECK 13 tools:none — the host's other listeners, beyond check 10's two ports. This
+# catches an allow rule widening from tcp:<port> to the whole host. That isn't "one more
+# service": the guest could reach msb's own API and ask for an unpoliced sandbox, escaping
+# Tier 1 with no hypervisor bug. Docker's 2375/2376 and host dev servers are the same class.
+# Denials are instant, so a long list is cheap. Port 53 and the proxy's port are excluded,
+# since both connect.
 if [ "$mech" = 1 ]; then
   ports=""
   # The pool is POOL_SIZE ports starting at a base this guest is not told, so the window
@@ -624,27 +558,19 @@ else
   S 13 "host's other listeners (control 0 failed: no working /dev/tcp probe)"
 fi
 
-# CHECK 15 tools:none — address classes other than one public unicast IP. Check 3 and the
-# always-on probe are the same single target, 1.1.1.1:443. What this catches is a policy
-# engine with a local-network exemption, a common default in this class of software: 1.1.1.1
-# stays denied while private ranges, the host's LAN and 169.254.169.254 — instance
-# credentials on a cloud host — open up. This is the one class where a failed connect is
-# genuinely ambiguous, because an ALLOWED destination with nothing behind it also fails; the
-# errno resolves it, and only a refusal counts. IPv6 link-local is left out on purpose: a
-# scopeless fe80:: literal gives /dev/tcp EINVAL, which is not a boundary answer.
+# CHECK 15 tools:none — address classes beyond one public IP (check 3 and the always-on probe
+# both use 1.1.1.1:443). This catches a local-network exemption: private ranges, the host's
+# LAN, and 169.254.169.254 (cloud credentials) open while 1.1.1.1 stays denied. A failed
+# connect is ambiguous here, since an allowed address with nothing behind it fails too, so
+# only a refusal counts. IPv6 link-local is out: a scopeless fe80:: gives EINVAL.
 if [ "$mech" = 1 ]; then
   classes="10.0.0.1/80 192.168.1.1/443 172.16.0.1/80 100.64.0.1/80 169.254.169.254/80
            169.254.170.2/80 8.8.8.8/443 203.0.113.9/443"
-  # The v6 documentation address joins the sweep only where this guest can source a global
-  # v6 packet at all: on a guest with a ::/0 route and no v6 source address the probe dies
-  # in-guest, lands in $sw_dead, and turned eight real refusals into a SKIP on Linux/KVM. A
-  # destination nothing could ever have probed is not coverage lost, so it is excluded — by
-  # the guest's own tables BEFORE any probe runs, never by an errno afterwards — and the
-  # exclusion is named in the verdict, whichever verdict the sweep earns. This check is NOT
-  # marked unavailable for it: its subject is the v4 classes too, and those eight denials
-  # are assertions a whole-check verdict would throw away. Check 5 still probes v6 wherever
-  # a ::/0 route exists, so a boundary that completes v6 handshakes is still caught even
-  # where this sweep is v4-only.
+  # The v6 address joins the sweep only if the guest can source a global v6 packet: without
+  # one, the probe dies in-guest and would turn the v4 refusals into a SKIP. The guest's
+  # tables decide before any probe, and the verdict names the exclusion. The check isn't
+  # UNAVAILABLE for it, since its v4 denials still count. Check 5 still probes v6 wherever a
+  # ::/0 route exists.
   if has_v6_default && has_v6_global; then
     classes="$classes 2001:db8::1/443"; v6note=""
   else
@@ -658,27 +584,19 @@ else
 fi
 
 echo "== the proxy must answer at every address the alias maps to =="
-# CHECK 11 tools:none subject:ipv6 — real clients pick the proxy address by getaddrinfo
-# order, and /etc/hosts maps the alias to an IPv6 address too, which comes back first. The
-# NAT completes a handshake on either family with nothing listening, so a listener missing a
-# family strands every client that picks it on a dead "connection" that reads like a policy
-# denial, and one family answering says nothing about the other.
+# CHECK 11 tools:none subject:ipv6 — clients pick the proxy address by getaddrinfo order,
+# and the alias's IPv6 address comes first. The NAT completes a handshake on either family
+# with nothing listening, so a listener missing a family strands its clients on what reads
+# like a deny. One family answering says nothing about the other.
 #
-# The v6 half's subject can be absent outright: on Linux/KVM the platform maps the alias to
-# v4 only AND gives the guest no global-scope v6 source address, so no client in this guest
-# could ever pick, or use, a v6 proxy address — there is nothing whose stranding this half
-# would catch, and it is UNAVAILABLE. That is decided from /etc/hosts (already parsed below)
-# and /proc/net/if_inet6, two of the guest's own tables and no errno anywhere, and only
-# after the v4 half answered with the mark. A guest that COULD source v6 while the alias
-# maps none keeps the SKIP: there the missing mapping is the platform withholding a subject
-# this guest could have used, which deserves an alarm, not a waiver.
+# The v6 half is UNAVAILABLE when the alias maps to v4 only AND the guest has no global v6
+# source (Linux/KVM), decided from /etc/hosts and /proc/net/if_inet6 after the v4 half
+# answers. A guest that could source v6 while the alias maps none keeps the SKIP: that
+# deserves an alarm, not a waiver.
 #
-# The address count is therefore the coverage, and it has been seen to vary between runs — so
-# it is reported rather than implied, and a run that ends up with nothing to probe on a family
-# this guest can actually use SKIPs instead of passing. Two parse bugs made that count
-# silently smaller: a final line with no trailing newline is dropped by `while read` (bash
-# returns non-zero on it and the body never runs), and a CR from a CRLF file never equals the
-# alias. Both are handled below.
+# The address count is the coverage, and it varies, so it's reported. A family the guest can
+# use with nothing to probe SKIPs. The parse below keeps a last line without a newline
+# (`while read` drops it) and strips CRs from CRLF files.
 addrs=""
 while IFS= read -r line || [ -n "$line" ]; do
   line=${line//$'\r'/}; line=${line%%#*}; set -- $line
@@ -719,19 +637,14 @@ else
 fi
 
 echo "== root reconfigures the guest — these mutate it, so they run last =="
-# CHECK 7 tools:ip — root routes around the boundary. It must still be blocked, and the check
-# must be able to notice if it is not. As written it discarded both `ip` exit codes, so a
-# differently named NIC, a missing default route or a busybox `ip` left it a second copy of
-# check 3 while its text claimed a root escape had been attempted — and worse, an on-link
-# default with no gateway is WORSE connectivity than the route it replaces, so it degraded the
-# guest and then read the damage as containment, for itself and for every check after it.
-#
-# So: the NIC and gateway come from the kernel rather than being assumed; both `ip` calls are
-# tested AND the kernel is re-read to confirm the route really moved, because an `ip` that
-# exits 0 without doing anything is the same false pass by another route; an off-subnet oracle
-# (TCP/53, which msb answers for any destination) must still work after the change, or the
-# guest broke its own networking and nothing is proven; control 0 must still answer; and the
-# original route is restored either way, with both the kernel and control 0 re-checked.
+# CHECK 7 tools:ip — root re-routes around the boundary, and must still be blocked. The
+# check must also notice when its re-route didn't happen, or when it broke the guest's own
+# networking, which would read as containment for every check after it. So:
+# - the NIC and gateway come from the kernel, never assumed
+# - both `ip` calls are checked, and the kernel re-read, since `ip` can exit 0 doing nothing
+# - an off-subnet oracle (TCP/53, which msb answers anywhere) must still work afterwards
+# - control 0 must still answer
+# - the original route is restored either way, and both re-checked
 #
 # read_default -> $rd_dev, $rd_gw ("0.0.0.0" when the default is on-link), non-zero if there
 # is no default route at all. /proc/net/route stores the gateway as a little-endian hex word.
@@ -807,24 +720,15 @@ else
   case $dv in p) P 7 "$dw" ;; f) F 7 "$dw" ;; *) S 7 "$dw" ;; esac
 fi
 
-# CHECK 14 tools:ip,curl — root re-addresses the guest, which is a different question from
-# re-routing. THREAT-MODEL's key constraint is that root-in-guest can reconfigure eth0, add
-# routes and craft raw frames and every frame still terminates in the host stack; check 7
-# tests only the routes clause. If msb's engine ever matched on the guest's source address —
-# a natural way to write a per-sandbox rule — then `ip addr add` is a total Tier-1 escape, and
-# the guest looks identical from every other angle: the allow rule simply stops applying, and
-# the deny with it. /dev/tcp cannot choose a source address, so this is the one check that
-# needs curl for a reason other than TLS, and it reads curl's own message rather than its exit
-# code, which conflates a refused connect with a certificate it does not trust.
+# CHECK 14 tools:ip,curl — root re-addresses the guest (check 7 re-routes). If msb's engine
+# matched on source address, `ip addr add` would escape Tier 1 entirely. /dev/tcp can't pick
+# a source, so this needs curl, and reads curl's message, not its exit code, which
+# conflates a refusal with an untrusted certificate.
 #
-# The control is the allowed path from the NEW source, and its failure is the answer rather
-# than an inconclusive run: if even the permitted destination stops answering once the source
-# changes, the policy is keyed to something this guest cannot choose and it fails closed,
-# which is exactly the property being tested. Measured on msb 0.5.4, that is what happens —
-# a self-assigned source times out against the proxy itself — so reading it as inconclusive
-# left the check unable to pass at all, and `verify --full` unable to succeed on a healthy
-# host. Only a source that CAN reach the proxy goes on to probe a denied destination. The
-# address is removed either way.
+# The control is the allowed path from the NEW source. If even that stops answering, the
+# policy is keyed to something the guest can't choose: it fails closed, which passes. On
+# msb 0.5.4, a self-assigned source times out against the proxy. Only a source that can
+# reach the proxy goes on to probe a denied destination. The address is removed either way.
 if ! have ip || ! have curl; then
   S 14 "root re-addressing (needs ip and curl — see README 'full check')"
 elif [ "$mech" != 1 ]; then
