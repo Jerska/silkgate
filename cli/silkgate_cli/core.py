@@ -31,10 +31,9 @@ IMAGE_NS = "silkgate"                # generated images: silkgate/<slug>:<hash12
 TIER1_PROBE_TARGET = "1.1.1.1:443"   # must be a live public service: the probe passes only
                                      # when a connect that WOULD succeed is denied (tier1_fault)
 
-from . import console, git, paths
+import rule_engine
 
-sys.path.insert(0, str(paths.REPO / "mitmaddon"))
-from rule_engine import RuleSet, _parse_secret
+from . import console, git, paths
 
 
 # --- profiles ----------------------------------------------------------------
@@ -293,7 +292,7 @@ def compose_rules(profiles, extra_rules=()):
 def load_ruleset(text, where="rules"):
     """Parse up front so bad rules fail here, not inside mitmdump at startup."""
     try:
-        return RuleSet.parse(text)
+        return rule_engine.RuleSet.parse(text)
     except ValueError as e:
         console.die(f"{where}: {e}")
 
@@ -335,7 +334,7 @@ def check_secrets(ruleset):
         value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{n.upper()}")
         if not value:
             reason = "is not set"
-        elif _parse_secret(value) is None:
+        elif rule_engine._parse_secret(value) is None:
             reason = 'is set but not a valid "<Header>: <value>" line'
         else:
             continue
@@ -1037,7 +1036,7 @@ def session_context(profiles, ruleset, *, mounts=(), persistent, branch=None, ch
         ]
         for name in inject_names:
             value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{name.upper()}")
-            parsed = _parse_secret(value) if value else None
+            parsed = rule_engine._parse_secret(value) if value else None
             if parsed is not None:
                 # The guest learns the header's name, never any part of its value.
                 status = f"available. The proxy fills in the `{parsed[0]}` header."
@@ -1703,7 +1702,7 @@ def _push_secrets(ruleset, session):
             console.say(f"warning: SILKGATE_EGRESS_SECRET_{n.upper()} is not set — "
                         f"requests matching inject_auth={n} will be denied")
             continue
-        if _parse_secret(value) is None:
+        if rule_engine._parse_secret(value) is None:
             console.say(f"warning: SILKGATE_EGRESS_SECRET_{n.upper()} is set but not a valid "
                         f'"<Header>: <value>" line — requests matching inject_auth={n} will be '
                         "denied")
@@ -1728,7 +1727,7 @@ def _guest_credential_env(profiles):
             continue
         choices = p.guest_credentials
         value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{name.upper()}")
-        parsed = _parse_secret(value) if value else None
+        parsed = rule_engine._parse_secret(value) if value else None
         header = parsed[0].lower() if parsed else None
         env.append(choices.get(header, next(iter(choices.values()))))
     return env
@@ -3086,7 +3085,7 @@ def cmd_secret_set(args):
     value = os.environ.get(f"SILKGATE_EGRESS_SECRET_{name.upper()}")
     if not value:
         console.die(f'missing secret: SILKGATE_EGRESS_SECRET_{name.upper()}="<header>: <value>"')
-    if _parse_secret(value) is None:
+    if rule_engine._parse_secret(value) is None:
         console.die(f'SILKGATE_EGRESS_SECRET_{name.upper()} is not a valid "<Header>: <value>" '
                     "line — expected a printable-ASCII header name (not a routing header) and a "
                     "non-empty value")

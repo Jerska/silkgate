@@ -61,6 +61,8 @@ MOD = pkg.core
 PATHS = pkg.paths
 CONSOLE = pkg.console
 
+import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
+
 RULE = "api.anthropic.com/** GET\n"
 
 # A stub proxy: owns a unix socket path and answers the control protocol, from its own
@@ -756,7 +758,7 @@ class LifecycleTest(_FakeToolsCase):
         proxy = self.proxy_meta(pid=stub.pid)
         self.msb_cfg({"create_ok": False, "rm_ok": True})
         port = MOD.pick_port(proxy, "prov1")
-        ruleset = MOD.RuleSet.parse(RULE)
+        ruleset = rule_engine.RuleSet.parse(RULE)
         with self.assertRaises(SystemExit):
             MOD._provision_session("prov1", "img", port, RULE, ruleset,
                                    [], None, [], {"profiles": [], "command": None})
@@ -771,7 +773,7 @@ class LifecycleTest(_FakeToolsCase):
         stub = self.start_stub_sock()
         self.proxy_meta(pid=stub.pid)
         self.msb_cfg({"create_ok": True})
-        ruleset = MOD.RuleSet.parse(RULE)
+        ruleset = rule_engine.RuleSet.parse(RULE)
         orig, planted = MOD._write_json, []
 
         def landing_racer(path, obj):
@@ -906,7 +908,7 @@ class LifecycleTest(_FakeToolsCase):
         proxy = self.proxy_meta(pid=stub.pid)
         self.msb_cfg({"create_ok": False, "rm_ok": True})
         port = MOD.pick_port(proxy, "solo")
-        ruleset = MOD.RuleSet.parse(RULE)
+        ruleset = rule_engine.RuleSet.parse(RULE)
         with self.assertRaises(SystemExit):
             MOD._provision_session("solo", "img", port, RULE, ruleset,
                                    [], None, [], {"profiles": [], "command": None})

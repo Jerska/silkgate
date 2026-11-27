@@ -37,6 +37,8 @@ gt = pkg.git
 pt = pkg.paths
 con = pkg.console
 
+import rule_engine  # in mitmaddon/, on sys.path once the package is loaded
+
 for _knob in ("SILKGATE_LOG_RETAIN_DAYS", "SILKGATE_CAPTURE_RETAIN_DAYS",
               "SILKGATE_ARCHIVE_RETAIN_DAYS"):
     os.environ.pop(_knob, None)
@@ -505,7 +507,7 @@ class TestBrief(JournalCase):
             seen["argv"] = argv
             return types.SimpleNamespace(returncode=0)
 
-        ruleset = sg.RuleSet.parse(RULE)
+        ruleset = rule_engine.RuleSet.parse(RULE)
         with mock.patch.object(sg, "_msb", lambda: "msb"), \
                 mock.patch.object(sg.subprocess, "run", fake_run):
             sg._provision_session("br1", "img:1", 8090, RULE, ruleset, [], None, [],
