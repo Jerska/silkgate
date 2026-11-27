@@ -16,4 +16,6 @@ api.anthropic.com/v1/models                      GET   q:*  h:*  inject_auth=ant
 api.anthropic.com/api/claude_code/policy_limits  GET   q:*  h:*  inject_auth=anthropic
 api.anthropic.com/api/claude_code/settings       GET   q:*  h:*  inject_auth=anthropic
 api.anthropic.com/api/web/domain_info            GET   q:*  h:*  inject_auth=anthropic
+# Interactive startup (2.1.330) checks connectivity here, unauthenticated, and refuses to start on a deny.
+api.anthropic.com/api/hello                      GET   q:*  h:*
 platform.claude.com/v1/oauth/**    GET POST  q:*  h:*  max_body=64k  inject_auth=anthropic

@@ -41,7 +41,7 @@ audit-log deny.**
 |---|---|---|
 | Claude Code's endpoints | `profiles/claude/rules.txt` | grep fresh audit logs for denies on `api.anthropic.com` and `platform.claude.com` |
 | `max_body=10m` on the two Anthropic POSTs, `64k` on oauth | `profiles/claude/rules.txt` | grep audit logs for 413s |
-| interactive Claude Code probes `platform.claude.com/v1/oauth/hello` | `profiles/claude/rules.txt` | `attach` a claude session, and diff the hosts it hits |
+| interactive startup probes `api.anthropic.com/api/hello` and `platform.claude.com/v1/oauth/hello`, and refuses to start on a deny | `profiles/claude/rules.txt` | `run --tty --with claude -- claude`: it reaches the theme picker, with no denies |
 | GitHub smart HTTP: `?service=`, protocol v2, 1 MiB negotiation | `profiles/github/rules.txt` | clone and fetch a public repo: no denies, no 413 |
 | `raw.githubusercontent.com`, `codeload.github.com` | `profiles/github/rules.txt` | fetch a raw file and a tarball |
 | LFS hosts (`lfs.github.com`, `github-cloud.*`), and S3's 501 on a second `Authorization` | `profiles/github-{read,write}/rules.txt` | an LFS clone and push on a scratch repo: no denies |
