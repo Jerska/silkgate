@@ -396,11 +396,9 @@ class Enforcement(AddonCase):
     def test_chunked_framing_survives_hygiene(self):
         """A chunked upload keeps its Transfer-Encoding through header hygiene.
 
-        The body of a chunked request is buffered and bounded like any other, but the header
-        is its only framing: hygiene stripping it sends the request upstream with no framing
-        at all — the receiver reads an empty body and the connection dies mid-transfer. That
-        is how a `git push` over http.postBuffer failed against a live proxy, so this pins
-        the baseline, not a rule-specific `h:` opt-in.
+        The header is a chunked body's only framing. Stripped, the receiver reads an empty
+        body and the transfer dies, as a `git push` over http.postBuffer would. So it's in
+        the baseline, not a per-rule `h:`.
         """
         f = self.run_request(host="api.anthropic.com", claimed="api.anthropic.com",
                              method="POST", body=b"prompt",
@@ -657,13 +655,10 @@ class RegistryCase(AddonCase):
 
 # --- the registry under the conditions the CLI actually produces --------------
 class Registry(RegistryCase):
-    """SessionRegistry resolves the accepted listener port — the guest's spoof-proof
-    identity — to a session and its own ruleset. The CLI provisions by staging under a dot
-    prefix and renaming into the registry, so a session's files keep the mtimes staging
-    gave them; names and ports are recycled, and a down/up pair fits inside one filesystem
-    timestamp tick. Timestamps therefore identify nothing, and these tests replay the
-    equal-timestamp cases to pin the property the enforcement path stands on: a request is
-    policed by the ruleset of the session it belongs to *now*, or it is denied."""
+    """SessionRegistry maps the listener port, the guest's identity, to a session and its
+    ruleset. A down/up pair can reuse the name and port within one mtime tick, so
+    timestamps identify nothing. These tests replay equal-timestamp cases: a request gets
+    the ruleset of the session it belongs to now, or is denied."""
 
     def replace_session(self, d, old, new, rules_text, port=8090):
         """Tear `old` down and provision `new` on the same port the way the CLI does —

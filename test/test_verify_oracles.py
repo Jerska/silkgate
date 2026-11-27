@@ -99,12 +99,9 @@ def _squat(case, port):
     case.addCleanup(holder.close)
 
 
-# The CLI's port-collision refusals, by fragment — the predicate that tells a neighbor
-# taking a port between a probe and a bind from a real verdict. Each copies message text
-# from cli/silkgate: _IN_USE from _port_in_use_error (the proxy's own port), _CANNOT_BIND
-# from _oracle_bind and the recorder's bind (the oracle ports). They drift if those
-# messages change, until the queued verify-port-probe task moves them into cli/silkgate
-# as named constants.
+# The CLI's port-collision messages, by fragment: they tell a neighbor taking a port
+# between probe and bind from a real verdict. _IN_USE copies _port_in_use_error's text,
+# _CANNOT_BIND copies _oracle_bind's. Both drift if cli/silkgate's messages change.
 _IN_USE = "is already in use"
 _CANNOT_BIND = "cannot bind the"
 
@@ -120,11 +117,9 @@ def _collided(text):
 def _bind_or_skip(action, span=1, attempts=5, pick=None):
     """Pick a free port with `pick` and run `action(port)`; return (port, result).
 
-    Every pick is probe-then-bind, so a concurrent process on this host can take the port
-    in between: the action then raises OSError (a raw bind) or SystemExit (the CLI's die
-    naming the holder). Either way the port is lost, not the test — retry on a fresh one,
-    and after `attempts` collisions skip naming the last error rather than fail on a host
-    this contended.
+    A concurrent process can take the port between probe and bind, raising OSError or
+    SystemExit. That loses the port, not the test: retry on a fresh one, and after
+    `attempts` collisions, skip with the last error.
     """
     pick = pick or _free_port
     last = None
@@ -1305,11 +1300,9 @@ class VerifyWiring(unittest.TestCase):
     def verify(self, **kwargs):
         """Run cmd_verify; return (everything silkgate said, whether it refused the run).
 
-        A refusal whose text names a port collision is a concurrent process having taken
-        one of this run's three ports between the free-port probe and cmd_verify's bind —
-        the window spans a subprocess spawn — so it is a lost port, not a verdict: re-run
-        on a fresh port (port=None re-scans by itself). Never when the caller pinned an
-        explicit port: a pinned port's collision is the behavior under test.
+        A refusal naming a port collision means another process took one of the three
+        ports: re-run on a fresh port. Never when the caller pinned a port: then the
+        collision is the behavior under test.
         """
         pinned = kwargs.get("port") is not None
         text = None
@@ -1348,12 +1341,9 @@ class VerifyWiring(unittest.TestCase):
     def dead_port(self, *extra_reserved):
         """A port nothing holds — and specifically not one of this run's oracle ports.
 
-        `_free_port(span=3)` reserves the proxy port and the two oracle ports by binding and
-        closing them, so those three numbers are freshly released and are precisely what the
-        kernel offers next. An unguarded ephemeral pick therefore lands on the observer's own
-        port often enough to make a contained run look like a leak — on one platform and not
-        another, which is the worst way for a test to be wrong. A run whose port the scan
-        picks (not self.port) names its own range via `extra_reserved`.
+        `_free_port(span=3)` just released the three run ports, so the kernel offers them
+        next, and an unguarded pick would often hit the observer's port and fake a leak. A
+        run whose port the scan picks names its range via `extra_reserved`.
         """
         reserved = {self.port, self.port + 1, self.port + 2, *extra_reserved}
         for _ in range(50):

@@ -21,11 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # reads mitmproxy internals, so a floating version here would un-verify the container).
 RUN pipx install mitmproxy==12.3.1
 
-# msb is the version the Linux verification in the docs actually used (v0.6.8 — README,
-# "Installing microsandbox"). The installer is asked for it, then the installed binary is
-# interrogated rather than trusted: if the installer ignores the request and fetches
-# something else, the build fails here instead of producing a container whose "verified
-# against 0.6.8" is fiction.
+# msb is the version the docs cite as verified on Linux (README, "Install microsandbox").
+# The installed binary is checked, not trusted: if the installer fetches another version,
+# the build fails here.
 RUN curl -fsSL https://install.microsandbox.dev | sh -s -- --version 0.6.8 \
     && /root/.microsandbox/bin/msb --version | grep -F 0.6.8
 

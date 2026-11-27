@@ -14,11 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # cli/ and mitmaddon/ are stdlib-only by contract (AGENTS.md) and run on hosts, never
-  # in guests — so the interpreters that matter are the ones hosts actually have. 3.12 is
-  # noble's python3, the one interpreter this repo ships (the test/linux container); 3.13
-  # is what current hosts run. Stdlib-only code is exactly where interpreter drift breaks
-  # things, and nothing is installed here, so covering both costs seconds.
+  # cli/ and mitmaddon/ are stdlib-only and run on hosts, so test the hosts' interpreters:
+  # 3.12 (noble's, in the test/linux container) and 3.13 (current hosts).
   stdlib:
     strategy:
       fail-fast: false
@@ -32,20 +29,12 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      # The whole host suite through the sharded runner, the same command a human runs
-      # locally. A list, gated against discovery: the runner exits 2 before any test
-      # starts unless SHARDS covers discovery exactly, so a new test/test_*.py that
-      # nobody named in SHARDS is a loud red here, never a file CI silently skips.
-      # test/test_scripts.py carries the checks that are not unittest files — the
-      # engine's in-module self-tests, the asserting test/repro/ scripts (a per-file
-      # decision, never a glob), and `bash -n` on the guest script — and a syntax error
-      # in cli/silkgate fails the four modules that load it. mitmproxy is deliberately
-      # absent here, so the whole test_addon module records as one skip: the summary
-      # table's skip column must show it on the shard that holds test_addon, and the OK
-      # line must count it. An import error in that module is not a skip — discovery
-      # reports it and the runner exits 2 — and the addon jobs below run those tests for
-      # real. Every shard process runs even after one fails, and each shard runs all of
-      # its tests, so a red run still names all of the broken files at once.
+      # The whole host suite, as a human runs it. The runner exits 2 before any test unless
+      # SHARDS covers discovery exactly, so a new test file can't be silently skipped.
+      # test/test_scripts.py runs the non-unittest checks: the engine's self-tests, the
+      # asserting repro scripts, and `bash -n` on the guest script. mitmproxy is absent
+      # here on purpose, so test_addon records as one skip (the addon jobs below run it).
+      # Every shard runs to the end, so a red run names every broken file at once.
       - name: host suite, addon tests skipping for want of mitmproxy
         run: python3 tests.py
 
@@ -65,14 +54,10 @@ jobs:
       - name: addon enforcement tests
         run: python3 test/test_addon.py
 
-  # Early warning, not a gate: the same suite against whatever `pip install mitmproxy` on
-  # a current interpreter resolves to today, so the pin's eventual bump is scheduled by a
-  # red canary here instead of forced by a security release. Both mitmproxy and python
-  # float on purpose — pinning python would let a future mitmproxy that needs a newer
-  # interpreter quietly resolve to an old release, and the canary would stop canarying.
-  # The pinned jobs above isolate each variable; the resolved version lands in the step
-  # summary so a failure names the release that broke us. continue-on-error keeps a red
-  # from blocking anything.
+  # A canary, not a gate: the addon suite against the latest mitmproxy and python, so a
+  # pin bump is planned, not forced by a security release. Python floats too, or a
+  # mitmproxy needing a newer one would resolve to an old release. The resolved version
+  # goes in the step summary. continue-on-error keeps a red from blocking anything.
   addon-mitmproxy-latest:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

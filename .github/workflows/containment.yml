@@ -1,7 +1,6 @@
 # The claim under test is the repo's central one: a guest's only route to the network is
-# the proxy. `verify --full` boots a real microVM and asserts all seven guest checks ran
-# (cli/silkgate refuses a run where any check skipped), so a green here is the live
-# containment result, not a proxy for it.
+# the proxy. `verify --full` boots a real microVM and asserts every guest check ran (a
+# skipped check fails it), so a green here is the live containment result.
 #
 # Everything runs through test/linux/ — the same container the README documents for Linux
 # hosts — so one workflow also proves that container still builds with its pinned

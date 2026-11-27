@@ -253,12 +253,11 @@ def port_floor(name, slot):
 
         23500 + 4000 * port_shard_index + 500 * slot
 
-    The 500-port lane holds five scan windows for the worst 80-port pool
-    request, and the 4000-port block holds the 8 slot lanes of one port
-    shard. The base is 23500, not the consumer default 23000, so an
-    unsharded `python3 -m unittest` run keeps its own lane below every
-    sharded one. The top floor is 31000, far below the parked verification
-    floors at 41000, 47000, and 53000 and the consumer's 60000 ceiling.
+    A 500-port lane holds five scan windows of the largest (80-port) pool,
+    and a 4000-port block holds one port shard's 8 lanes. The base is 23500,
+    so a plain `python3 -m unittest` run keeps its own lane at 23000. The top
+    floor, 31000, stays below the manual stress loops' floors (41000, 47000,
+    53000) and the 60000 ceiling.
     """
     return 23500 + 4000 * port_shards().index(name) + 500 * slot
 

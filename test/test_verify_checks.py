@@ -354,11 +354,9 @@ class Shortfall(unittest.TestCase):
 class ClassifyDiscriminator(unittest.TestCase):
     """`classify RC TEXT`, lifted out of the guest script and run for real.
 
-    Every blocked-direction check reads its verdict from this function, so the strings below
-    are the ones measured inside a microsandbox guest (msb 0.5.4, arm64, bash 5.2, LC_ALL=C):
-    a policy denial arrives as `Connection refused` in about a millisecond, while a guest
-    whose own stack has nowhere to send the packet gets `Network is unreachable` — and before
-    this function existed both were exit 1 and both scored PASS.
+    Every blocked-direction check reads its verdict here, so the strings below were measured
+    in a real guest (msb 0.5.4, arm64, bash 5.2, LC_ALL=C). A policy denial is `Connection
+    refused` in ~1 ms. A guest with no route gets `Network is unreachable`. Both exit 1.
     """
 
     @classmethod
@@ -527,8 +525,7 @@ class UnavailableComposition(unittest.TestCase):
     broken probe until proven otherwise. Check 11 reads no errno at all: its unavailability
     comes from /etc/hosts and the address table, after the v4 half answered with the mark.
     Check 15 excludes the destination nothing could probe BEFORE probing, names it, and
-    keeps the v4 sweep's verdict rather than surrendering eight denials to a whole-check
-    waiver.
+    keeps the v4 sweep's verdict.
     """
 
     SCORERS = ('P(){ echo "P $1 $2"; }; F(){ echo "F $1 $2"; }; '

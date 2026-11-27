@@ -201,13 +201,10 @@ while True:
     time.sleep(0.1)
 """
 
-# Fake msb: logs every invocation; `rm`/`create` succeed per a JSON config file, and
-# `list` shows whatever sandboxes the config says exist. The *_sleep keys hold one phase
-# open so a signal can land inside it, each phase announcing itself with a marker file:
-# `create`/`rm`/the Tier-1 `exec` sleep with SIGINT ignored (a group-wide Ctrl-C is aimed
-# at what silkgate was doing; how these children die is not the thing under test), while
-# a guest `exec` mimics the real one, whose in-guest command the terminal's Ctrl-C kills
-# — it exits 130, cleanly. `exec_spew` floods stdout instead, for a reader that hangs up.
+# Fake msb: logs every call. `rm` and `create` succeed per a JSON config, and `list` shows
+# the config's sandboxes. Each *_sleep key holds one phase open, announced by a marker file,
+# so a signal can land inside it. `create`, `rm`, and the Tier 1 `exec` ignore SIGINT; a
+# guest `exec` exits 130 on Ctrl-C, like the real one. `exec_spew` floods stdout.
 FAKE_MSB_SRC = r"""
 import json, os, signal, sys, time
 d = os.environ["FAKE_MSB_DIR"]
@@ -301,13 +298,10 @@ _THEFT_ATTEMPTS = 3
 def _port_theft(text):
     """Whether a failure's words carry the port-theft signature — and nothing else.
 
-    _free_pool_base probes bind-then-release, so anything else on this host can bind
-    a probed-free port before the fake mitmdump does. The fake then crashes with
-    EADDRINUSE and the CLI dies, by design, quoting the log tail — or the CLI's own
-    pre-spawn probe meets the thief first and refuses the port outright. Both texts
-    mean host load, not the code under test, and a caller that planted no squatter of
-    its own retries them on a fresh base. Everything else is a real failure: a test
-    that squats a port itself asserts the refusal in place and never comes here."""
+    _free_pool_base probes bind-then-release, so another process can take a probed port
+    first. Then the fake crashes with EADDRINUSE, or the CLI's own probe refuses the port.
+    Both mean host load, so a caller that planted no squatter retries on a fresh base.
+    Anything else is a real failure."""
     if "proxy exited at startup" in text and "address already in use" in text.lower():
         return True
     return re.search(r"port \d+ is already in use", text) is not None
@@ -539,12 +533,9 @@ class _FakeToolsCase(unittest.TestCase):
         self.fail(f"{getattr(fn, '__name__', fn)} died: {text}")
 
     def start_shared_or_theft(self, base, first):
-        """start_shared_proxy via run_or_theft, plus the theft that crashes nothing:
-        a thief binding inside the probed range between the test's probe and the
-        CLI's _find_free_pool walk just shifts the pool past the blocker, and the
-        assertions aimed at `first` fail as plain mismatches. A pool that starts
-        anywhere else is therefore interference: the started proxy is stopped and
-        _PortTheft hands the attempt back to retry_port_theft."""
+        """start_shared_proxy via run_or_theft, plus the theft that crashes nothing: a
+        thief inside the probed range just shifts the pool. So a pool that starts anywhere
+        but `first` is interference: the proxy is stopped, and _PortTheft retries."""
         meta = self.run_or_theft(MOD.start_shared_proxy, base)
         _autoreap(meta["pid"])
         self.addCleanup(self._kill_pid, meta["pid"])
@@ -907,11 +898,9 @@ class LifecycleTest(_FakeToolsCase):
         self.assertEqual(MOD._live_claims(), [])
 
     def test_concurrent_down_teardowns_stop_the_proxy(self):
-        """The shape #29's sketch suspected: racing `down`s each seeing another's meta
-        or claim and all deferring. Metas are removed in some total order and each
-        worker's stop-check runs after its own removal, so the last one out always sees
-        an empty registry — this passes against the pre-fix module too, which is the
-        evidence the sketch was not the mechanism."""
+        """Racing `down`s, each seeing another's meta or claim: none may defer forever.
+        Each worker's stop-check runs after its own removal, so the last one out always
+        sees an empty registry and stops the proxy."""
         stub = self.start_stub_sock()
         _autoreap(stub.pid)
         self.proxy_meta(pid=stub.pid)
@@ -1048,11 +1037,8 @@ class LifecycleTest(_FakeToolsCase):
         self.skipTest(f"ports {base}..65535 busy on every attempt — {died}")
 
     def test_restart_with_surviving_session_never_floats_the_pool(self):
-        """A guest froze its proxy port at provision time — env URL and Tier-1
-        net-rule — so a restart that floats the pool strands it silently, on a port
-        a later squatter can bind and answer. With a session surviving and a squatter
-        on the recorded base, the restart must die naming the squatted port, never
-        walk past it the way a session-free start would."""
+        """A surviving guest's port is fixed, so a restart with a squatter on the recorded
+        base must die naming that port, never move the pool as a session-free start would."""
         base = _free_pool_base(2 * MOD.POOL_SIZE)
         self.proxy_meta(pid=_dead_pid(), base=base)
         self.write_session("kept", base + 2)
@@ -1348,20 +1334,14 @@ class InterruptSideEffectTest(_FakeToolsCase):
 
 
 class InterruptTest(unittest.TestCase):
-    """What each entry point leaves behind when a human stops it, end to end: the real
-    CLI runs as a subprocess in its own process group with HOME pointed at a scratch
-    directory (so ~/.silkgate lives there), fake msb/mitmdump on PATH hold whichever
-    phase the test targets open (see FAKE_MSB_SRC), the signal goes to the whole group
-    — what a terminal's Ctrl-C or a closing session actually does — and the assertions
-    are on what survives: session dirs, port claims, proxy listeners, the exit status,
-    and a stderr free of tracebacks. Proxy death is asserted on its listeners and
-    control socket, never kill -0: the mitmdump child is not ours to reap, and its
-    zombie would answer. The wait for the phase the signal is aimed at watches the CLI
-    as well as the marker (spawn_reaching): a CLI that dies first fails the test at
-    once, its stdout and stderr quoted, instead of surfacing as a bare 20-second
-    timeout — unless the death is a concurrent binder stealing the probed-free base
-    (see _port_theft), which gets a fresh base and a respawn. SILKGATE_CLI points
-    these tests at an older CLI the same way it does the in-process ones."""
+    """What each entry point leaves behind when a human stops it, end to end.
+
+    The real CLI runs in its own process group, with HOME on a scratch dir and fake msb and
+    mitmdump on PATH holding the targeted phase open (FAKE_MSB_SRC). The signal goes to the
+    whole group, as a terminal's Ctrl-C does. Assertions cover what survives: session dirs,
+    port claims, proxy listeners, the exit status, and a traceback-free stderr. Proxy death
+    is checked on its listeners and socket, never kill -0, since its zombie would answer.
+    SILKGATE_CLI points these tests at another CLI, as it does the in-process ones."""
 
     maxDiff = None
 
@@ -1426,13 +1406,9 @@ class InterruptTest(unittest.TestCase):
         self.fail(f"timed out waiting for {what}")
 
     def spawn_reaching(self, argv_fn, predicate, what, preexec_fn=None):
-        """Spawn the CLI and wait for the phase marker the signal is aimed at —
-        watching the CLI itself as well: a wait that polls only the marker reads a
-        CLI that died at startup as a 20-second timeout with no evidence. A death
-        that carries the port-theft signature (see _port_theft; these tests plant
-        no squatters) gets a fresh base and a respawn — argv_fn builds the argv at
-        spawn time, so run_argv and up_argv read the re-probed self.base. Any
-        other death, and a real timeout, fails at once with the evidence."""
+        """Spawn the CLI and wait for the phase marker, watching the CLI too, so an early
+        death fails at once with its output, not as a 20 s timeout. A port-theft death
+        (_port_theft) respawns on a fresh base: argv_fn builds the argv at spawn time."""
         for attempt in range(_THEFT_ATTEMPTS):
             proc = self.spawn(*argv_fn(), preexec_fn=preexec_fn)
             kind, evidence = self._reach(proc, predicate, what)

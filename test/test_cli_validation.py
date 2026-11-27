@@ -228,15 +228,12 @@ class TestImageRef(CliCase):
 
 
 class TestGuestCaEnv(CliCase):
-    """Every TLS stack that reads only SSL_CERT_FILE (uv, anything rustls or Go) failed with
-    UnknownIssuer in the guest until it was set; ARCHITECTURE.md promises all five vars.
+    """The guest image sets all five CA variables: a TLS stack that reads only
+    SSL_CERT_FILE (uv, rustls, Go) fails with UnknownIssuer without it.
 
-    Which file each one names matters as much as that it is set. NODE_EXTRA_CA_CERTS is
-    additive, so it names the CA alone. The rest replace the default roots, so they must name
-    the bundle `update-ca-certificates` regenerates, which holds the distro's roots as well as
-    ours: aimed at the bare CA they produce an image whose every later layer distrusts the real
-    internet, and a profile's setup.sh installs from the real internet, over the host's
-    network, outside the proxy. That combination broke every image build until it was caught.
+    NODE_EXTRA_CA_CERTS adds to the defaults, so it names our CA alone. The rest replace the
+    roots, so they name the regenerated system bundle, with the distro's roots and ours. The
+    bare CA would break every later layer's setup.sh, which downloads outside the proxy.
     """
 
     CERT = "/usr/local/share/ca-certificates/egress.crt"
